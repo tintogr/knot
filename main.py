@@ -9,10 +9,39 @@ from anthropic import Anthropic
 app = FastAPI()
 
 anthropic = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 NOTION_TOKEN   = os.environ["NOTION_TOKEN"]
 NOTION_DB_ID   = os.environ["NOTION_DATABASE_ID"]
-TELEGRAM_API   = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
+WA_TOKEN       = os.environ["WHATSAPP_TOKEN"]
+WA_PHONE_ID    = os.environ["WHATSAPP_PHONE_ID"]
+WA_API         = f"https://graph.facebook.com/v22.0/{WA_PHONE_ID}/messages"
+
+# ── WhatsApp helpers ──────────────────────────────────────────────────────────
+async def send_message(to: str, text: str):
+    async with httpx.AsyncClient() as http:
+        await http.post(WA_API, headers={
+            "Authorization": f"Bearer {WA_TOKEN}",
+            "Content-Type": "application/json"
+        }, json={
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "text",
+            "text": {"body": text}
+        })
+
+async def get_media_base64(media_id: str) -> tuple[str, str]:
+    """Descarga una imagen de WhatsApp y la devuelve en base64."""
+    async with httpx.AsyncClient() as http:
+        # Obtener URL del media
+        r = await http.get(
+            f"https://graph.facebook.com/v22.0/{media_id}",
+            headers={"Authorization": f"Bearer {WA_TOKEN}"}
+        )
+        media_url = r.json()["url"]
+        mime_type = r.json().get("mime_type", "image/jpeg")
+
+        # Descargar el archivo
+        img_r = await http.get(media_url, headers={"Authorization": f"Bearer {WA_TOKEN}"})
+        return base64.b64encode(img_r.content).decode(), mime_type
 
 # ── Tasa de cambio ────────────────────────────────────────────────────────────
 async def get_exchange_rate() -> float:
@@ -27,20 +56,6 @@ async def get_exchange_rate() -> float:
                 return float(r.json()["venta"])
         except Exception:
             return 1000.0
-
-# ── Telegram helpers ──────────────────────────────────────────────────────────
-async def send_message(chat_id: int, text: str):
-    async with httpx.AsyncClient() as http:
-        await http.post(f"{TELEGRAM_API}/sendMessage", json={
-            "chat_id": chat_id, "text": text, "parse_mode": "Markdown"
-        })
-
-async def get_photo_base64(file_id: str) -> tuple[str, str]:
-    async with httpx.AsyncClient() as http:
-        r = await http.get(f"{TELEGRAM_API}/getFile", params={"file_id": file_id})
-        file_path = r.json()["result"]["file_path"]
-        img_r = await http.get(f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}")
-        return base64.b64encode(img_r.content).decode(), "image/jpeg"
 
 # ── Claude: parseo inteligente ─────────────────────────────────────────────────
 SYSTEM_PROMPT = """Sos un asistente que extrae datos financieros de mensajes o imagenes para cargar en Notion.
@@ -57,6 +72,7 @@ Distincion importante entre Servicios y Depto:
 - Depto: maderas, pintura, muebles, herramientas, cortinas — compras fisicas para el departamento
 
 Metodo: usa "Suscription" para gastos recurrentes mensuales (alquiler, expensas, luz, gas, agua, internet, telefono, streaming, gimnasio, psicologo, monotributo, seguros, cualquier servicio que se paga todos los meses). Para todo lo demas usa "Payment".
+
 in_out: exactamente "\u2192INGRESO\u2190" o "\u2190 EGRESO \u2192"
 
 Clientes: LBL, OPERA, ALPATACO, Juan Martin, Depto, Work, Santi Vales,
@@ -72,7 +88,7 @@ Ejemplos de criterio:
 - Salir a comer/restaurant/pizza/sushi -> \U0001f37d
 - Farmacia/medicamento/salud -> \U0001f48a
 - Psicologo/salud mental -> \U0001f9e0
-- Colectivo/uber/taxi/nafta -> \U0001f697
+- Colectivo/uber/taxi -> \U0001f697
 - Ropa/zapatillas/compras -> \U0001f6cd
 - Planta/maceta/tierra -> \U0001f33f
 - Viaje/avion/hotel -> \u2708
@@ -162,9 +178,7 @@ async def create_notion_entry(data: dict, exchange_rate: float) -> tuple[bool, s
     if data.get("notas"):
         props["Notas adicionales"] = {"rich_text": [{"text": {"content": data["notas"]}}]}
 
-    # Emoji: usar el que decidio Claude, o fallback por categoria
     emoji = data.get("emoji") or "\U0001f4b8"
-
     db_id = NOTION_DB_ID.replace("-", "")
 
     async with httpx.AsyncClient() as http:
@@ -185,7 +199,7 @@ async def create_notion_entry(data: dict, exchange_rate: float) -> tuple[bool, s
             return True, ""
         return False, r.text
 
-# ── Formatear respuesta Telegram ──────────────────────────────────────────────
+# ── Formatear respuesta ──────────────────────────────────────────────────────
 def format_reply(data: dict, exchange_rate: float) -> str:
     is_expense = "EGRESO" in data["in_out"]
     entry_emoji = data.get("emoji", "\U0001f4b8")
@@ -209,62 +223,87 @@ def format_reply(data: dict, exchange_rate: float) -> str:
     if extras:
         lines.append(" \u00b7 ".join(extras))
 
-    lines.append("\n\u2705 _Guardado en Notion_")
+    lines.append("\n\u2705 Guardado en Notion")
     return "\n".join(lines)
 
-# ── Webhook ───────────────────────────────────────────────────────────────────
+# ── Webhook WhatsApp ──────────────────────────────────────────────────────────
+@app.get("/webhook")
+async def verify_webhook(request: Request):
+    """Verificación del webhook de Meta."""
+    params = dict(request.query_params)
+    verify_token = os.environ.get("WHATSAPP_VERIFY_TOKEN", "finanzas_bot_token")
+    if params.get("hub.verify_token") == verify_token:
+        return int(params.get("hub.challenge", 0))
+    return {"error": "Verification failed"}
+
 @app.post("/webhook")
 async def webhook(request: Request):
     body = await request.json()
-    message = body.get("message", {})
-    chat_id = message.get("chat", {}).get("id")
-
-    if not chat_id:
-        return {"ok": True}
-
-    text   = message.get("text", "") or message.get("caption", "") or ""
-    photos = message.get("photo")
-
-    if text.startswith("/"):
-        await send_message(chat_id,
-            "\U0001f44b *Bot de finanzas activo*\n\n"
-            "Mand\u00e1me:\n"
-            "\u2022 _\"Verduleria 3500\"_\n"
-            "\u2022 _\"Cargu\u00e9 nafta 40L\"_\n"
-            "\u2022 _\"Sali a comer con Manu, 15000\"_\n"
-            "\u2022 Una foto de factura o ticket\n\n"
-            "Se guarda en Notion con el dolar blue del d\u00eda \U0001f4aa"
-        )
-        return {"ok": True}
-
-    if not text and not photos:
-        return {"ok": True}
-
-    await send_message(chat_id, "\u23f3 _Procesando..._")
 
     try:
-        exchange_rate = await get_exchange_rate()
+        entry = body["entry"][0]
+        changes = entry["changes"][0]["value"]
+        messages = changes.get("messages")
+        if not messages:
+            return {"ok": True}
+
+        message = messages[0]
+        from_number = message["from"]
+        msg_type = message["type"]
+
+        text = ""
         image_b64 = image_type = None
 
-        if photos:
-            file_id = photos[-1]["file_id"]
-            image_b64, image_type = await get_photo_base64(file_id)
+        if msg_type == "text":
+            text = message["text"]["body"]
+        elif msg_type == "image":
+            media_id = message["image"]["id"]
+            caption = message["image"].get("caption", "")
+            text = caption
+            image_b64, image_type = await get_media_base64(media_id)
+        elif msg_type == "document":
+            media_id = message["document"]["id"]
+            caption = message["document"].get("caption", "")
+            text = caption
+            image_b64, image_type = await get_media_base64(media_id)
+        else:
+            return {"ok": True}
 
+        # Comando /start
+        if text.strip().lower() in ["/start", "hola", "help", "ayuda"]:
+            await send_message(from_number,
+                "\U0001f44b *Bot de finanzas activo*\n\n"
+                "Mand\u00e1me:\n"
+                "\u2022 _\"Verduleria 3500\"_\n"
+                "\u2022 _\"Cargu\u00e9 nafta 40L\"_\n"
+                "\u2022 _\"Sali a comer con Manu, 15000\"_\n"
+                "\u2022 Una foto de factura o ticket\n\n"
+                "Se guarda en Notion con el d\u00f3lar blue del d\u00eda \U0001f4aa"
+            )
+            return {"ok": True}
+
+        await send_message(from_number, "\u23f3 Procesando...")
+
+        exchange_rate = await get_exchange_rate()
         parsed = await parse_with_claude(text, image_b64, image_type, exchange_rate)
         success, error_detail = await create_notion_entry(parsed, exchange_rate)
 
         if success:
-            await send_message(chat_id, format_reply(parsed, exchange_rate))
+            await send_message(from_number, format_reply(parsed, exchange_rate))
         else:
-            await send_message(chat_id, f"\u274c Error Notion:\n`{error_detail[:500]}`")
+            await send_message(from_number, f"\u274c Error Notion:\n{error_detail[:300]}")
 
     except json.JSONDecodeError:
-        await send_message(chat_id, "\u274c No pude interpretar el mensaje. \u00bfPod\u00e9s ser m\u00e1s espec\u00edfico?")
+        pass
     except Exception as e:
-        await send_message(chat_id, f"\u274c Error inesperado: {str(e)}")
+        try:
+            if from_number:
+                await send_message(from_number, f"\u274c Error: {str(e)[:200]}")
+        except Exception:
+            pass
 
     return {"ok": True}
 
 @app.get("/")
 async def health():
-    return {"status": "ok", "bot": "finanzas-bot"}
+    return {"status": "ok", "bot": "finanzas-whatsapp"}
