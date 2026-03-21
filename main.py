@@ -249,8 +249,6 @@ async def webhook(request: Request):
 
         message = messages[0]
         from_number = message["from"]
-        if from_number.startswith("549"):
-            from_number = "541" + from_number[3:]
         msg_type = message["type"]
 
         text = ""
