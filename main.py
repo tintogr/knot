@@ -116,7 +116,7 @@ async def parse_with_claude(
     return json.loads(raw)
 
 # ── Notion: crear entrada ──────────────────────────────────────────────────────
-async def create_notion_entry(data: dict, exchange_rate: float) -> bool:
+async def create_notion_entry(data: dict, exchange_rate: float) -> tuple[bool, str]:
     props = {
         "Name": {"title": [{"text": {"content": data["name"]}}]},
         "Income / Outcome": {"select": {"name": data["income_outcome"]}},
@@ -160,7 +160,9 @@ async def create_notion_entry(data: dict, exchange_rate: float) -> bool:
             },
             json={"parent": {"database_id": NOTION_DB_ID}, "properties": props}
         )
-        return r.status_code == 200
+        if r.status_code == 200:
+            return True, ""
+        return False, r.text
 
 # ── Formatear respuesta para Telegram ─────────────────────────────────────────
 def format_reply(data: dict, exchange_rate: float) -> str:
@@ -233,12 +235,12 @@ async def webhook(request: Request):
             image_b64, image_type = await get_photo_base64(file_id)
 
         parsed   = await parse_with_claude(text, image_b64, image_type, exchange_rate)
-        success  = await create_notion_entry(parsed, exchange_rate)
+        success, error_detail  = await create_notion_entry(parsed, exchange_rate)
 
         if success:
             await send_message(chat_id, format_reply(parsed, exchange_rate))
         else:
-            await send_message(chat_id, "❌ Error al guardar en Notion. Revisá los logs.")
+            await send_message(chat_id, f"❌ Error Notion:\n`{error_detail[:500]}`")
 
     except json.JSONDecodeError:
         await send_message(chat_id, "❌ No pude interpretar el mensaje. ¿Podés ser más específico?")
