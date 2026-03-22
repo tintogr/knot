@@ -328,7 +328,94 @@ async def create_evento_gcal(data: dict) -> bool:
         )
         return r.status_code in [200, 201]
 
-def format_evento(data: dict, guardado: bool) -> str:
+async def search_and_edit_evento(text: str) -> tuple[bool, str]:
+    """Busca un evento en Google Calendar y lo edita."""
+    access_token = await get_gcal_access_token()
+    if not access_token:
+        return False, "Calendar no configurado"
+
+    # Claude extrae qué evento editar y qué cambiar
+    now = now_argentina()
+    response = anthropic.messages.create(
+        model="claude-sonnet-4-20250514", max_tokens=300,
+        system="Extraé qué evento se quiere editar y qué se quiere cambiar. Responde SOLO JSON.",
+        messages=[{"role": "user", "content": f"""Hoy: {now.strftime("%Y-%m-%d")}
+Mensaje: {text}
+Respondé:
+{{"search_term": "nombre del evento a buscar","location": "nueva ubicacion o null","new_title": "nuevo titulo o null","new_time": "HH:MM o null","new_date": "YYYY-MM-DD o null","description": "nueva descripcion o null"}}"""}]
+    )
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`").lstrip("json").strip()
+    edit_data = json.loads(raw)
+
+    # Buscar el evento en Google Calendar
+    async with httpx.AsyncClient() as http:
+        # Buscar en los próximos 30 días y últimos 7 días
+        time_min = (now - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00-03:00")
+        time_max = (now + timedelta(days=60)).strftime("%Y-%m-%dT23:59:59-03:00")
+
+        r = await http.get(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={
+                "q": edit_data.get("search_term", ""),
+                "timeMin": time_min,
+                "timeMax": time_max,
+                "singleEvents": "true",
+                "orderBy": "startTime",
+                "maxResults": "5"
+            }
+        )
+
+        if r.status_code != 200:
+            return False, "Error buscando eventos"
+
+        events = r.json().get("items", [])
+        if not events:
+            return False, f"No encontré ningún evento con ese nombre"
+
+        # Tomar el primer resultado
+        event = events[0]
+        event_id = event["id"]
+        event_name = event.get("summary", "Evento")
+
+        # Aplicar cambios
+        if edit_data.get("new_title"):
+            event["summary"] = edit_data["new_title"]
+        if edit_data.get("location"):
+            event["location"] = edit_data["location"]
+        if edit_data.get("description"):
+            event["description"] = edit_data["description"]
+        if edit_data.get("new_date") or edit_data.get("new_time"):
+            # Actualizar fecha/hora si se especifica
+            if "dateTime" in event.get("start", {}):
+                old_dt = event["start"]["dateTime"][:16]  # YYYY-MM-DDTHH:MM
+                old_date = old_dt[:10]
+                old_time = old_dt[11:16]
+                new_date = edit_data.get("new_date") or old_date
+                new_time = edit_data.get("new_time") or old_time
+                event["start"] = {"dateTime": f"{new_date}T{new_time}:00", "timeZone": "America/Argentina/Buenos_Aires"}
+                # Mantener duración original
+                if "dateTime" in event.get("end", {}):
+                    end_dt = datetime.strptime(event["end"]["dateTime"][:16], "%Y-%m-%dT%H:%M")
+                    start_dt = datetime.strptime(f"{new_date}T{new_time}", "%Y-%m-%dT%H:%M")
+                    dur = end_dt - datetime.strptime(old_dt, "%Y-%m-%dT%H:%M")
+                    new_end = start_dt + dur
+                    event["end"] = {"dateTime": new_end.strftime("%Y-%m-%dT%H:%M:00"), "timeZone": "America/Argentina/Buenos_Aires"}
+
+        # Guardar cambios
+        update_r = await http.put(
+            f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}",
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            json=event
+        )
+
+        if update_r.status_code in [200, 201]:
+            location_str = f"\n📍 {edit_data['location']}" if edit_data.get("location") else ""
+            return True, f"✅ *{event_name}* actualizado{location_str}"
+        else:
+            return False, "Error actualizando el evento"
     emoji = data.get("emoji", "\U0001f4c5")
     hora = f" a las {data['time']}" if data.get("time") else ""
     lines = [f"{emoji} *{data['summary']}*", f"Fecha: {data['date']}{hora}"]
@@ -345,10 +432,15 @@ async def classify(text: str, has_image: bool) -> str:
         return "GASTO"
     response = anthropic.messages.create(
         model="claude-sonnet-4-20250514", max_tokens=10,
-        system="Responde SOLO una palabra: GASTO, PLANTA o EVENTO.\nGASTO: pago/compra/ingreso/monto/precio/factura. PLANTA: planta sin mencionar precio. EVENTO: turno/reunion/cumple/cita/fecha.",
+        system="""Responde SOLO una palabra: GASTO, PLANTA, EVENTO o EDITAR_EVENTO.
+GASTO: pago/compra/ingreso/monto/precio/factura.
+PLANTA: planta sin mencionar precio.
+EDITAR_EVENTO: editar/modificar/agregar ubicacion o info a un evento existente que ya existe en el calendario.
+EVENTO: crear un evento nuevo — turno/reunion/cumple/cita/fecha.""",
         messages=[{"role": "user", "content": text}]
     )
     r = response.content[0].text.strip().upper()
+    if "EDITAR_EVENTO" in r: return "EDITAR_EVENTO"
     if "PLANTA" in r: return "PLANTA"
     if "EVENTO" in r: return "EVENTO"
     return "GASTO"
@@ -433,6 +525,10 @@ async def webhook(request: Request):
             parsed = await parse_evento(text)
             guardado = await create_evento_gcal(parsed)
             await send_message(from_number, format_evento(parsed, guardado))
+
+        elif tipo == "EDITAR_EVENTO":
+            success, msg = await search_and_edit_evento(text)
+            await send_message(from_number, msg if success else f"⚠️ {msg}")
 
     except json.JSONDecodeError:
         pass
