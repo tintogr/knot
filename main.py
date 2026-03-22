@@ -768,11 +768,12 @@ async def health_check():
     return {"status": "ok", "time": now_argentina().strftime("%H:%M"), "bot": "matrics"}
 
 # ── MÓDULO SHOPPING ───────────────────────────────────────────────────────────
-NOTION_HEADERS = {
-    "Authorization": f"Bearer {os.environ.get('NOTION_TOKEN', '')}",
-    "Notion-Version": "2022-06-28",
-    "Content-Type": "application/json"
-}
+def notion_headers():
+    return {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Notion-Version": "2022-06-28",
+        "Content-Type": "application/json"
+    }
 
 async def parse_shopping_intent(text: str) -> dict:
     """Claude interpreta el mensaje y devuelve la intención de compras."""
@@ -805,7 +806,7 @@ async def search_shopping_item(name: str) -> list:
     async with httpx.AsyncClient() as http:
         r = await http.post(
             f"https://api.notion.com/v1/databases/{SHOPPING_DB_ID}/query",
-            headers=NOTION_HEADERS,
+            headers=notion_headers(),
             json={
                 "filter": {
                     "property": "Name",
@@ -828,7 +829,7 @@ async def handle_shopping(text: str) -> str:
         async with httpx.AsyncClient() as http:
             r = await http.post(
                 f"https://api.notion.com/v1/databases/{SHOPPING_DB_ID}/query",
-                headers=NOTION_HEADERS,
+                headers=notion_headers(),
                 json={
                     "filter": {"property": "en stock", "checkbox": {"equals": False}},
                     "sorts": [{"property": "tipo", "direction": "ascending"}]
@@ -862,7 +863,7 @@ async def handle_shopping(text: str) -> str:
                 async with httpx.AsyncClient() as http:
                     await http.patch(
                         f"https://api.notion.com/v1/pages/{page_id}",
-                        headers=NOTION_HEADERS,
+                        headers=notion_headers(),
                         json={"properties": {"en stock": {"checkbox": False}}}
                     )
                 results_text.append(f"📋 _{item_name}_ ya estaba en la lista, aparece ahora como faltante")
@@ -879,7 +880,7 @@ async def handle_shopping(text: str) -> str:
                 async with httpx.AsyncClient() as http:
                     r = await http.post(
                         "https://api.notion.com/v1/pages",
-                        headers=NOTION_HEADERS,
+                        headers=notion_headers(),
                         json={"parent": {"database_id": SHOPPING_DB_ID}, "properties": props}
                     )
                 if r.status_code == 200:
@@ -895,7 +896,7 @@ async def handle_shopping(text: str) -> str:
                 async with httpx.AsyncClient() as http:
                     await http.patch(
                         f"https://api.notion.com/v1/pages/{page_id}",
-                        headers=NOTION_HEADERS,
+                        headers=notion_headers(),
                         json={"properties": {"en stock": {"checkbox": in_stock}}}
                     )
                 if in_stock:
@@ -912,7 +913,7 @@ async def handle_shopping(text: str) -> str:
                     async with httpx.AsyncClient() as http:
                         await http.post(
                             "https://api.notion.com/v1/pages",
-                            headers=NOTION_HEADERS,
+                            headers=notion_headers(),
                             json={"parent": {"database_id": SHOPPING_DB_ID}, "properties": props}
                         )
                     results_text.append(f"🛒 _{item_name}_ no estaba en la lista, lo agregué como faltante")
