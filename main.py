@@ -543,11 +543,11 @@ async def webhook(request: Request):
             if success:
                 await send_message(from_number, format_recordatorio(parsed))
             else:
+                await send_message(from_number, f"⚠️ No pude crear el recordatorio: {error[:100]}")
 
         elif tipo == "SHOPPING":
             respuesta = await handle_shopping(text)
             await send_message(from_number, respuesta)
-                await send_message(from_number, f"⚠️ No pude crear el recordatorio: {error[:100]}")
 
     except json.JSONDecodeError:
         pass
