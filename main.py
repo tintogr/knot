@@ -12,6 +12,7 @@ anthropic = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 NOTION_TOKEN   = os.environ["NOTION_TOKEN"]
 NOTION_DB_ID   = os.environ["NOTION_DATABASE_ID"]
 PLANTS_DB_ID   = os.environ.get("NOTION_PLANTS_DB_ID", "39d22615-0106-43f8-9f01-2632734c38da")
+SHOPPING_DB_ID = os.environ.get("NOTION_SHOPPING_DB_ID", "ffe8f76d-beae-4dc3-be57-2d5c6984c84f")
 WA_TOKEN       = os.environ["WHATSAPP_TOKEN"]
 WA_PHONE_ID    = os.environ["WHATSAPP_PHONE_ID"]
 WA_API         = f"https://graph.facebook.com/v22.0/{WA_PHONE_ID}/messages"
@@ -434,16 +435,18 @@ async def classify(text: str, has_image: bool) -> str:
         return "GASTO"
     response = anthropic.messages.create(
         model="claude-sonnet-4-20250514", max_tokens=10,
-        system="""Responde SOLO una palabra: GASTO, PLANTA, EVENTO, EDITAR_EVENTO o RECORDATORIO.
+        system="""Responde SOLO una palabra: GASTO, PLANTA, EVENTO, EDITAR_EVENTO, RECORDATORIO o SHOPPING.
 GASTO: pago/compra/ingreso/monto/precio/factura.
 PLANTA: planta sin mencionar precio.
 EDITAR_EVENTO: editar/modificar/agregar info a un evento que ya existe en el calendario.
 RECORDATORIO: "recordame en X tiempo", "avisame en X", "haceme acordar", "remind me". Son cosas temporales que no van al calendario principal.
-EVENTO: crear un nuevo evento permanente en el calendario — turno/reunion/cumple/cita/viaje.""",
+EVENTO: crear un nuevo evento permanente en el calendario — turno/reunion/cumple/cita/viaje.
+SHOPPING: lista de compras — "me quedé sin X", "compré X", "agregá X a la lista", "qué me falta comprar".""",
         messages=[{"role": "user", "content": text}]
     )
     r = response.content[0].text.strip().upper()
     if "EDITAR_EVENTO" in r: return "EDITAR_EVENTO"
+    if "SHOPPING" in r: return "SHOPPING"
     if "RECORDATORIO" in r: return "RECORDATORIO"
     if "PLANTA" in r: return "PLANTA"
     if "EVENTO" in r: return "EVENTO"
@@ -493,7 +496,7 @@ async def webhook(request: Request):
 
         if text.strip().lower() in ["/start", "hola", "help", "ayuda"]:
             await send_message(from_number,
-                "\U0001f44b *Tu asistente personal*\n\n"
+                "\U0001f44b *Hola! Soy Matrics*\n\n"
                 "\U0001f4b8 *Gastos:* _\"Verduleria 3500\"_\n"
                 "\U0001f33f *Plantas:* _\"Me compre un potus\"_\n"
                 "\U0001f4c5 *Eventos:* _\"Manana a las 10 turno medico\"_\n"
@@ -540,6 +543,10 @@ async def webhook(request: Request):
             if success:
                 await send_message(from_number, format_recordatorio(parsed))
             else:
+
+        elif tipo == "SHOPPING":
+            respuesta = await handle_shopping(text)
+            await send_message(from_number, respuesta)
                 await send_message(from_number, f"⚠️ No pude crear el recordatorio: {error[:100]}")
 
     except json.JSONDecodeError:
@@ -554,7 +561,7 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def health():
-    return {"status": "ok", "bot": "asistente-personal"}
+    return {"status": "ok", "bot": "matrics"}
 
 # ── MÓDULO RECORDATORIOS ──────────────────────────────────────────────────────
 # Usamos Google Calendar como backend:
@@ -758,4 +765,158 @@ async def send_daily_summary(http, access_token: str, now: datetime):
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "time": now_argentina().strftime("%H:%M"), "bot": "asistente-personal"}
+    return {"status": "ok", "time": now_argentina().strftime("%H:%M"), "bot": "matrics"}
+
+# ── MÓDULO SHOPPING ───────────────────────────────────────────────────────────
+NOTION_HEADERS = {
+    "Authorization": f"Bearer {os.environ.get('NOTION_TOKEN', '')}",
+    "Notion-Version": "2022-06-28",
+    "Content-Type": "application/json"
+}
+
+async def parse_shopping_intent(text: str) -> dict:
+    """Claude interpreta el mensaje y devuelve la intención de compras."""
+    response = anthropic.messages.create(
+        model="claude-sonnet-4-20250514", max_tokens=300,
+        system="Analizá mensajes sobre lista de compras. Responde SOLO JSON válido sin markdown.",
+        messages=[{"role": "user", "content": f"""Mensaje: {text}
+
+Respondé con este JSON:
+{{
+  "action": "out_of_stock" | "in_stock" | "add" | "list",
+  "items": ["item1", "item2"],
+  "frequency": "Habitual" | "Monthly" | "One-time" | null,
+  "store": "Supermercado" | "Verdulería" | "Farmacia" | null
+}}
+
+Reglas:
+- "out_of_stock": "me quedé sin X", "no tengo X", "se acabó X" → destildar en stock
+- "in_stock": "compré X", "ya tengo X", "conseguí X" → tildar en stock
+- "add": "agregá X", "necesito comprar X", "añadí X" → crear ítem nuevo si no existe
+- "list": "qué me falta", "qué tengo que comprar", "mostrame la lista" → listar items sin stock"""}]
+    )
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`").lstrip("json").strip()
+    return json.loads(raw)
+
+async def search_shopping_item(name: str) -> list:
+    """Busca un ítem en la base de Shopping por nombre."""
+    async with httpx.AsyncClient() as http:
+        r = await http.post(
+            f"https://api.notion.com/v1/databases/{SHOPPING_DB_ID}/query",
+            headers=NOTION_HEADERS,
+            json={
+                "filter": {
+                    "property": "Name",
+                    "title": {"contains": name[:30]}
+                }
+            }
+        )
+        if r.status_code == 200:
+            return r.json().get("results", [])
+        return []
+
+async def handle_shopping(text: str) -> str:
+    """Procesa un mensaje de shopping y devuelve la respuesta."""
+    intent = await parse_shopping_intent(text)
+    action = intent.get("action")
+    items = intent.get("items", [])
+
+    if action == "list":
+        # Listar items sin stock
+        async with httpx.AsyncClient() as http:
+            r = await http.post(
+                f"https://api.notion.com/v1/databases/{SHOPPING_DB_ID}/query",
+                headers=NOTION_HEADERS,
+                json={
+                    "filter": {"property": "en stock", "checkbox": {"equals": False}},
+                    "sorts": [{"property": "tipo", "direction": "ascending"}]
+                }
+            )
+            if r.status_code != 200:
+                return "❌ No pude leer la lista de compras"
+            results = r.json().get("results", [])
+            if not results:
+                return "✅ ¡No te falta nada! La lista está vacía."
+            lines = ["🛒 *Tu lista de compras:*\n"]
+            for item in results:
+                name = item["properties"]["Name"]["title"][0]["plain_text"] if item["properties"]["Name"]["title"] else "?"
+                tipo = item["properties"].get("tipo", {}).get("select", {})
+                tipo_str = f" _{tipo.get('name', '')}_" if tipo else ""
+                lines.append(f"• {name}{tipo_str}")
+            return "\n".join(lines)
+
+    if not items:
+        return "❓ No entendí qué producto querés actualizar."
+
+    results_text = []
+
+    for item_name in items:
+        if action == "add":
+            # Buscar si ya existe
+            existing = await search_shopping_item(item_name)
+            if existing:
+                page_id = existing[0]["id"]
+                # Ya existe, solo destildarlo
+                async with httpx.AsyncClient() as http:
+                    await http.patch(
+                        f"https://api.notion.com/v1/pages/{page_id}",
+                        headers=NOTION_HEADERS,
+                        json={"properties": {"en stock": {"checkbox": False}}}
+                    )
+                results_text.append(f"📋 _{item_name}_ ya estaba en la lista, aparece ahora como faltante")
+            else:
+                # Crear nuevo
+                props = {
+                    "Name": {"title": [{"text": {"content": item_name}}]},
+                    "en stock": {"checkbox": False}
+                }
+                if intent.get("frequency"):
+                    props["Frequency"] = {"select": {"name": intent["frequency"]}}
+                if intent.get("store"):
+                    props["Store"] = {"multi_select": [{"name": intent["store"]}]}
+                async with httpx.AsyncClient() as http:
+                    r = await http.post(
+                        "https://api.notion.com/v1/pages",
+                        headers=NOTION_HEADERS,
+                        json={"parent": {"database_id": SHOPPING_DB_ID}, "properties": props}
+                    )
+                if r.status_code == 200:
+                    results_text.append(f"✅ _{item_name}_ agregado a la lista")
+                else:
+                    results_text.append(f"❌ Error agregando _{item_name}_")
+
+        elif action in ["out_of_stock", "in_stock"]:
+            in_stock = action == "in_stock"
+            existing = await search_shopping_item(item_name)
+            if existing:
+                page_id = existing[0]["id"]
+                async with httpx.AsyncClient() as http:
+                    await http.patch(
+                        f"https://api.notion.com/v1/pages/{page_id}",
+                        headers=NOTION_HEADERS,
+                        json={"properties": {"en stock": {"checkbox": in_stock}}}
+                    )
+                if in_stock:
+                    results_text.append(f"✅ _{item_name}_ marcado como en stock")
+                else:
+                    results_text.append(f"🛒 _{item_name}_ agregado a la lista de compras")
+            else:
+                if not in_stock:
+                    # No existe, crearlo como faltante
+                    props = {
+                        "Name": {"title": [{"text": {"content": item_name}}]},
+                        "en stock": {"checkbox": False}
+                    }
+                    async with httpx.AsyncClient() as http:
+                        await http.post(
+                            "https://api.notion.com/v1/pages",
+                            headers=NOTION_HEADERS,
+                            json={"parent": {"database_id": SHOPPING_DB_ID}, "properties": props}
+                        )
+                    results_text.append(f"🛒 _{item_name}_ no estaba en la lista, lo agregué como faltante")
+                else:
+                    results_text.append(f"❓ _{item_name}_ no está en la lista")
+
+    return "\n".join(results_text) + "\n\n📋 Lista actualizada en Notion"
