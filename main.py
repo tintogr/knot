@@ -15,6 +15,8 @@ PLANTS_DB_ID   = os.environ.get("NOTION_PLANTS_DB_ID", "39d22615-0106-43f8-9f01-
 WA_TOKEN       = os.environ["WHATSAPP_TOKEN"]
 WA_PHONE_ID    = os.environ["WHATSAPP_PHONE_ID"]
 WA_API         = f"https://graph.facebook.com/v22.0/{WA_PHONE_ID}/messages"
+MY_NUMBER      = os.environ.get("MY_WA_NUMBER", "54298154894334")
+DAILY_SUMMARY_HOUR = int(os.environ.get("DAILY_SUMMARY_HOUR", "8"))  # hora del resumen diario
 
 def now_argentina() -> datetime:
     """Hora actual en Argentina (UTC-3)."""
@@ -432,15 +434,17 @@ async def classify(text: str, has_image: bool) -> str:
         return "GASTO"
     response = anthropic.messages.create(
         model="claude-sonnet-4-20250514", max_tokens=10,
-        system="""Responde SOLO una palabra: GASTO, PLANTA, EVENTO o EDITAR_EVENTO.
+        system="""Responde SOLO una palabra: GASTO, PLANTA, EVENTO, EDITAR_EVENTO o RECORDATORIO.
 GASTO: pago/compra/ingreso/monto/precio/factura.
 PLANTA: planta sin mencionar precio.
-EDITAR_EVENTO: editar/modificar/agregar ubicacion o info a un evento existente que ya existe en el calendario.
-EVENTO: crear un evento nuevo — turno/reunion/cumple/cita/fecha.""",
+EDITAR_EVENTO: editar/modificar/agregar info a un evento que ya existe en el calendario.
+RECORDATORIO: "recordame en X tiempo", "avisame en X", "haceme acordar", "remind me". Son cosas temporales que no van al calendario principal.
+EVENTO: crear un nuevo evento permanente en el calendario — turno/reunion/cumple/cita/viaje.""",
         messages=[{"role": "user", "content": text}]
     )
     r = response.content[0].text.strip().upper()
     if "EDITAR_EVENTO" in r: return "EDITAR_EVENTO"
+    if "RECORDATORIO" in r: return "RECORDATORIO"
     if "PLANTA" in r: return "PLANTA"
     if "EVENTO" in r: return "EVENTO"
     return "GASTO"
@@ -530,6 +534,14 @@ async def webhook(request: Request):
             success, msg = await search_and_edit_evento(text)
             await send_message(from_number, msg if success else f"⚠️ {msg}")
 
+        elif tipo == "RECORDATORIO":
+            parsed = await parse_recordatorio(text)
+            success, error = await create_recordatorio(parsed)
+            if success:
+                await send_message(from_number, format_recordatorio(parsed))
+            else:
+                await send_message(from_number, f"⚠️ No pude crear el recordatorio: {error[:100]}")
+
     except json.JSONDecodeError:
         pass
     except Exception as e:
@@ -543,3 +555,207 @@ async def webhook(request: Request):
 @app.get("/")
 async def health():
     return {"status": "ok", "bot": "asistente-personal"}
+
+# ── MÓDULO RECORDATORIOS ──────────────────────────────────────────────────────
+# Usamos Google Calendar como backend:
+# - Eventos temporales: descripción contiene [TEMP] → se borran al disparar
+# - Recordatorios de eventos: descripción contiene [REM:60] o [REM:15] → avisa X minutos antes
+# - Resumen diario: cron a las 8am lista todos los eventos del día
+
+async def parse_recordatorio(text: str) -> dict:
+    now = now_argentina()
+    response = anthropic.messages.create(
+        model="claude-sonnet-4-20250514", max_tokens=300,
+        system="Extraé info del recordatorio. Responde SOLO JSON válido sin markdown.",
+        messages=[{"role": "user", "content": f"""Ahora son las {now.strftime("%Y-%m-%d %H:%M")} en Argentina.
+Mensaje: {text}
+Respondé:
+{{"summary": "descripcion del recordatorio","fire_at": "YYYY-MM-DDTHH:MM (hora exacta en que disparar)","emoji": "emoji"}}
+Ejemplos:
+- "en 1 hora abri el lavarropa" → fire_at = ahora + 1 hora
+- "en 30 minutos llamar al medico" → fire_at = ahora + 30 min
+- "mañana a las 9 tomar medicamento" → fire_at = mañana 09:00"""}]
+    )
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`").lstrip("json").strip()
+    return json.loads(raw)
+
+async def create_recordatorio(data: dict) -> tuple[bool, str]:
+    """Crea un evento temporal en Google Calendar con tag [TEMP]."""
+    access_token = await get_gcal_access_token()
+    if not access_token:
+        return False, "Calendar no configurado"
+
+    fire_at = data["fire_at"]  # YYYY-MM-DDTHH:MM
+    # El evento dura 1 minuto
+    start_dt = datetime.strptime(fire_at, "%Y-%m-%dT%H:%M")
+    end_dt = start_dt + timedelta(minutes=1)
+
+    event = {
+        "summary": f"🔔 {data['summary']}",
+        "description": "[TEMP]",  # marca para borrar después
+        "start": {"dateTime": f"{fire_at}:00", "timeZone": "America/Argentina/Buenos_Aires"},
+        "end": {"dateTime": end_dt.strftime("%Y-%m-%dT%H:%M:00"), "timeZone": "America/Argentina/Buenos_Aires"},
+    }
+
+    async with httpx.AsyncClient() as http:
+        r = await http.post(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            json=event
+        )
+        return (True, "") if r.status_code in [200, 201] else (False, r.text)
+
+def format_recordatorio(data: dict) -> str:
+    emoji = data.get("emoji", "🔔")
+    fire_at = data.get("fire_at", "")
+    try:
+        dt = datetime.strptime(fire_at, "%Y-%m-%dT%H:%M")
+        hora = dt.strftime("%H:%M")
+        fecha = dt.strftime("%d/%m") if dt.date() != now_argentina().date() else "hoy"
+        tiempo_str = f"{fecha} a las {hora}"
+    except Exception:
+        tiempo_str = fire_at
+    return f"{emoji} *{data['summary']}*\nTe aviso {tiempo_str}\n\n✅ Recordatorio configurado"
+
+# ── CRON JOB ──────────────────────────────────────────────────────────────────
+@app.get("/cron")
+async def cron_job():
+    """
+    Se ejecuta cada minuto. Maneja:
+    1. Resumen diario a las 8am
+    2. Recordatorios de eventos (1hr antes, 15min antes)
+    3. Eventos temporales [TEMP] que hay que disparar y borrar
+    """
+    access_token = await get_gcal_access_token()
+    if not access_token:
+        return {"ok": False, "reason": "no gcal token"}
+
+    now = now_argentina()
+    fired = []
+
+    async with httpx.AsyncClient() as http:
+        headers = {"Authorization": f"Bearer {access_token}"}
+
+        # Ventana de búsqueda: próximos 61 minutos
+        time_min = now.strftime("%Y-%m-%dT%H:%M:00-03:00")
+        time_max = (now + timedelta(minutes=61)).strftime("%Y-%m-%dT%H:%M:00-03:00")
+
+        r = await http.get(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            headers=headers,
+            params={
+                "timeMin": time_min,
+                "timeMax": time_max,
+                "singleEvents": "true",
+                "orderBy": "startTime",
+                "maxResults": "20"
+            }
+        )
+
+        if r.status_code != 200:
+            return {"ok": False}
+
+        events = r.json().get("items", [])
+        minutes_now = now.hour * 60 + now.minute
+
+        for event in events:
+            event_id = event.get("id")
+            summary = event.get("summary", "Evento")
+            description = event.get("description", "") or ""
+            start = event.get("start", {})
+
+            # Calcular cuántos minutos faltan para el evento
+            if "dateTime" in start:
+                event_dt_str = start["dateTime"][:16]  # YYYY-MM-DDTHH:MM
+                try:
+                    event_dt = datetime.strptime(event_dt_str, "%Y-%m-%dT%H:%M")
+                    diff_minutes = int((event_dt - now.replace(tzinfo=None)).total_seconds() / 60)
+                except Exception:
+                    continue
+            else:
+                continue
+
+            # 1. Evento temporal [TEMP] → disparar y borrar
+            if "[TEMP]" in description and 0 <= diff_minutes <= 1:
+                clean_name = summary.replace("🔔 ", "")
+                await send_message(MY_NUMBER, f"🔔 *Recordatorio*\n{clean_name}")
+                # Borrar el evento
+                await http.delete(
+                    f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}",
+                    headers=headers
+                )
+                fired.append(f"TEMP: {summary}")
+
+            # 2. Recordatorio 60 minutos antes → [REM:60] en descripción
+            elif "[REM:60]" in description and 59 <= diff_minutes <= 61:
+                loc = event.get("location", "")
+                loc_str = f"\n📍 {loc}" if loc else ""
+                await send_message(MY_NUMBER,
+                    f"⏰ *En 1 hora:* {summary}{loc_str}"
+                )
+                fired.append(f"REM60: {summary}")
+
+            # 3. Recordatorio 15 minutos antes → [REM:15] en descripción
+            elif "[REM:15]" in description and 14 <= diff_minutes <= 16:
+                loc = event.get("location", "")
+                loc_str = f"\n📍 {loc}" if loc else ""
+                await send_message(MY_NUMBER,
+                    f"⏰ *En 15 minutos:* {summary}{loc_str}"
+                )
+                fired.append(f"REM15: {summary}")
+
+        # 4. Resumen diario a las 8:00am (±1 min)
+        if now.hour == DAILY_SUMMARY_HOUR and now.minute == 0:
+            await send_daily_summary(http, access_token, now)
+            fired.append("DAILY_SUMMARY")
+
+    return {"ok": True, "fired": fired, "time": now.strftime("%H:%M")}
+
+async def send_daily_summary(http, access_token: str, now: datetime):
+    """Manda por WhatsApp los eventos de hoy."""
+    today_start = now.replace(hour=0, minute=0, second=0).strftime("%Y-%m-%dT00:00:00-03:00")
+    today_end = now.replace(hour=23, minute=59, second=59).strftime("%Y-%m-%dT23:59:59-03:00")
+
+    r = await http.get(
+        "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+        headers={"Authorization": f"Bearer {access_token}"},
+        params={
+            "timeMin": today_start,
+            "timeMax": today_end,
+            "singleEvents": "true",
+            "orderBy": "startTime",
+            "maxResults": "10"
+        }
+    )
+
+    if r.status_code != 200:
+        return
+
+    events = r.json().get("items", [])
+    # Filtrar eventos temporales
+    events = [e for e in events if "[TEMP]" not in (e.get("description") or "")]
+
+    if not events:
+        await send_message(MY_NUMBER, f"☀️ *Buenos días!*\nNo tenés eventos para hoy.")
+        return
+
+    lines = [f"☀️ *Buenos días! Tus eventos de hoy:*\n"]
+    for e in events:
+        summary = e.get("summary", "Evento")
+        start = e.get("start", {})
+        loc = e.get("location", "")
+        if "dateTime" in start:
+            hora = start["dateTime"][11:16]
+            loc_str = f" — {loc}" if loc else ""
+            lines.append(f"• {hora} — {summary}{loc_str}")
+        else:
+            lines.append(f"• {summary} (todo el día)")
+
+    await send_message(MY_NUMBER, "\n".join(lines))
+
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "time": now_argentina().strftime("%H:%M"), "bot": "asistente-personal"}
