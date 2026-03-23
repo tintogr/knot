@@ -1445,20 +1445,31 @@ async def handle_shopping(text: str) -> str:
             items = notion_ingredients
             recipe_note = f"📖 *{recipe_name.capitalize()}* (de tus recetas)\n"
         else:
+            # Una sola llamada Claude: infiere ingredientes Y los enriquece
             try:
-                resp = anthropic.messages.create(
-                    model="claude-sonnet-4-20250514", max_tokens=200,
-                    system="Respondé SOLO JSON sin markdown.",
-                    messages=[{"role": "user", "content": f'Ingredientes básicos para "{recipe_name}". Respondé: {{"items": ["ingrediente1", ...]}}'}]
-                )
-                raw = resp.content[0].text.strip()
-                if raw.startswith("```"):
-                    raw = raw.strip("`").lstrip("json").strip()
-                items = json.loads(raw).get("items", [])
+                enriched_direct, ok = await get_ingredients_and_enrich(recipe_name)
             except Exception:
+                enriched_direct, ok = [], False
+            if ok and enriched_direct:
+                await save_recipe_to_notion(recipe_name, source="Matrics")
+                recipe_note = f"🍽️ No tenía esa receta — la agregué a Recetas\n"
+                results_text = []
+                for item in enriched_direct:
+                    item_name = item.get("name", "")
+                    existing = await search_shopping_item(item_name)
+                    if existing:
+                        async with httpx.AsyncClient() as http:
+                            await http.patch(f"https://api.notion.com/v1/pages/{existing[0]['id']}",
+                                             headers=notion_headers(),
+                                             json={"properties": {"Stock": {"checkbox": False}}})
+                        results_text.append(f"📋 {item.get('emoji','🛒')} _{item_name}_ ya estaba, aparece como faltante")
+                    else:
+                        ok2, err = await add_shopping_item(item)
+                        results_text.append(f"✅ {item.get('emoji','🛒')} _{item_name}_ agregado" if ok2 else f"❌ Error agregando _{item_name}_: {err[:80]}")
+                return recipe_note + "\n".join(results_text) + "\n\n📋 Lista actualizada en Notion"
+            else:
                 items = []
-            await save_recipe_to_notion(recipe_name, source="Matrics")
-            recipe_note = f"🍽️ No tenía esa receta — la agregué a Recetas\n"
+                recipe_note = f"⚠️ No pude inferir los ingredientes para esa receta\n"
 
     if action == "list":
         async with httpx.AsyncClient() as http:
