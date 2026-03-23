@@ -1237,8 +1237,8 @@ async def handle_shopping(text: str) -> str:
             r = await http.post(
                 f"https://api.notion.com/v1/databases/{SHOPPING_DB_ID}/query",
                 headers=notion_headers(),
-                json={"filter": {"property": "en stock", "checkbox": {"equals": False}},
-                      "sorts": [{"property": "tipo", "direction": "ascending"}]}
+                json={"filter": {"property": "Stock", "checkbox": {"equals": False}},
+                      "sorts": [{"property": "Category", "direction": "ascending"}]}
             )
             if r.status_code != 200:
                 return "❌ No pude leer la lista de compras"
@@ -1248,7 +1248,7 @@ async def handle_shopping(text: str) -> str:
             lines = ["🛒 *Tu lista de compras:*\n"]
             for item in results:
                 name = item["properties"]["Name"]["title"][0]["plain_text"] if item["properties"]["Name"]["title"] else "?"
-                tipo = item["properties"].get("tipo", {}).get("select", {})
+                tipo = item["properties"].get("Category", {}).get("select", {})
                 tipo_name = tipo.get("name", "") if tipo else ""
                 lines.append(f"• {name}{f' _{tipo_name}_' if tipo_name else ''}")
             return "\n".join(lines)
@@ -1264,7 +1264,7 @@ async def handle_shopping(text: str) -> str:
                 async with httpx.AsyncClient() as http:
                     await http.patch(f"https://api.notion.com/v1/pages/{existing[0]['id']}",
                                      headers=notion_headers(),
-                                     json={"properties": {"en stock": {"checkbox": False}}})
+                                     json={"properties": {"Stock": {"checkbox": False}}})
                 results_text.append(f"📋 _{item_name}_ ya estaba en la lista, aparece como faltante")
             else:
                 async with httpx.AsyncClient() as http:
@@ -1273,7 +1273,7 @@ async def handle_shopping(text: str) -> str:
                                         json={"parent": {"database_id": SHOPPING_DB_ID},
                                               "properties": {
                                                   "Name": {"title": [{"text": {"content": item_name}}]},
-                                                  "en stock": {"checkbox": False}
+                                                  "Stock": {"checkbox": False}
                                               }})
                     ok = r.status_code == 200
                     err_detail = r.text[:150] if not ok else ""
@@ -1286,7 +1286,7 @@ async def handle_shopping(text: str) -> str:
                 async with httpx.AsyncClient() as http:
                     await http.patch(f"https://api.notion.com/v1/pages/{existing[0]['id']}",
                                      headers=notion_headers(),
-                                     json={"properties": {"en stock": {"checkbox": in_stock}}})
+                                     json={"properties": {"Stock": {"checkbox": in_stock}}})
                 results_text.append(f"✅ _{item_name}_ marcado como en stock" if in_stock else f"🛒 _{item_name}_ agregado a la lista")
             else:
                 if not in_stock:
@@ -1296,7 +1296,7 @@ async def handle_shopping(text: str) -> str:
                                             json={"parent": {"database_id": SHOPPING_DB_ID},
                                                   "properties": {
                                                       "Name": {"title": [{"text": {"content": item_name}}]},
-                                                      "en stock": {"checkbox": False}
+                                                      "Stock": {"checkbox": False}
                                                   }})
                         ok = r.status_code == 200
                     results_text.append(f"🛒 _{item_name}_ agregado como faltante" if ok else f"❌ Error agregando _{item_name}_")
