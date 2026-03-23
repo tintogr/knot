@@ -3,6 +3,7 @@ import json
 import base64
 import httpx
 from datetime import date, datetime, timedelta, timezone
+from calendar import monthrange
 from fastapi import FastAPI, Request, BackgroundTasks
 from anthropic import Anthropic
 
@@ -463,13 +464,16 @@ async def classify(text: str, has_image: bool) -> str:
     response = anthropic.messages.create(
         model="claude-sonnet-4-20250514", max_tokens=10,
         system="""Responde SOLO una palabra: GASTO, PLANTA, EVENTO, EDITAR_EVENTO, RECORDATORIO, SHOPPING o CHAT.
-GASTO: pago/compra/ingreso/monto/precio/factura.
-PLANTA: planta sin mencionar precio.
-EDITAR_EVENTO: editar/modificar/agregar info a un evento que ya existe en el calendario.
-RECORDATORIO: "recordame en X tiempo", "avisame en X", "haceme acordar". Son cosas temporales que no van al calendario.
-EVENTO: crear un nuevo evento permanente — turno/reunion/cumple/cita/viaje.
-SHOPPING: lista de compras — "me quedé sin X", "compré X", "agregá X a la lista", "qué me falta comprar".
-CHAT: cualquier otra cosa — preguntas, consultas, conversación, pedir consejos, redactar algo, hacer cálculos, charlar.""",
+
+GASTO: registrar un pago, compra o ingreso concreto con monto. Ej: "gasté 3500 en verdura", "cargué nafta", "me pagaron 50000", foto de factura.
+PLANTA: adquirir o mencionar una planta sin contexto de precio como gasto.
+EDITAR_EVENTO: modificar un evento existente en el calendario.
+RECORDATORIO: "recordame en X tiempo", "avisame en X", "haceme acordar".
+EVENTO: crear un evento nuevo en el calendario — turno, reunión, cumple, cita, viaje.
+SHOPPING: gestionar lista de compras — "me quedé sin X", "compré X", "agregá X a la lista", "qué me falta".
+CHAT: CUALQUIER pregunta, consulta o conversación — "cuánto gasté?", "cuánto llevo gastado?", "cuánto gané este mes?", preguntas sobre finanzas, consejos, charla, cálculos, redactar algo. Si el mensaje tiene signo de pregunta o pide información → CHAT.
+
+REGLA CLAVE: si el mensaje PREGUNTA algo (tiene "?", "cuánto", "qué", "cómo", "cuál") → siempre es CHAT, nunca GASTO.""",
         messages=[{"role": "user", "content": text}]
     )
     r = response.content[0].text.strip().upper()
@@ -481,29 +485,112 @@ CHAT: cualquier otra cosa — preguntas, consultas, conversación, pedir consejo
     if "CHAT" in r: return "CHAT"
     return "GASTO"
 
+async def query_finances(month: str = None) -> str:
+    """Consulta la base de Finances en Notion y devuelve un resumen."""
+    now = now_argentina()
+    if not month:
+        month = now.strftime("%Y-%m")
+
+    # Calcular rango del mes
+    year, mon = map(int, month.split("-"))
+    last_day = monthrange(year, mon)[1]
+    date_start = f"{month}-01"
+    date_end = f"{month}-{last_day:02d}"
+
+    async with httpx.AsyncClient() as http:
+        r = await http.post(
+            f"https://api.notion.com/v1/databases/{NOTION_DB_ID.replace('-','')}/query",
+            headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
+            json={
+                "filter": {
+                    "and": [
+                        {"property": "Date", "date": {"on_or_after": date_start}},
+                        {"property": "Date", "date": {"on_or_before": date_end}}
+                    ]
+                },
+                "page_size": 100
+            }
+        )
+        if r.status_code != 200:
+            return None
+
+        results = r.json().get("results", [])
+        if not results:
+            return f"No hay registros para {month}."
+
+        ingresos = 0
+        egresos = 0
+        por_categoria = {}
+        items = []
+
+        for page in results:
+            props = page.get("properties", {})
+            in_out = props.get("In - Out", {}).get("select", {})
+            in_out_name = in_out.get("name", "") if in_out else ""
+            value = props.get("Value (ars)", {}).get("number", 0) or 0
+            name_list = props.get("Name", {}).get("title", [])
+            name = name_list[0]["plain_text"] if name_list else "?"
+            cats = [c["name"] for c in props.get("Categoría", {}).get("multi_select", [])]
+
+            if "INGRESO" in in_out_name:
+                ingresos += value
+            else:
+                egresos += value
+                for cat in cats:
+                    por_categoria[cat] = por_categoria.get(cat, 0) + value
+
+            items.append({"name": name, "value": value, "in_out": in_out_name, "cats": cats})
+
+        balance = ingresos - egresos
+        top_cats = sorted(por_categoria.items(), key=lambda x: x[1], reverse=True)[:5]
+
+        summary = f"📊 *Finanzas {month}*\n\n"
+        summary += f"💚 Ingresos: ${ingresos:,.0f}\n"
+        summary += f"🔴 Egresos: ${egresos:,.0f}\n"
+        summary += f"{'✅' if balance >= 0 else '⚠️'} Balance: ${balance:,.0f}\n"
+        if top_cats:
+            summary += f"\n📂 *Top categorías de gasto:*\n"
+            for cat, val in top_cats:
+                summary += f"• {cat}: ${val:,.0f}\n"
+        return summary
+
 async def handle_chat(phone: str, text: str) -> str:
-    """Conversación libre con Claude, con historial."""
+    """Conversación libre con Claude, con acceso a datos financieros."""
     history = get_history(phone)
     add_to_history(phone, "user", text)
+    now = now_argentina()
+
+    # Detectar si pregunta sobre finanzas y pre-cargar datos
+    finance_context = ""
+    text_lower = text.lower()
+    finance_keywords = ["gasté", "gaste", "gastado", "ingres", "gané", "gane", "balance", "cuánto", "cuanto", "finanzas", "plata", "mes"]
+    if any(k in text_lower for k in finance_keywords):
+        # Detectar mes mencionado o usar el actual
+        mes = now.strftime("%Y-%m")
+        if "febrero" in text_lower: mes = f"{now.year}-02"
+        elif "enero" in text_lower: mes = f"{now.year}-01"
+        elif "marzo" in text_lower: mes = f"{now.year}-03"
+        elif "abril" in text_lower: mes = f"{now.year}-04"
+        finance_data = await query_finances(mes)
+        if finance_data:
+            finance_context = f"\n\nDATO REAL DE NOTION (usá esto para responder):\n{finance_data}"
 
     messages = history + [{"role": "user", "content": text}]
 
     response = anthropic.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=1000,
-        system="""Sos Matrics, un asistente personal inteligente que corre en WhatsApp.
-Respondés de forma concisa y natural, como un asistente de confianza.
-Podés ayudar con cualquier cosa: responder preguntas, hacer cálculos, redactar textos,
-dar consejos, analizar situaciones, etc.
-Usás español rioplatense (vos, che, etc).
-Si el mensaje parece un gasto, evento o tarea para la lista de compras, avisale al usuario
-que puede mandarlo directamente sin preámbulos y Matrics lo registra solo.""",
+        max_tokens=800,
+        system=f"""Sos Matrics, asistente personal en WhatsApp. Respondés conciso y natural.
+Usás español rioplatense. Hoy: {now.strftime("%d/%m/%Y")} {now.strftime("%H:%M")}.
+Podés ayudar con cualquier cosa: preguntas, cálculos, redacción, consejos, etc.
+Si el mensaje tiene un monto para registrar, avisale que lo mande sin preámbulos.{finance_context}""",
         messages=messages
     )
 
     reply = response.content[0].text.strip()
     add_to_history(phone, "assistant", reply)
     return reply
+
 
 # ── Webhook ── ESTRUCTURA EXACTAMENTE IGUAL AL CODIGO QUE FUNCIONA ────────────
 @app.get("/webhook")
