@@ -477,8 +477,34 @@ async def eliminar_gasto(text: str) -> tuple[bool, str]:
         )
         if del_r.status_code == 200:
             return True, f"🗑️ *{old_name}* eliminado de Notion"
-        else:
-            return False, f"Error eliminando la entrada: {del_r.text[:100]}"
+
+async def eliminar_shopping(text: str) -> tuple[bool, str]:
+    """Busca un ítem en Shopping por nombre y lo archiva (borra)."""
+    response = anthropic.messages.create(
+        model="claude-sonnet-4-20250514", max_tokens=100,
+        system="Extraé el nombre del ítem de la lista de compras a eliminar. Responde SOLO JSON.",
+        messages=[{"role": "user", "content": f"Mensaje: {text}\nRespondé: {{\"search_term\": \"nombre del item\"}}"}]
+    )
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`").lstrip("json").strip()
+    search_term = json.loads(raw).get("search_term", "")
+    if not search_term:
+        return False, "No entendí qué ítem querés eliminar"
+    existing = await search_shopping_item(search_term)
+    if not existing:
+        return False, f"No encontré ningún ítem llamado _{search_term}_ en la lista"
+    page_id = existing[0]["id"]
+    item_name = existing[0]["properties"]["Name"]["title"][0]["plain_text"] if existing[0]["properties"]["Name"]["title"] else search_term
+    async with httpx.AsyncClient() as http:
+        r = await http.patch(
+            f"https://api.notion.com/v1/pages/{page_id}",
+            headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
+            json={"archived": True}
+        )
+        if r.status_code == 200:
+            return True, f"🗑️ *{item_name}* eliminado de la lista de compras"
+        return False, f"Error eliminando el ítem: {r.text[:100]}"
 
 def format_reply(data: dict, exchange_rate: float) -> str:
     is_expense = "EGRESO" in data["in_out"]
@@ -773,6 +799,7 @@ async def classify(text: str, has_image: bool) -> str:
 GASTO: registrar un pago, compra o ingreso concreto con monto.
 CORREGIR_GASTO: corregir un gasto ya registrado. Ej: "me equivoqué, era 7000 no 7500", "cambiá el monto de la verdulería".
 ELIMINAR_GASTO: eliminar o borrar una entrada de Notion. Ej: "borrá ese gasto", "eliminá la entrada que se llama X", "sacá ese registro de Notion".
+ELIMINAR_SHOPPING: eliminar o borrar un ítem de la lista de compras. Ej: "borrá Tomates de la lista", "eliminá ese ítem del shopping".
 PLANTA: adquirir o mencionar una planta.
 EDITAR_EVENTO: modificar un evento existente en el calendario.
 ELIMINAR_EVENTO: eliminar o borrar un evento del calendario.
@@ -787,6 +814,7 @@ REGLA: si el mensaje PREGUNTA algo → siempre CHAT, nunca GASTO.""",
     r = response.content[0].text.strip().upper()
     if "ELIMINAR_EVENTO" in r:  return "ELIMINAR_EVENTO"
     if "EDITAR_EVENTO" in r:    return "EDITAR_EVENTO"
+    if "ELIMINAR_SHOPPING" in r: return "ELIMINAR_SHOPPING"
     if "ELIMINAR_GASTO" in r:   return "ELIMINAR_GASTO"
     if "CORREGIR_GASTO" in r:   return "CORREGIR_GASTO"
     if "SHOPPING" in r:         return "SHOPPING"
@@ -995,6 +1023,10 @@ async def process_message(message: dict):
                 await send_message(from_number, "❌ No entendi el monto. Ejemplo: _\"Verduleria 3500\"_")
             else:
                 await send_message(from_number, f"❌ Error Notion:\n{error[:200]}")
+
+        elif tipo == "ELIMINAR_SHOPPING":
+            success, msg = await eliminar_shopping(text)
+            await send_message(from_number, msg if success else f"⚠️ {msg}")
 
         elif tipo == "ELIMINAR_GASTO":
             success, msg = await eliminar_gasto(text)
@@ -1287,14 +1319,32 @@ Respondé:
         raw = raw.strip("`").lstrip("json").strip()
     return json.loads(raw)
 
+# Palabras genéricas para las que NO buscar por primera palabra sola
+GENERIC_WORDS = {"salsa", "crema", "pasta", "sopa", "caldo", "jugo", "salsa",
+                  "queso", "pan", "leche", "aceite", "harina", "arroz"}
+
 async def search_shopping_item(name: str) -> list:
+    """Busca un ítem con variantes de singular/plural. Evita falsos positivos en palabras genéricas."""
+    name = name.strip()
+    candidates = [name]
+    # Singular/plural: Tomates → Tomate
+    if name.endswith("s") and len(name) > 3:
+        candidates.append(name[:-1])
+    # Solo agregar primera palabra si es suficientemente específica (más de 5 chars y no genérica)
+    first_word = name.split()[0].lower()
+    if len(name.split()) > 1 and len(first_word) > 5 and first_word not in GENERIC_WORDS:
+        candidates.append(name.split()[0])
     async with httpx.AsyncClient() as http:
-        r = await http.post(
-            f"https://api.notion.com/v1/databases/{SHOPPING_DB_ID}/query",
-            headers=notion_headers(),
-            json={"filter": {"property": "Name", "title": {"contains": name[:30]}}}
-        )
-        return r.json().get("results", []) if r.status_code == 200 else []
+        for candidate in candidates:
+            r = await http.post(
+                f"https://api.notion.com/v1/databases/{SHOPPING_DB_ID}/query",
+                headers=notion_headers(),
+                json={"filter": {"property": "Name", "title": {"contains": candidate[:25]}}}
+            )
+            results = r.json().get("results", []) if r.status_code == 200 else []
+            if results:
+                return results
+    return []
 
 async def add_shopping_item(item: dict) -> tuple[bool, str]:
     name  = item.get("name", "").strip()
