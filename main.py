@@ -557,13 +557,58 @@ async def query_finances(month: str = None) -> str:
                 summary += f"• {cat}: ${val:,.0f}\n"
         return summary
 
+async def query_calendar(days_ahead: int = 1, days_back: int = 0) -> str | None:
+    """Consulta eventos de Google Calendar en un rango de días y devuelve un resumen."""
+    access_token = await get_gcal_access_token()
+    if not access_token:
+        return None
+    now = now_argentina()
+    time_min = (now - timedelta(days=days_back)).strftime("%Y-%m-%dT00:00:00-03:00")
+    time_max = (now + timedelta(days=days_ahead)).strftime("%Y-%m-%dT23:59:59-03:00")
+    async with httpx.AsyncClient() as http:
+        r = await http.get(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={
+                "timeMin": time_min,
+                "timeMax": time_max,
+                "singleEvents": "true",
+                "orderBy": "startTime",
+                "maxResults": "20"
+            }
+        )
+        if r.status_code != 200:
+            return None
+        events = r.json().get("items", [])
+        # Filtrar eventos temporales
+        events = [e for e in events if "[TEMP]" not in (e.get("description") or "")]
+        if not events:
+            return "No hay eventos en ese período."
+        lines = []
+        for e in events:
+            summary = e.get("summary", "Evento")
+            start = e.get("start", {})
+            loc = e.get("location", "")
+            loc_str = f" — 📍{loc}" if loc else ""
+            if "dateTime" in start:
+                dt_str = start["dateTime"][:16]
+                dt = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M")
+                fecha = dt.strftime("%d/%m")
+                hora = dt.strftime("%H:%M")
+                lines.append(f"• {fecha} {hora} — {summary}{loc_str}")
+            else:
+                fecha = start.get("date", "")
+                lines.append(f"• {fecha} — {summary} (todo el día){loc_str}")
+        return "\n".join(lines)
+
 async def handle_chat(phone: str, text: str) -> str:
     history = get_history(phone)
     add_to_history(phone, "user", text)
     now = now_argentina()
-
-    finance_context = ""
     text_lower = text.lower()
+
+    # ── Contexto de finanzas ──────────────────────────────────────────────────
+    finance_context = ""
     finance_keywords = ["gasté", "gaste", "gastado", "ingres", "gané", "gane", "balance", "cuánto", "cuanto", "finanzas", "plata", "mes"]
     if any(k in text_lower for k in finance_keywords):
         mes = now.strftime("%Y-%m")
@@ -575,6 +620,23 @@ async def handle_chat(phone: str, text: str) -> str:
         if finance_data:
             finance_context = f"\n\nDATO REAL DE NOTION (usá esto para responder):\n{finance_data}"
 
+    # ── Contexto de calendario ────────────────────────────────────────────────
+    calendar_context = ""
+    calendar_keywords = ["evento", "turno", "reunión", "reunion", "agenda", "calendario",
+                         "tengo algo", "tengo mañana", "qué tengo", "que tengo",
+                         "esta semana", "próximos días", "proximos dias", "mañana", "hoy"]
+    if any(k in text_lower for k in calendar_keywords):
+        # Determinar rango según el mensaje
+        if "esta semana" in text_lower or "próximos días" in text_lower or "proximos dias" in text_lower:
+            days = 7
+        elif "este mes" in text_lower:
+            days = 30
+        else:
+            days = 2  # hoy + mañana por defecto
+        cal_data = await query_calendar(days_ahead=days)
+        if cal_data:
+            calendar_context = f"\n\nDATO REAL DE GOOGLE CALENDAR (usá esto para responder):\n{cal_data}"
+
     messages = history + [{"role": "user", "content": text}]
 
     response = anthropic.messages.create(
@@ -583,7 +645,7 @@ async def handle_chat(phone: str, text: str) -> str:
         system=f"""Sos Matrics, asistente personal en WhatsApp. Respondés conciso y natural.
 Usás español rioplatense. Hoy: {now.strftime("%d/%m/%Y")} {now.strftime("%H:%M")}.
 Podés ayudar con cualquier cosa: preguntas, cálculos, redacción, consejos, etc.
-Si el mensaje tiene un monto para registrar, avisale que lo mande sin preámbulos.{finance_context}""",
+Si el mensaje tiene un monto para registrar, avisale que lo mande sin preámbulos.{finance_context}{calendar_context}""",
         messages=messages
     )
 
@@ -644,7 +706,7 @@ async def process_message(message: dict):
             transcripcion = await transcribe_audio(media_id)
             if transcripcion:
                 text = transcripcion
-                await send_message(from_number, f"🎙️ _{transcripcion}_")
+                await send_message(from_number, f"🗣️ _{transcripcion}_")
             else:
                 await send_message(from_number, "❌ No pude transcribir el audio. Mandalo como texto por favor.")
                 return
