@@ -24,6 +24,10 @@ def now_argentina() -> datetime:
     """Hora actual en Argentina (UTC-3)."""
     return datetime.now(timezone.utc) - timedelta(hours=3)
 
+# ── Memoria de categorías (se auto-puebla desde Notion) ───────────────────────
+# keyword (lowercase) → categorías corregidas por el usuario
+category_overrides: dict[str, list[str]] = {}
+
 # ── WhatsApp helpers ───────────────────────────────────────────────────────────
 async def send_message(to: str, text: str):
     async with httpx.AsyncClient() as http:
@@ -217,6 +221,48 @@ async def create_notion_entry(data: dict, exchange_rate: float) -> tuple[bool, s
             json={"parent": {"database_id": db_id}, "icon": {"type": "emoji", "emoji": emoji}, "properties": props}
         )
         return (True, "") if r.status_code == 200 else (False, r.text)
+
+async def check_and_apply_category(name: str, predicted_cats: list[str]) -> tuple[list[str], str | None]:
+    """
+    Busca en Notion si hay entradas similares con categoría distinta a la predicha.
+    Si encuentra una corrección previa del usuario, la aplica automáticamente.
+    También guarda en memory para no tener que consultar Notion la próxima vez.
+    """
+    name_lower = name.lower()
+
+    # 1. Revisar memoria in-process primero (más rápido)
+    for keyword, saved_cats in category_overrides.items():
+        if keyword in name_lower:
+            if saved_cats != predicted_cats:
+                return saved_cats, f"📚 Categoría: _{', '.join(saved_cats)}_ (según tu corrección anterior)"
+            return saved_cats, None
+
+    # 2. Consultar Notion por entradas con nombre similar
+    try:
+        # Usar las primeras 3 palabras como keyword de búsqueda
+        search_key = " ".join(name.split()[:3])
+        async with httpx.AsyncClient() as http:
+            r = await http.post(
+                f"https://api.notion.com/v1/databases/{NOTION_DB_ID.replace('-','')}/query",
+                headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
+                json={
+                    "filter": {"property": "Name", "title": {"contains": search_key}},
+                    "sorts": [{"property": "Date", "direction": "descending"}],
+                    "page_size": 3
+                }
+            )
+            if r.status_code == 200:
+                results = r.json().get("results", [])
+                if results:
+                    notion_cats = [c["name"] for c in results[0]["properties"].get("Categor\u00eda", {}).get("multi_select", [])]
+                    if notion_cats and notion_cats != predicted_cats:
+                        # Guardar en memoria para futuros usos
+                        category_overrides[search_key.lower()] = notion_cats
+                        return notion_cats, f"📚 Categoría: _{', '.join(notion_cats)}_ (como en cargas anteriores)"
+    except Exception:
+        pass
+
+    return predicted_cats, None
 
 def format_reply(data: dict, exchange_rate: float) -> str:
     is_expense = "EGRESO" in data["in_out"]
@@ -453,6 +499,54 @@ Respondé:
         else:
             return False, "Error actualizando el evento"
 
+async def delete_evento(text: str) -> tuple[bool, str]:
+    """Busca un evento en Google Calendar por nombre y lo elimina."""
+    access_token = await get_gcal_access_token()
+    if not access_token:
+        return False, "Calendar no configurado"
+
+    now = now_argentina()
+    response = anthropic.messages.create(
+        model="claude-sonnet-4-20250514", max_tokens=100,
+        system="Extraé el nombre del evento a eliminar. Responde SOLO JSON.",
+        messages=[{"role": "user", "content": f'Hoy: {now.strftime("%Y-%m-%d")}\nMensaje: {text}\nRespondé: {{"search_term": "nombre del evento"}}'}]
+    )
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`").lstrip("json").strip()
+    search_term = json.loads(raw).get("search_term", "")
+
+    async with httpx.AsyncClient() as http:
+        time_min = (now - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00-03:00")
+        time_max = (now + timedelta(days=60)).strftime("%Y-%m-%dT23:59:59-03:00")
+        r = await http.get(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={
+                "q": search_term,
+                "timeMin": time_min,
+                "timeMax": time_max,
+                "singleEvents": "true",
+                "orderBy": "startTime",
+                "maxResults": "5"
+            }
+        )
+        if r.status_code != 200:
+            return False, "Error buscando eventos"
+        events = r.json().get("items", [])
+        if not events:
+            return False, f"No encontré ningún evento llamado _{search_term}_"
+        event = events[0]
+        event_name = event.get("summary", "Evento")
+        del_r = await http.delete(
+            f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event['id']}",
+            headers={"Authorization": f"Bearer {access_token}"}
+        )
+        if del_r.status_code == 204:
+            return True, f"🗑️ *{event_name}* eliminado del calendario"
+        else:
+            return False, "Error eliminando el evento"
+
 # ── HISTORIAL DE CONVERSACIÓN ──────────────────────────────────────────────────
 chat_history: dict[str, list] = {}
 MAX_HISTORY = 10
@@ -478,6 +572,7 @@ async def classify(text: str, has_image: bool) -> str:
 GASTO: registrar un pago, compra o ingreso concreto con monto. Ej: "gasté 3500 en verdura", "cargué nafta", "me pagaron 50000", foto de factura.
 PLANTA: adquirir o mencionar una planta sin contexto de precio como gasto.
 EDITAR_EVENTO: modificar un evento existente en el calendario.
+ELIMINAR_EVENTO: eliminar o borrar un evento existente del calendario.
 RECORDATORIO: "recordame en X tiempo", "avisame en X", "haceme acordar".
 EVENTO: crear un evento nuevo en el calendario — turno, reunión, cumple, cita, viaje.
 SHOPPING: gestionar lista de compras — "me quedé sin X", "compré X", "agregá X a la lista", "qué me falta".
@@ -487,6 +582,7 @@ REGLA CLAVE: si el mensaje PREGUNTA algo (tiene "?", "cuánto", "qué", "cómo",
         messages=[{"role": "user", "content": text}]
     )
     r = response.content[0].text.strip().upper()
+    if "ELIMINAR_EVENTO" in r: return "ELIMINAR_EVENTO"
     if "EDITAR_EVENTO" in r: return "EDITAR_EVENTO"
     if "SHOPPING" in r: return "SHOPPING"
     if "RECORDATORIO" in r: return "RECORDATORIO"
@@ -706,7 +802,7 @@ async def process_message(message: dict):
             transcripcion = await transcribe_audio(media_id)
             if transcripcion:
                 text = transcripcion
-                await send_message(from_number, f"🗣️ _{transcripcion}_")
+                await send_message(from_number, f"🎙️ _{transcripcion}_")
             else:
                 await send_message(from_number, "❌ No pude transcribir el audio. Mandalo como texto por favor.")
                 return
@@ -734,9 +830,15 @@ async def process_message(message: dict):
 
         if tipo == "GASTO":
             parsed = await parse_with_claude(text, image_b64, image_type, exchange_rate)
+            # Aplicar correcciones de categoría aprendidas
+            final_cats, cat_note = await check_and_apply_category(parsed["name"], parsed.get("categoria", []))
+            parsed["categoria"] = final_cats
             success, error = await create_notion_entry(parsed, exchange_rate)
             if success:
-                await send_message(from_number, format_reply(parsed, exchange_rate))
+                reply = format_reply(parsed, exchange_rate)
+                if cat_note:
+                    reply += f"\n{cat_note}"
+                await send_message(from_number, reply)
             elif "No se pudo interpretar" in error:
                 await send_message(from_number, "\u274c No entendi el monto. Ejemplo: _\"Verduleria 3500\"_")
             else:
@@ -757,6 +859,10 @@ async def process_message(message: dict):
 
         elif tipo == "EDITAR_EVENTO":
             success, msg = await search_and_edit_evento(text)
+            await send_message(from_number, msg if success else f"⚠️ {msg}")
+
+        elif tipo == "ELIMINAR_EVENTO":
+            success, msg = await delete_evento(text)
             await send_message(from_number, msg if success else f"⚠️ {msg}")
 
         elif tipo == "RECORDATORIO":
