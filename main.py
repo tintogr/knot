@@ -30,6 +30,10 @@ def now_argentina() -> datetime:
 # ── Memoria de categorías ──────────────────────────────────────────────────────
 category_overrides: dict[str, list[str]] = {}
 
+# ── Última entrada tocada (para correcciones contextuales) ────────────────────
+# Guarda {page_id, name} del último gasto creado/corregido/eliminado
+last_touched: dict[str, dict] = {}  # phone → {page_id, name}
+
 # ── WhatsApp helpers ───────────────────────────────────────────────────────────
 async def send_message(to: str, text: str):
     async with httpx.AsyncClient() as http:
@@ -312,7 +316,11 @@ async def create_notion_entry(data: dict, exchange_rate: float) -> tuple[bool, s
             headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
             json={"parent": {"database_id": db_id}, "icon": {"type": "emoji", "emoji": emoji}, "properties": props}
         )
-        return (True, "") if r.status_code == 200 else (False, r.text)
+        if r.status_code == 200:
+            page_id = r.json().get("id", "")
+            last_touched[MY_NUMBER] = {"page_id": page_id, "name": data["name"]}
+            return True, ""
+        return False, r.text
 
 async def check_and_apply_category(name: str, predicted_cats: list[str]) -> tuple[list[str], str | None]:
     name_lower = name.lower()
@@ -344,15 +352,15 @@ async def check_and_apply_category(name: str, predicted_cats: list[str]) -> tupl
         pass
     return predicted_cats, None
 
-async def corregir_gasto(text: str) -> tuple[bool, str]:
+async def corregir_gasto(text: str, phone: str = None) -> tuple[bool, str]:
     now = now_argentina()
     response = anthropic.messages.create(
         model="claude-sonnet-4-20250514", max_tokens=200,
-        system="Extraé qué gasto corregir y qué cambiar. Responde SOLO JSON.",
+        system="Extraé qué gasto corregir y qué cambiar. Si el mensaje no menciona un nombre concreto, usá null en search_term. Responde SOLO JSON.",
         messages=[{"role": "user", "content": f"""Hoy: {now.strftime("%Y-%m-%d")}
 Mensaje: {text}
 Respondé:
-{{"search_term": "nombre o descripción del gasto a corregir",
+{{"search_term": "nombre del gasto o null si no se menciona uno concreto",
   "new_value_ars": nuevo monto en ARS o null,
   "new_categoria": ["categoria"] o null,
   "new_name": "nuevo nombre" o null}}"""}]
@@ -361,25 +369,41 @@ Respondé:
     if raw.startswith("```"):
         raw = raw.strip("`").lstrip("json").strip()
     intent = json.loads(raw)
-    search_term = intent.get("search_term", "")
-    if not search_term:
+
+    # Si no hay search_term claro, usar la última entrada tocada
+    search_term = intent.get("search_term")
+    page_id_direct = None
+
+    if not search_term and phone and phone in last_touched:
+        entry = last_touched[phone]
+        page_id_direct = entry["page_id"]
+        search_term = entry["name"]
+    elif not search_term:
         return False, "No entendí qué gasto querés corregir"
+
     async with httpx.AsyncClient() as http:
-        r = await http.post(
-            f"https://api.notion.com/v1/databases/{NOTION_DB_ID.replace('-','')}/query",
-            headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
-            json={
-                "filter": {"property": "Name", "title": {"contains": search_term[:30]}},
-                "sorts": [{"property": "Date", "direction": "descending"}],
-                "page_size": 1
-            }
-        )
-        if r.status_code != 200 or not r.json().get("results"):
-            return False, f"No encontré ningún gasto llamado _{search_term}_"
-        page = r.json()["results"][0]
-        page_id = page["id"]
-        old_name = page["properties"]["Name"]["title"][0]["plain_text"] if page["properties"]["Name"]["title"] else "?"
-        old_value = page["properties"].get("Value (ars)", {}).get("number", 0)
+        # Si tenemos el page_id directo, no necesitamos buscar
+        if page_id_direct:
+            page_id = page_id_direct
+            old_name = search_term
+            old_value = 0  # No crítico para el mensaje
+        else:
+            r = await http.post(
+                f"https://api.notion.com/v1/databases/{NOTION_DB_ID.replace('-','')}/query",
+                headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
+                json={
+                    "filter": {"property": "Name", "title": {"contains": search_term[:30]}},
+                    "sorts": [{"property": "Date", "direction": "descending"}],
+                    "page_size": 1
+                }
+            )
+            if r.status_code != 200 or not r.json().get("results"):
+                return False, f"No encontré ningún gasto llamado _{search_term}_"
+            page = r.json()["results"][0]
+            page_id = page["id"]
+            old_name = page["properties"]["Name"]["title"][0]["plain_text"] if page["properties"]["Name"]["title"] else "?"
+            old_value = page["properties"].get("Value (ars)", {}).get("number", 0)
+
         props = {}
         if intent.get("new_value_ars"):
             props["Value (ars)"] = {"number": float(intent["new_value_ars"])}
@@ -389,6 +413,7 @@ Respondé:
             props["Name"] = {"title": [{"text": {"content": intent["new_name"]}}]}
         if not props:
             return False, "No entendí qué campo querés cambiar"
+
         upd = await http.patch(
             f"https://api.notion.com/v1/pages/{page_id}",
             headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
@@ -396,6 +421,12 @@ Respondé:
         )
         if upd.status_code != 200:
             return False, f"Error actualizando en Notion: {upd.text[:100]}"
+
+        # Actualizar last_touched con el nombre nuevo si cambió
+        if phone:
+            new_name = intent.get("new_name") or old_name
+            last_touched[phone] = {"page_id": page_id, "name": new_name}
+
         changes = []
         if intent.get("new_value_ars"):
             changes.append(f"${old_value:,.0f} → *${float(intent['new_value_ars']):,.0f} ARS*")
@@ -969,7 +1000,7 @@ async def process_message(message: dict):
             await send_message(from_number, msg if success else f"⚠️ {msg}")
 
         elif tipo == "CORREGIR_GASTO":
-            success, msg = await corregir_gasto(text)
+            success, msg = await corregir_gasto(text, phone=from_number)
             await send_message(from_number, msg if success else f"⚠️ {msg}")
 
         elif tipo == "PLANTA":
@@ -1245,7 +1276,8 @@ async def handle_shopping(text: str) -> str:
                                                   "en stock": {"checkbox": False}
                                               }})
                     ok = r.status_code == 200
-                results_text.append(f"✅ _{item_name}_ agregado" if ok else f"❌ Error agregando _{item_name}_")
+                    err_detail = r.text[:150] if not ok else ""
+                results_text.append(f"✅ _{item_name}_ agregado" if ok else f"❌ Error agregando _{item_name}_: {err_detail}")
 
         elif action in ["out_of_stock", "in_stock"]:
             in_stock = action == "in_stock"
