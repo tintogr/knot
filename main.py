@@ -264,7 +264,83 @@ async def check_and_apply_category(name: str, predicted_cats: list[str]) -> tupl
 
     return predicted_cats, None
 
-def format_reply(data: dict, exchange_rate: float) -> str:
+async def corregir_gasto(text: str) -> tuple[bool, str]:
+    """Busca el último gasto similar en Notion y actualiza su valor/categoría."""
+    now = now_argentina()
+
+    # Claude extrae qué corregir
+    response = anthropic.messages.create(
+        model="claude-sonnet-4-20250514", max_tokens=200,
+        system="Extraé qué gasto corregir y qué cambiar. Responde SOLO JSON.",
+        messages=[{"role": "user", "content": f"""Hoy: {now.strftime("%Y-%m-%d")}
+Mensaje: {text}
+Respondé:
+{{"search_term": "nombre o descripción del gasto a corregir",
+  "new_value_ars": nuevo monto en ARS o null si no cambia,
+  "new_categoria": ["categoria"] o null si no cambia,
+  "new_name": "nuevo nombre" o null si no cambia}}"""}]
+    )
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`").lstrip("json").strip()
+    intent = json.loads(raw)
+
+    search_term = intent.get("search_term", "")
+    if not search_term:
+        return False, "No entendí qué gasto querés corregir"
+
+    # Buscar en Notion la última entrada que coincida
+    async with httpx.AsyncClient() as http:
+        r = await http.post(
+            f"https://api.notion.com/v1/databases/{NOTION_DB_ID.replace('-','')}/query",
+            headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
+            json={
+                "filter": {"property": "Name", "title": {"contains": search_term[:30]}},
+                "sorts": [{"property": "Date", "direction": "descending"}],
+                "page_size": 1
+            }
+        )
+        if r.status_code != 200 or not r.json().get("results"):
+            return False, f"No encontré ningún gasto llamado _{search_term}_"
+
+        page = r.json()["results"][0]
+        page_id = page["id"]
+        old_name = page["properties"]["Name"]["title"][0]["plain_text"] if page["properties"]["Name"]["title"] else "?"
+        old_value = page["properties"].get("Value (ars)", {}).get("number", 0)
+
+        # Armar los campos a actualizar
+        props = {}
+        if intent.get("new_value_ars"):
+            props["Value (ars)"] = {"number": float(intent["new_value_ars"])}
+        if intent.get("new_categoria"):
+            props["Categoría"] = {"multi_select": [{"name": c} for c in intent["new_categoria"]]}
+        if intent.get("new_name"):
+            props["Name"] = {"title": [{"text": {"content": intent["new_name"]}}]}
+
+        if not props:
+            return False, "No entendí qué campo querés cambiar"
+
+        # Actualizar la página en Notion
+        upd = await http.patch(
+            f"https://api.notion.com/v1/pages/{page_id}",
+            headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
+            json={"properties": props}
+        )
+        if upd.status_code != 200:
+            return False, f"Error actualizando en Notion: {upd.text[:100]}"
+
+        # Armar mensaje de confirmación
+        changes = []
+        if intent.get("new_value_ars"):
+            changes.append(f"${old_value:,.0f} → *${float(intent['new_value_ars']):,.0f} ARS*")
+        if intent.get("new_categoria"):
+            changes.append(f"Categoría → _{', '.join(intent['new_categoria'])}_")
+        if intent.get("new_name"):
+            changes.append(f"Nombre → _{intent['new_name']}_")
+
+        return True, f"✏️ *{old_name}* corregido\n" + "\n".join(changes) + "\n\n✅ Actualizado en Notion"
+
+
     is_expense = "EGRESO" in data["in_out"]
     entry_emoji = data.get("emoji", "\U0001f4b8")
     direction = "Egreso" if is_expense else "Ingreso"
@@ -500,52 +576,81 @@ Respondé:
             return False, "Error actualizando el evento"
 
 async def delete_evento(text: str) -> tuple[bool, str]:
-    """Busca un evento en Google Calendar por nombre y lo elimina."""
+    """Busca evento(s) en Google Calendar y los elimina. Soporta búsqueda por nombre y por fecha."""
     access_token = await get_gcal_access_token()
     if not access_token:
         return False, "Calendar no configurado"
 
     now = now_argentina()
+    tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+
     response = anthropic.messages.create(
-        model="claude-sonnet-4-20250514", max_tokens=100,
-        system="Extraé el nombre del evento a eliminar. Responde SOLO JSON.",
-        messages=[{"role": "user", "content": f'Hoy: {now.strftime("%Y-%m-%d")}\nMensaje: {text}\nRespondé: {{"search_term": "nombre del evento"}}'}]
+        model="claude-sonnet-4-20250514", max_tokens=150,
+        system="Extraé info sobre qué evento(s) eliminar. Responde SOLO JSON.",
+        messages=[{"role": "user", "content": f"""Hoy: {now.strftime("%Y-%m-%d")}, mañana: {tomorrow}
+Mensaje: {text}
+Respondé:
+{{"search_term": "nombre del evento o null si no se menciona uno concreto",
+  "target_date": "YYYY-MM-DD si se menciona una fecha o 'mañana'/'hoy', sino null",
+  "delete_all": true si quiere borrar todos los eventos de esa fecha}}"""}]
     )
     raw = response.content[0].text.strip()
     if raw.startswith("```"):
         raw = raw.strip("`").lstrip("json").strip()
-    search_term = json.loads(raw).get("search_term", "")
+    intent = json.loads(raw)
 
     async with httpx.AsyncClient() as http:
-        time_min = (now - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00-03:00")
-        time_max = (now + timedelta(days=60)).strftime("%Y-%m-%dT23:59:59-03:00")
+        headers = {"Authorization": f"Bearer {access_token}"}
+
+        if intent.get("target_date"):
+            date_str = intent["target_date"]
+            time_min = f"{date_str}T00:00:00-03:00"
+            time_max = f"{date_str}T23:59:59-03:00"
+        else:
+            time_min = (now - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00-03:00")
+            time_max = (now + timedelta(days=60)).strftime("%Y-%m-%dT23:59:59-03:00")
+
+        params = {
+            "timeMin": time_min,
+            "timeMax": time_max,
+            "singleEvents": "true",
+            "orderBy": "startTime",
+            "maxResults": "10"
+        }
+        if intent.get("search_term"):
+            params["q"] = intent["search_term"]
+
         r = await http.get(
             "https://www.googleapis.com/calendar/v3/calendars/primary/events",
-            headers={"Authorization": f"Bearer {access_token}"},
-            params={
-                "q": search_term,
-                "timeMin": time_min,
-                "timeMax": time_max,
-                "singleEvents": "true",
-                "orderBy": "startTime",
-                "maxResults": "5"
-            }
+            headers=headers, params=params
         )
         if r.status_code != 200:
             return False, "Error buscando eventos"
+
         events = r.json().get("items", [])
+        events = [e for e in events if "[TEMP]" not in (e.get("description") or "")]
+
         if not events:
-            return False, f"No encontré ningún evento llamado _{search_term}_"
-        event = events[0]
-        event_name = event.get("summary", "Evento")
-        del_r = await http.delete(
-            f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event['id']}",
-            headers={"Authorization": f"Bearer {access_token}"}
-        )
-        if del_r.status_code == 204:
-            return True, f"🗑️ *{event_name}* eliminado del calendario"
-        else:
+            return False, "No encontré ningún evento para eliminar"
+
+        deleted = []
+        for event in events:
+            del_r = await http.delete(
+                f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event['id']}",
+                headers=headers
+            )
+            if del_r.status_code == 204:
+                deleted.append(event.get("summary", "Evento"))
+            if not intent.get("delete_all"):
+                break
+
+        if not deleted:
             return False, "Error eliminando el evento"
+        if len(deleted) == 1:
+            return True, f"🗑️ *{deleted[0]}* eliminado del calendario"
+        else:
+            lista = "\n".join(f"• {e}" for e in deleted)
+            return True, f"🗑️ *{len(deleted)} eventos eliminados:*\n{lista}"
 
 # ── HISTORIAL DE CONVERSACIÓN ──────────────────────────────────────────────────
 chat_history: dict[str, list] = {}
@@ -567,9 +672,10 @@ async def classify(text: str, has_image: bool) -> str:
         return "GASTO"
     response = anthropic.messages.create(
         model="claude-sonnet-4-20250514", max_tokens=10,
-        system="""Responde SOLO una palabra: GASTO, PLANTA, EVENTO, EDITAR_EVENTO, RECORDATORIO, SHOPPING o CHAT.
+        system="""Responde SOLO una palabra: GASTO, CORREGIR_GASTO, PLANTA, EVENTO, EDITAR_EVENTO, ELIMINAR_EVENTO, RECORDATORIO, SHOPPING o CHAT.
 
 GASTO: registrar un pago, compra o ingreso concreto con monto. Ej: "gasté 3500 en verdura", "cargué nafta", "me pagaron 50000", foto de factura.
+CORREGIR_GASTO: corregir o actualizar un gasto ya registrado. Ej: "me equivoqué, era 7000 no 7500", "el gasto de anthropic era 5000", "cambiá el monto de la verdulería".
 PLANTA: adquirir o mencionar una planta sin contexto de precio como gasto.
 EDITAR_EVENTO: modificar un evento existente en el calendario.
 ELIMINAR_EVENTO: eliminar o borrar un evento existente del calendario.
@@ -584,6 +690,7 @@ REGLA CLAVE: si el mensaje PREGUNTA algo (tiene "?", "cuánto", "qué", "cómo",
     r = response.content[0].text.strip().upper()
     if "ELIMINAR_EVENTO" in r: return "ELIMINAR_EVENTO"
     if "EDITAR_EVENTO" in r: return "EDITAR_EVENTO"
+    if "CORREGIR_GASTO" in r: return "CORREGIR_GASTO"
     if "SHOPPING" in r: return "SHOPPING"
     if "RECORDATORIO" in r: return "RECORDATORIO"
     if "PLANTA" in r: return "PLANTA"
@@ -843,6 +950,10 @@ async def process_message(message: dict):
                 await send_message(from_number, "\u274c No entendi el monto. Ejemplo: _\"Verduleria 3500\"_")
             else:
                 await send_message(from_number, f"\u274c Error Notion:\n{error[:200]}")
+
+        elif tipo == "CORREGIR_GASTO":
+            success, msg = await corregir_gasto(text)
+            await send_message(from_number, msg if success else f"⚠️ {msg}")
 
         elif tipo == "PLANTA":
             parsed = await parse_planta(text, exchange_rate)
