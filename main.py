@@ -18,13 +18,13 @@ WA_TOKEN       = os.environ["WHATSAPP_TOKEN"]
 WA_PHONE_ID    = os.environ["WHATSAPP_PHONE_ID"]
 WA_API         = f"https://graph.facebook.com/v22.0/{WA_PHONE_ID}/messages"
 MY_NUMBER      = os.environ.get("MY_WA_NUMBER", "54298154894334")
-DAILY_SUMMARY_HOUR = int(os.environ.get("DAILY_SUMMARY_HOUR", "8"))  # hora del resumen diario
+DAILY_SUMMARY_HOUR = int(os.environ.get("DAILY_SUMMARY_HOUR", "8"))
 
 def now_argentina() -> datetime:
     """Hora actual en Argentina (UTC-3)."""
     return datetime.now(timezone.utc) - timedelta(hours=3)
 
-# ── WhatsApp helpers ── EXACTAMENTE IGUAL AL CODIGO QUE FUNCIONA ──────────────
+# ── WhatsApp helpers ───────────────────────────────────────────────────────────
 async def send_message(to: str, text: str):
     async with httpx.AsyncClient() as http:
         await http.post(WA_API, headers={
@@ -48,6 +48,37 @@ async def get_media_base64(media_id: str) -> tuple[str, str]:
         img_r = await http.get(media_url, headers={"Authorization": f"Bearer {WA_TOKEN}"})
         return base64.b64encode(img_r.content).decode(), mime_type
 
+# ── NUEVO: Transcripción de audio con Groq Whisper ────────────────────────────
+async def transcribe_audio(media_id: str) -> str | None:
+    """Descarga audio de WhatsApp y transcribe con Groq Whisper (gratis)."""
+    groq_key = os.environ.get("GROQ_API_KEY")
+    if not groq_key:
+        return None
+    async with httpx.AsyncClient(timeout=30) as http:
+        # 1. Obtener URL del audio desde Meta
+        r = await http.get(
+            f"https://graph.facebook.com/v22.0/{media_id}",
+            headers={"Authorization": f"Bearer {WA_TOKEN}"}
+        )
+        if r.status_code != 200:
+            return None
+        media_url = r.json()["url"]
+        # 2. Descargar el archivo de audio
+        audio_r = await http.get(media_url, headers={"Authorization": f"Bearer {WA_TOKEN}"})
+        if audio_r.status_code != 200:
+            return None
+        audio_bytes = audio_r.content
+        # 3. Mandar a Groq Whisper para transcribir
+        resp = await http.post(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {groq_key}"},
+            files={"file": ("audio.ogg", audio_bytes, "audio/ogg")},
+            data={"model": "whisper-large-v3", "language": "es"},
+        )
+        if resp.status_code == 200:
+            return resp.json().get("text", "").strip()
+    return None
+
 # ── Tasa de cambio ────────────────────────────────────────────────────────────
 async def get_exchange_rate() -> float:
     try:
@@ -62,7 +93,7 @@ async def get_exchange_rate() -> float:
         except Exception:
             return 1000.0
 
-# ── MÓDULO GASTOS ── EXACTAMENTE IGUAL AL CODIGO QUE FUNCIONA ─────────────────
+# ── MÓDULO GASTOS ──────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """Sos un asistente que extrae datos financieros de mensajes o imagenes para cargar en Notion.
 
 Responde SIEMPRE y UNICAMENTE con un JSON valido, sin markdown, sin texto adicional.
@@ -210,7 +241,7 @@ def format_reply(data: dict, exchange_rate: float) -> str:
     lines.append("\n\u2705 Guardado en Notion")
     return "\n".join(lines)
 
-# ── MÓDULO PLANTAS (NUEVO) ────────────────────────────────────────────────────
+# ── MÓDULO PLANTAS ─────────────────────────────────────────────────────────────
 PLANTA_SYSTEM = """Extraé info de una planta y generá recomendaciones de cuidado.
 Responde ÚNICAMENTE con JSON válido, sin markdown.
 Valores para "luz": Sombra, Indirecta, Directa parcial, Pleno sol
@@ -272,7 +303,7 @@ def format_planta(data: dict) -> str:
     lines.append("\n\u2705 Guardada en Notion")
     return "\n".join(lines)
 
-# ── MÓDULO EVENTOS (NUEVO) ────────────────────────────────────────────────────
+# ── MÓDULO EVENTOS ─────────────────────────────────────────────────────────────
 def format_evento(data: dict, guardado: bool) -> str:
     emoji = data.get("emoji", "\U0001f4c5")
     hora = f" a las {data['time']}" if data.get("time") else ""
@@ -302,7 +333,6 @@ Respondé:
     return json.loads(raw)
 
 async def get_gcal_access_token() -> str | None:
-    """Obtiene un access token fresco usando el refresh token."""
     refresh_token = os.environ.get("GCAL_REFRESH_TOKEN")
     client_id     = os.environ.get("GCAL_CLIENT_ID")
     client_secret = os.environ.get("GCAL_CLIENT_SECRET")
@@ -344,12 +374,10 @@ async def create_evento_gcal(data: dict) -> bool:
         return r.status_code in [200, 201]
 
 async def search_and_edit_evento(text: str) -> tuple[bool, str]:
-    """Busca un evento en Google Calendar y lo edita."""
     access_token = await get_gcal_access_token()
     if not access_token:
         return False, "Calendar no configurado"
 
-    # Claude extrae qué evento editar y qué cambiar
     now = now_argentina()
     response = anthropic.messages.create(
         model="claude-sonnet-4-20250514", max_tokens=300,
@@ -364,9 +392,7 @@ Respondé:
         raw = raw.strip("`").lstrip("json").strip()
     edit_data = json.loads(raw)
 
-    # Buscar el evento en Google Calendar
     async with httpx.AsyncClient() as http:
-        # Buscar en los próximos 30 días y últimos 7 días
         time_min = (now - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00-03:00")
         time_max = (now + timedelta(days=60)).strftime("%Y-%m-%dT23:59:59-03:00")
 
@@ -390,12 +416,10 @@ Respondé:
         if not events:
             return False, f"No encontré ningún evento con ese nombre"
 
-        # Tomar el primer resultado
         event = events[0]
         event_id = event["id"]
         event_name = event.get("summary", "Evento")
 
-        # Aplicar cambios
         if edit_data.get("new_title"):
             event["summary"] = edit_data["new_title"]
         if edit_data.get("location"):
@@ -403,15 +427,13 @@ Respondé:
         if edit_data.get("description"):
             event["description"] = edit_data["description"]
         if edit_data.get("new_date") or edit_data.get("new_time"):
-            # Actualizar fecha/hora si se especifica
             if "dateTime" in event.get("start", {}):
-                old_dt = event["start"]["dateTime"][:16]  # YYYY-MM-DDTHH:MM
+                old_dt = event["start"]["dateTime"][:16]
                 old_date = old_dt[:10]
                 old_time = old_dt[11:16]
                 new_date = edit_data.get("new_date") or old_date
                 new_time = edit_data.get("new_time") or old_time
                 event["start"] = {"dateTime": f"{new_date}T{new_time}:00", "timeZone": "America/Argentina/Buenos_Aires"}
-                # Mantener duración original
                 if "dateTime" in event.get("end", {}):
                     end_dt = datetime.strptime(event["end"]["dateTime"][:16], "%Y-%m-%dT%H:%M")
                     start_dt = datetime.strptime(f"{new_date}T{new_time}", "%Y-%m-%dT%H:%M")
@@ -419,7 +441,6 @@ Respondé:
                     new_end = start_dt + dur
                     event["end"] = {"dateTime": new_end.strftime("%Y-%m-%dT%H:%M:00"), "timeZone": "America/Argentina/Buenos_Aires"}
 
-        # Guardar cambios
         update_r = await http.put(
             f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}",
             headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
@@ -431,19 +452,8 @@ Respondé:
             return True, f"✅ *{event_name}* actualizado{location_str}"
         else:
             return False, "Error actualizando el evento"
-    emoji = data.get("emoji", "\U0001f4c5")
-    hora = f" a las {data['time']}" if data.get("time") else ""
-    lines = [f"{emoji} *{data['summary']}*", f"Fecha: {data['date']}{hora}"]
-    if data.get("location"):
-        lines.append(f"\U0001f4cd {data['location']}")
-    if data.get("description"):
-        lines.append(f"Nota: {data['description']}")
-    lines.append("\n\u2705 Agregado a Google Calendar" if guardado else "\n\u26a0\ufe0f Anota esto manualmente \u2014 Calendar no configurado aun")
-    return "\n".join(lines)
 
-# ── CLASIFICADOR (NUEVO) ──────────────────────────────────────────────────────
-# ── HISTORIAL DE CONVERSACIÓN ─────────────────────────────────────────────────
-# Guarda los últimos 10 mensajes por número de teléfono
+# ── HISTORIAL DE CONVERSACIÓN ──────────────────────────────────────────────────
 chat_history: dict[str, list] = {}
 MAX_HISTORY = 10
 
@@ -454,10 +464,10 @@ def add_to_history(phone: str, role: str, content: str):
     if phone not in chat_history:
         chat_history[phone] = []
     chat_history[phone].append({"role": role, "content": content})
-    # Mantener solo los últimos MAX_HISTORY mensajes
     if len(chat_history[phone]) > MAX_HISTORY:
         chat_history[phone] = chat_history[phone][-MAX_HISTORY:]
 
+# ── CLASIFICADOR ───────────────────────────────────────────────────────────────
 async def classify(text: str, has_image: bool) -> str:
     if has_image and not text.strip():
         return "GASTO"
@@ -486,12 +496,10 @@ REGLA CLAVE: si el mensaje PREGUNTA algo (tiene "?", "cuánto", "qué", "cómo",
     return "GASTO"
 
 async def query_finances(month: str = None) -> str:
-    """Consulta la base de Finances en Notion y devuelve un resumen."""
     now = now_argentina()
     if not month:
         month = now.strftime("%Y-%m")
 
-    # Calcular rango del mes
     year, mon = map(int, month.split("-"))
     last_day = monthrange(year, mon)[1]
     date_start = f"{month}-01"
@@ -521,15 +529,12 @@ async def query_finances(month: str = None) -> str:
         ingresos = 0
         egresos = 0
         por_categoria = {}
-        items = []
 
         for page in results:
             props = page.get("properties", {})
             in_out = props.get("In - Out", {}).get("select", {})
             in_out_name = in_out.get("name", "") if in_out else ""
             value = props.get("Value (ars)", {}).get("number", 0) or 0
-            name_list = props.get("Name", {}).get("title", [])
-            name = name_list[0]["plain_text"] if name_list else "?"
             cats = [c["name"] for c in props.get("Categoría", {}).get("multi_select", [])]
 
             if "INGRESO" in in_out_name:
@@ -538,8 +543,6 @@ async def query_finances(month: str = None) -> str:
                 egresos += value
                 for cat in cats:
                     por_categoria[cat] = por_categoria.get(cat, 0) + value
-
-            items.append({"name": name, "value": value, "in_out": in_out_name, "cats": cats})
 
         balance = ingresos - egresos
         top_cats = sorted(por_categoria.items(), key=lambda x: x[1], reverse=True)[:5]
@@ -555,17 +558,14 @@ async def query_finances(month: str = None) -> str:
         return summary
 
 async def handle_chat(phone: str, text: str) -> str:
-    """Conversación libre con Claude, con acceso a datos financieros."""
     history = get_history(phone)
     add_to_history(phone, "user", text)
     now = now_argentina()
 
-    # Detectar si pregunta sobre finanzas y pre-cargar datos
     finance_context = ""
     text_lower = text.lower()
     finance_keywords = ["gasté", "gaste", "gastado", "ingres", "gané", "gane", "balance", "cuánto", "cuanto", "finanzas", "plata", "mes"]
     if any(k in text_lower for k in finance_keywords):
-        # Detectar mes mencionado o usar el actual
         mes = now.strftime("%Y-%m")
         if "febrero" in text_lower: mes = f"{now.year}-02"
         elif "enero" in text_lower: mes = f"{now.year}-01"
@@ -591,8 +591,7 @@ Si el mensaje tiene un monto para registrar, avisale que lo mande sin preámbulo
     add_to_history(phone, "assistant", reply)
     return reply
 
-
-# ── Webhook ── ESTRUCTURA EXACTAMENTE IGUAL AL CODIGO QUE FUNCIONA ────────────
+# ── Webhook ────────────────────────────────────────────────────────────────────
 @app.get("/webhook")
 async def verify_webhook(request: Request):
     params = dict(request.query_params)
@@ -604,47 +603,55 @@ async def verify_webhook(request: Request):
 @app.post("/webhook")
 async def webhook(request: Request, background_tasks: BackgroundTasks):
     body = await request.json()
-
     try:
         entry = body["entry"][0]
         changes = entry["changes"][0]["value"]
         messages = changes.get("messages")
         if not messages:
             return {"ok": True}
-
         message = messages[0]
-        # Responder a Meta inmediatamente para evitar duplicados
         background_tasks.add_task(process_message, message)
-
     except Exception:
         pass
-
     return {"ok": True}
 
 async def process_message(message: dict):
-    """Procesa el mensaje en background para responder a Meta rápido."""
-    from_number = "54298154894334"  # fallback
+    from_number = "54298154894334"
     try:
-        from_number = "54298154894334"
         msg_type = message["type"]
-
         text = ""
         image_b64 = image_type = None
 
         if msg_type == "text":
             text = message["text"]["body"]
+
         elif msg_type == "image":
             media_id = message["image"]["id"]
             caption = message["image"].get("caption", "")
             text = caption
             image_b64, image_type = await get_media_base64(media_id)
+
         elif msg_type == "document":
             media_id = message["document"]["id"]
             caption = message["document"].get("caption", "")
             text = caption
             image_b64, image_type = await get_media_base64(media_id)
+
+        # ── NUEVO: soporte de audios ──────────────────────────────────────────
+        elif msg_type == "audio":
+            media_id = message["audio"]["id"]
+            await send_message(from_number, "🎙️ Transcribiendo audio...")
+            transcripcion = await transcribe_audio(media_id)
+            if transcripcion:
+                text = transcripcion
+                await send_message(from_number, f"🎙️ _{transcripcion}_")
+            else:
+                await send_message(from_number, "❌ No pude transcribir el audio. Mandalo como texto por favor.")
+                return
+        # ─────────────────────────────────────────────────────────────────────
+
         else:
-            return {"ok": True}
+            return
 
         if text.strip().lower() in ["/start", "hola", "help", "ayuda"]:
             await send_message(from_number,
@@ -652,10 +659,11 @@ async def process_message(message: dict):
                 "\U0001f4b8 *Gastos:* _\"Verduleria 3500\"_\n"
                 "\U0001f33f *Plantas:* _\"Me compre un potus\"_\n"
                 "\U0001f4c5 *Eventos:* _\"Manana a las 10 turno medico\"_\n"
-                "\U0001f4f8 *Fotos:* manda cualquier factura\n\n"
+                "\U0001f4f8 *Fotos:* manda cualquier factura\n"
+                "\U0001f3a4 *Audios:* hablá directo, te entiendo\n\n"
                 "Todo se guarda automaticamente \U0001f4aa"
             )
-            return {"ok": True}
+            return
 
         await send_message(from_number, "\u23f3 Procesando...")
 
@@ -717,12 +725,7 @@ async def process_message(message: dict):
 async def health():
     return {"status": "ok", "bot": "matrics"}
 
-# ── MÓDULO RECORDATORIOS ──────────────────────────────────────────────────────
-# Usamos Google Calendar como backend:
-# - Eventos temporales: descripción contiene [TEMP] → se borran al disparar
-# - Recordatorios de eventos: descripción contiene [REM:60] o [REM:15] → avisa X minutos antes
-# - Resumen diario: cron a las 8am lista todos los eventos del día
-
+# ── MÓDULO RECORDATORIOS ───────────────────────────────────────────────────────
 async def parse_recordatorio(text: str) -> dict:
     now = now_argentina()
     response = anthropic.messages.create(
@@ -743,19 +746,17 @@ Ejemplos:
     return json.loads(raw)
 
 async def create_recordatorio(data: dict) -> tuple[bool, str]:
-    """Crea un evento temporal en Google Calendar con tag [TEMP]."""
     access_token = await get_gcal_access_token()
     if not access_token:
         return False, "Calendar no configurado"
 
-    fire_at = data["fire_at"]  # YYYY-MM-DDTHH:MM
-    # El evento dura 1 minuto
+    fire_at = data["fire_at"]
     start_dt = datetime.strptime(fire_at, "%Y-%m-%dT%H:%M")
     end_dt = start_dt + timedelta(minutes=1)
 
     event = {
         "summary": f"🔔 {data['summary']}",
-        "description": "[TEMP]",  # marca para borrar después
+        "description": "[TEMP]",
         "start": {"dateTime": f"{fire_at}:00", "timeZone": "America/Argentina/Buenos_Aires"},
         "end": {"dateTime": end_dt.strftime("%Y-%m-%dT%H:%M:00"), "timeZone": "America/Argentina/Buenos_Aires"},
     }
@@ -780,15 +781,9 @@ def format_recordatorio(data: dict) -> str:
         tiempo_str = fire_at
     return f"{emoji} *{data['summary']}*\nTe aviso {tiempo_str}\n\n✅ Recordatorio configurado"
 
-# ── CRON JOB ──────────────────────────────────────────────────────────────────
+# ── CRON JOB ───────────────────────────────────────────────────────────────────
 @app.get("/cron")
 async def cron_job():
-    """
-    Se ejecuta cada minuto. Maneja:
-    1. Resumen diario a las 8am
-    2. Recordatorios de eventos (1hr antes, 15min antes)
-    3. Eventos temporales [TEMP] que hay que disparar y borrar
-    """
     access_token = await get_gcal_access_token()
     if not access_token:
         return {"ok": False, "reason": "no gcal token"}
@@ -799,7 +794,6 @@ async def cron_job():
     async with httpx.AsyncClient() as http:
         headers = {"Authorization": f"Bearer {access_token}"}
 
-        # Ventana de búsqueda: próximos 61 minutos
         time_min = now.strftime("%Y-%m-%dT%H:%M:00-03:00")
         time_max = (now + timedelta(minutes=61)).strftime("%Y-%m-%dT%H:%M:00-03:00")
 
@@ -819,7 +813,6 @@ async def cron_job():
             return {"ok": False}
 
         events = r.json().get("items", [])
-        minutes_now = now.hour * 60 + now.minute
 
         for event in events:
             event_id = event.get("id")
@@ -827,9 +820,8 @@ async def cron_job():
             description = event.get("description", "") or ""
             start = event.get("start", {})
 
-            # Calcular cuántos minutos faltan para el evento
             if "dateTime" in start:
-                event_dt_str = start["dateTime"][:16]  # YYYY-MM-DDTHH:MM
+                event_dt_str = start["dateTime"][:16]
                 try:
                     event_dt = datetime.strptime(event_dt_str, "%Y-%m-%dT%H:%M")
                     diff_minutes = int((event_dt - now.replace(tzinfo=None)).total_seconds() / 60)
@@ -838,36 +830,27 @@ async def cron_job():
             else:
                 continue
 
-            # 1. Evento temporal [TEMP] → disparar y borrar
             if "[TEMP]" in description and 0 <= diff_minutes <= 1:
                 clean_name = summary.replace("🔔 ", "")
                 await send_message(MY_NUMBER, f"🔔 *Recordatorio*\n{clean_name}")
-                # Borrar el evento
                 await http.delete(
                     f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}",
                     headers=headers
                 )
                 fired.append(f"TEMP: {summary}")
 
-            # 2. Recordatorio 60 minutos antes → [REM:60] en descripción
             elif "[REM:60]" in description and 59 <= diff_minutes <= 61:
                 loc = event.get("location", "")
                 loc_str = f"\n📍 {loc}" if loc else ""
-                await send_message(MY_NUMBER,
-                    f"⏰ *En 1 hora:* {summary}{loc_str}"
-                )
+                await send_message(MY_NUMBER, f"⏰ *En 1 hora:* {summary}{loc_str}")
                 fired.append(f"REM60: {summary}")
 
-            # 3. Recordatorio 15 minutos antes → [REM:15] en descripción
             elif "[REM:15]" in description and 14 <= diff_minutes <= 16:
                 loc = event.get("location", "")
                 loc_str = f"\n📍 {loc}" if loc else ""
-                await send_message(MY_NUMBER,
-                    f"⏰ *En 15 minutos:* {summary}{loc_str}"
-                )
+                await send_message(MY_NUMBER, f"⏰ *En 15 minutos:* {summary}{loc_str}")
                 fired.append(f"REM15: {summary}")
 
-        # 4. Resumen diario a las 8:00am (±1 min)
         if now.hour == DAILY_SUMMARY_HOUR and now.minute == 0:
             await send_daily_summary(http, access_token, now)
             fired.append("DAILY_SUMMARY")
@@ -875,7 +858,6 @@ async def cron_job():
     return {"ok": True, "fired": fired, "time": now.strftime("%H:%M")}
 
 async def send_daily_summary(http, access_token: str, now: datetime):
-    """Manda por WhatsApp los eventos de hoy."""
     today_start = now.replace(hour=0, minute=0, second=0).strftime("%Y-%m-%dT00:00:00-03:00")
     today_end = now.replace(hour=23, minute=59, second=59).strftime("%Y-%m-%dT23:59:59-03:00")
 
@@ -895,7 +877,6 @@ async def send_daily_summary(http, access_token: str, now: datetime):
         return
 
     events = r.json().get("items", [])
-    # Filtrar eventos temporales
     events = [e for e in events if "[TEMP]" not in (e.get("description") or "")]
 
     if not events:
@@ -916,12 +897,11 @@ async def send_daily_summary(http, access_token: str, now: datetime):
 
     await send_message(MY_NUMBER, "\n".join(lines))
 
-
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "time": now_argentina().strftime("%H:%M"), "bot": "matrics"}
 
-# ── MÓDULO SHOPPING ───────────────────────────────────────────────────────────
+# ── MÓDULO SHOPPING ────────────────────────────────────────────────────────────
 def notion_headers():
     return {
         "Authorization": f"Bearer {NOTION_TOKEN}",
@@ -930,7 +910,6 @@ def notion_headers():
     }
 
 async def parse_shopping_intent(text: str) -> dict:
-    """Claude interpreta el mensaje y devuelve la intención de compras."""
     response = anthropic.messages.create(
         model="claude-sonnet-4-20250514", max_tokens=300,
         system="Analizá mensajes sobre lista de compras. Responde SOLO JSON válido sin markdown.",
@@ -956,7 +935,6 @@ Reglas:
     return json.loads(raw)
 
 async def search_shopping_item(name: str) -> list:
-    """Busca un ítem en la base de Shopping por nombre."""
     async with httpx.AsyncClient() as http:
         r = await http.post(
             f"https://api.notion.com/v1/databases/{SHOPPING_DB_ID}/query",
@@ -973,13 +951,11 @@ async def search_shopping_item(name: str) -> list:
         return []
 
 async def handle_shopping(text: str) -> str:
-    """Procesa un mensaje de shopping y devuelve la respuesta."""
     intent = await parse_shopping_intent(text)
     action = intent.get("action")
     items = intent.get("items", [])
 
     if action == "list":
-        # Listar items sin stock
         async with httpx.AsyncClient() as http:
             r = await http.post(
                 f"https://api.notion.com/v1/databases/{SHOPPING_DB_ID}/query",
@@ -1009,11 +985,9 @@ async def handle_shopping(text: str) -> str:
 
     for item_name in items:
         if action == "add":
-            # Buscar si ya existe
             existing = await search_shopping_item(item_name)
             if existing:
                 page_id = existing[0]["id"]
-                # Ya existe, solo destildarlo
                 async with httpx.AsyncClient() as http:
                     await http.patch(
                         f"https://api.notion.com/v1/pages/{page_id}",
@@ -1022,7 +996,6 @@ async def handle_shopping(text: str) -> str:
                     )
                 results_text.append(f"📋 _{item_name}_ ya estaba en la lista, aparece ahora como faltante")
             else:
-                # Crear nuevo
                 props = {
                     "Name": {"title": [{"text": {"content": item_name}}]},
                     "en stock": {"checkbox": False}
@@ -1055,7 +1028,6 @@ async def handle_shopping(text: str) -> str:
                     results_text.append(f"🛒 _{item_name}_ agregado a la lista de compras")
             else:
                 if not in_stock:
-                    # No existe, crearlo como faltante
                     props = {
                         "Name": {"title": [{"text": {"content": item_name}}]},
                         "en stock": {"checkbox": False}
