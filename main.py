@@ -603,15 +603,20 @@ def format_evento(data: dict, guardado: bool) -> str:
     lines.append("\n✅ Agregado a Google Calendar" if guardado else "\n⚠️ Anota esto manualmente — Calendar no configurado")
     return "\n".join(lines)
 
-async def parse_evento(text: str) -> dict:
+async def parse_evento(text: str, image_b64: str = None, image_type: str = None) -> dict:
     now = now_argentina()
+    user_content = []
+    if image_b64:
+        user_content.append({"type": "image", "source": {"type": "base64", "media_type": image_type or "image/jpeg", "data": image_b64}})
+    user_content.append({"type": "text", "text": f"""Hoy es {now.strftime("%Y-%m-%d")}, hora actual: {now.strftime("%H:%M")}
+Mensaje: {text or "(ver imagen adjunta)"}
+Extraé la info del evento de la imagen si la hay, o del texto.
+Respondé:
+{{"summary":"titulo","date":"YYYY-MM-DD","time":"HH:MM o null","duration_minutes":60,"location":"lugar o null","description":"desc o null","emoji":"emoji"}}"""})
     response = anthropic.messages.create(
         model="claude-sonnet-4-20250514", max_tokens=300,
         system="Extraé info de un evento. Responde SOLO JSON válido sin markdown. Usa zona horaria Argentina (UTC-3).",
-        messages=[{"role": "user", "content": f"""Hoy es {now.strftime("%Y-%m-%d")}, hora actual: {now.strftime("%H:%M")}
-Mensaje: {text}
-Respondé:
-{{"summary":"titulo","date":"YYYY-MM-DD","time":"HH:MM o null","duration_minutes":60,"location":"lugar o null","description":"desc o null","emoji":"emoji"}}"""}]
+        messages=[{"role": "user", "content": user_content}]
     )
     raw = response.content[0].text.strip()
     if raw.startswith("```"):
@@ -789,9 +794,15 @@ def add_to_history(phone: str, role: str, content: str):
         chat_history[phone] = chat_history[phone][-MAX_HISTORY:]
 
 # ── CLASIFICADOR ───────────────────────────────────────────────────────────────
-async def classify(text: str, has_image: bool) -> str:
-    if has_image and not text.strip():
+async def classify(text: str, has_image: bool, image_b64: str = None, image_type: str = None) -> str:
+    if has_image and not text.strip() and not image_b64:
         return "GASTO"
+    # Si hay imagen, pasársela a Claude para que clasifique correctamente
+    content = []
+    if image_b64:
+        content.append({"type": "image", "source": {"type": "base64", "media_type": image_type or "image/jpeg", "data": image_b64}})
+    prompt_text = text if text.strip() else "(ver imagen adjunta)"
+    content.append({"type": "text", "text": prompt_text})
     response = anthropic.messages.create(
         model="claude-sonnet-4-20250514", max_tokens=10,
         system="""Responde SOLO una palabra: GASTO, CORREGIR_GASTO, PLANTA, EVENTO, EDITAR_EVENTO, ELIMINAR_EVENTO, RECORDATORIO, SHOPPING o CHAT.
@@ -809,7 +820,7 @@ SHOPPING: gestionar lista de compras — "me quedé sin X", "compré X", "agreg�
 CHAT: cualquier pregunta, consulta o conversación. Si tiene "?" o pide información → CHAT.
 
 REGLA: si el mensaje PREGUNTA algo → siempre CHAT, nunca GASTO.""",
-        messages=[{"role": "user", "content": text}]
+        messages=[{"role": "user", "content": content}]
     )
     r = response.content[0].text.strip().upper()
     if "ELIMINAR_EVENTO" in r:  return "ELIMINAR_EVENTO"
@@ -1006,7 +1017,7 @@ async def process_message(message: dict):
 
         await send_message(from_number, "⏳ Procesando...")
 
-        tipo = await classify(text, image_b64 is not None)
+        tipo = await classify(text, image_b64 is not None, image_b64, image_type)
         exchange_rate = await get_exchange_rate()
 
         if tipo == "GASTO":
@@ -1045,7 +1056,7 @@ async def process_message(message: dict):
                 await send_message(from_number, f"❌ Error guardando planta: {error[:200]}")
 
         elif tipo == "EVENTO":
-            parsed = await parse_evento(text)
+            parsed = await parse_evento(text, image_b64, image_type)
             guardado = await create_evento_gcal(parsed)
             await send_message(from_number, format_evento(parsed, guardado))
 
@@ -1077,7 +1088,8 @@ async def process_message(message: dict):
         pass
     except Exception as e:
         try:
-            await send_message(from_number, f"❌ Error: {str(e)[:200]}")
+            err_msg = f"{type(e).__name__}: {str(e)}"
+            await send_message(from_number, f"❌ Error: {err_msg[:200]}")
         except Exception:
             pass
 
@@ -1260,7 +1272,11 @@ Respondé SOLO el array JSON:
     raw = response.content[0].text.strip()
     if raw.startswith("```"):
         raw = raw.strip("`").lstrip("json").strip()
-    return json.loads(raw)
+    try:
+        return json.loads(raw)
+    except Exception:
+        # Fallback: devolver items sin enriquecer
+        return [{"name": i.capitalize(), "emoji": "🛒", "category": "", "store": "", "frequency": "One time"} for i in items]
 
 async def search_recipe_in_notion(recipe_name: str) -> list[str] | None:
     try:
