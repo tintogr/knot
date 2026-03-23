@@ -1194,97 +1194,93 @@ async def health_check():
 def notion_headers():
     return {"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"}
 
-def format_item_name(name: str) -> str:
-    """Capitaliza la primera letra del nombre."""
-    return name.strip().capitalize() if name else name
+# ── Categorías y tiendas válidas de la DB Shopping ────────────────────────────
+SHOPPING_CATEGORIES = ["Frutas y verduras", "Enlatado", "Infusion", "Lacteo", "Especias",
+                       "Limpieza", "Panificado", "Herramienta", "Construccion", "Higiene",
+                       "Electrónica", "Carne", "Galletitas", "Alcohol", "Bebida", "Fiambre",
+                       "Grano", "Comida"]
+SHOPPING_STORES     = ["Super", "Panaderia", "Verduleria", "Dietetica"]
+SHOPPING_FREQUENCY  = ["Often", "Monthly", "Annual", "One time"]
 
-ITEM_EMOJIS = {
-    "leche": "🥛", "crema": "🥛", "yogur": "🥛", "queso": "🧀",
-    "manteca": "🧈", "huevo": "🥚", "pan": "🍞", "harina": "🌾",
-    "azúcar": "🍚", "azucar": "🍚", "sal": "🧂", "aceite": "🫙",
-    "arroz": "🍚", "pasta": "🍝", "fideos": "🍝", "lenteja": "🫘",
-    "pollo": "🍗", "carne": "🥩", "cerdo": "🥩", "pescado": "🐟",
-    "tomate": "🍅", "cebolla": "🧅", "ajo": "🧄", "papa": "🥔",
-    "zanahoria": "🥕", "lechuga": "🥬", "espinaca": "🥬",
-    "manzana": "🍎", "banana": "🍌", "naranja": "🍊", "limón": "🍋",
-    "frutilla": "🍓", "uva": "🍇", "pera": "🍐",
-    "café": "☕", "te": "🍵", "yerba": "🌿", "mate": "🧉",
-    "agua": "💧", "jugo": "🧃", "gaseosa": "🥤", "cerveza": "🍺",
-    "vino": "🍷", "chocolate": "🍫", "galletita": "🍪",
-    "detergente": "🧴", "jabón": "🧼", "shampoo": "🧴",
-    "papel": "🧻", "esponja": "🧽", "lavandina": "🫧",
-    "vainilla": "🍦", "esencia": "🍶", "levadura": "🧫",
-    "mantequilla": "🧈", "nata": "🥛",
-}
+async def enrich_items_with_claude(items: list[str]) -> list[dict]:
+    """Pide a Claude que enriquezca cada ítem con emoji, categoría, tienda y frecuencia."""
+    if not items:
+        return []
+    response = anthropic.messages.create(
+        model="claude-sonnet-4-20250514", max_tokens=600,
+        system="Enriquecé una lista de ítems de supermercado. Responde SOLO JSON válido sin markdown.",
+        messages=[{"role": "user", "content": f"""Items: {json.dumps(items, ensure_ascii=False)}
 
-def get_item_emoji(name: str) -> str:
-    name_lower = name.lower()
-    for keyword, emoji in ITEM_EMOJIS.items():
-        if keyword in name_lower:
-            return emoji
-    return "🛒"
+Para cada item respondé un array con:
+- "name": nombre capitalizado correctamente
+- "emoji": emoji MÁS específico para ese producto (nunca usar 🛒)
+- "category": una de {SHOPPING_CATEGORIES}
+- "store": la tienda más lógica de {SHOPPING_STORES}
+- "frequency": uno de {SHOPPING_FREQUENCY}
+  * "Often" = compra frecuente (verduras, lácteos, pan, yerba)
+  * "Monthly" = mensual (aceite, harina, arroz, pasta, limpieza)
+  * "Annual" = esporádico (especias raras, herramientas)
+  * "One time" = compra puntual única
+
+Respondé SOLO el array JSON:
+[{{"name": "Aceite de oliva", "emoji": "🫒", "category": "Comida", "store": "Super", "frequency": "Monthly"}}]"""}]
+    )
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`").lstrip("json").strip()
+    return json.loads(raw)
 
 async def search_recipe_in_notion(recipe_name: str) -> list[str] | None:
-    """Busca una receta en la DB de Recetas y devuelve sus ingredientes si la encuentra."""
-    async with httpx.AsyncClient() as http:
-        r = await http.post(
-            f"https://api.notion.com/v1/databases/{RECIPES_DB_ID.replace('-','')}/query",
-            headers=notion_headers(),
-            json={
-                "filter": {"property": "Name", "title": {"contains": recipe_name[:30]}},
-                "page_size": 1
-            }
-        )
-        if r.status_code != 200 or not r.json().get("results"):
-            return None
-        page = r.json()["results"][0]
-        # Ingredientes está como multi_select
-        ingredientes = [
-            i["name"] for i in page["properties"].get("Ingredientes", {}).get("multi_select", [])
-        ]
-        return ingredientes if ingredientes else None
+    try:
+        async with httpx.AsyncClient() as http:
+            r = await http.post(
+                f"https://api.notion.com/v1/databases/{RECIPES_DB_ID.replace('-','')}/query",
+                headers=notion_headers(),
+                json={"filter": {"property": "Name", "title": {"contains": recipe_name[:30]}}, "page_size": 1}
+            )
+            if r.status_code != 200 or not r.json().get("results"):
+                return None
+            page = r.json()["results"][0]
+            ingredientes = [i["name"] for i in page["properties"].get("Ingredientes", {}).get("multi_select", [])]
+            return ingredientes if ingredientes else None
+    except Exception:
+        return None
 
-async def save_recipe_to_notion(recipe_name: str, ingredients: list[str], source: str = "Matrics"):
-    """Guarda una receta nueva en la DB de Recetas."""
-    async with httpx.AsyncClient() as http:
-        await http.post(
-            "https://api.notion.com/v1/pages",
-            headers=notion_headers(),
-            json={
-                "parent": {"database_id": RECIPES_DB_ID.replace("-", "")},
-                "icon": {"type": "emoji", "emoji": "🍽️"},
-                "properties": {
-                    "Name": {"title": [{"text": {"content": recipe_name.capitalize()}}]},
-                    "Fuente": {"select": {"name": source}},
+async def save_recipe_to_notion(recipe_name: str, source: str = "Matrics"):
+    try:
+        async with httpx.AsyncClient() as http:
+            await http.post(
+                "https://api.notion.com/v1/pages",
+                headers=notion_headers(),
+                json={
+                    "parent": {"database_id": RECIPES_DB_ID.replace("-", "")},
+                    "icon": {"type": "emoji", "emoji": "🍽️"},
+                    "properties": {
+                        "Name": {"title": [{"text": {"content": recipe_name.capitalize()}}]},
+                        "Fuente": {"select": {"name": source}},
+                    }
                 }
-            }
-        )
+            )
+    except Exception:
+        pass
 
 async def parse_shopping_intent(text: str) -> dict:
     response = anthropic.messages.create(
-        model="claude-sonnet-4-20250514", max_tokens=400,
+        model="claude-sonnet-4-20250514", max_tokens=300,
         system="Analizá mensajes sobre lista de compras. Responde SOLO JSON válido sin markdown.",
         messages=[{"role": "user", "content": f"""Mensaje: {text}
 
 Respondé:
 {{"action": "out_of_stock"|"in_stock"|"add"|"list",
-  "items": ["item1", "item2", ...],
-  "recipe_name": "nombre de la receta si se menciona explicitamente, sino null",
-  "is_recipe_request": true si pide ingredientes de una receta específica}}
+  "items": ["item1", "item2"],
+  "recipe_name": "nombre de la receta o null",
+  "is_recipe_request": true/false}}
 
-Reglas:
-- "out_of_stock": "me quedé sin X", "no tengo X" → destildar
-- "in_stock": "compré X", "ya tengo X" → tildar
-- "add": "agregá X", "necesito X", ingredientes de algo → inferí todos los ingredientes
-- "list": "qué me falta", "mostrame la lista"
-
-Si pide ingredientes de una receta nombrada: is_recipe_request=true, recipe_name="nombre", items=[]
-Si pide ingredientes genéricos: is_recipe_request=false, items=["item1", ...]
-
-Ejemplos:
-- "ingredientes para crema chantilly" → recipe_name="crema chantilly", is_recipe_request=true, items=[]
-- "ingredientes para una pizza" → recipe_name="pizza", is_recipe_request=true, items=[]
-- "agregá azúcar y harina" → is_recipe_request=false, items=["azúcar", "harina"]"""}]
+- out_of_stock: "me quedé sin X", "no tengo X"
+- in_stock: "compré X", "ya tengo X"
+- add: "agregá X", "necesito X", ingredientes para algo
+- list: "qué me falta", "mostrame la lista"
+- is_recipe_request=true si pide ingredientes de una receta específica"""}]
     )
     raw = response.content[0].text.strip()
     if raw.startswith("```"):
@@ -1300,37 +1296,60 @@ async def search_shopping_item(name: str) -> list:
         )
         return r.json().get("results", []) if r.status_code == 200 else []
 
-async def handle_shopping(text: str) -> str:
-    intent = await parse_shopping_intent(text)
-    action = intent.get("action")
-    items  = intent.get("items", [])
-    is_recipe = intent.get("is_recipe_request", False)
-    recipe_name = intent.get("recipe_name")
+async def add_shopping_item(item: dict) -> tuple[bool, str]:
+    name  = item.get("name", "").strip()
+    emoji = item.get("emoji", "🛒")
+    freq  = item.get("frequency", "One time")
+    props = {
+        "Name":  {"title": [{"text": {"content": name}}]},
+        "Stock": {"checkbox": False},
+    }
+    if item.get("category") in SHOPPING_CATEGORIES:
+        props["Category"] = {"select": {"name": item["category"]}}
+    if item.get("store") in SHOPPING_STORES:
+        props["Store"] = {"multi_select": [{"name": item["store"]}]}
+    if freq in SHOPPING_FREQUENCY:
+        props["Frequency"] = {"status": {"name": freq}}
+    async with httpx.AsyncClient() as http:
+        r = await http.post(
+            "https://api.notion.com/v1/pages",
+            headers=notion_headers(),
+            json={"parent": {"database_id": SHOPPING_DB_ID}, "icon": {"type": "emoji", "emoji": emoji}, "properties": props}
+        )
+        return r.status_code == 200, r.text[:150] if r.status_code != 200 else ""
 
-    # ── Si pide ingredientes de una receta ────────────────────────────────────
+async def handle_shopping(text: str) -> str:
+    try:
+        intent = await parse_shopping_intent(text)
+    except Exception as e:
+        return f"❌ No pude interpretar el mensaje: {str(e)[:100]}"
+
+    action      = intent.get("action")
+    items       = intent.get("items", [])
+    is_recipe   = intent.get("is_recipe_request", False)
+    recipe_name = intent.get("recipe_name")
+    recipe_note = ""
+
     if action == "add" and is_recipe and recipe_name:
-        # 1. Buscar en la DB de Recetas
         notion_ingredients = await search_recipe_in_notion(recipe_name)
         if notion_ingredients:
             items = notion_ingredients
-            recipe_note = f"📖 Receta encontrada: _{recipe_name.capitalize()}_\n"
+            recipe_note = f"📖 *{recipe_name.capitalize()}* (de tus recetas)\n"
         else:
-            # 2. No está en Notion → Claude infiere los ingredientes
-            resp = anthropic.messages.create(
-                model="claude-sonnet-4-20250514", max_tokens=200,
-                system="Respondé SOLO JSON sin markdown.",
-                messages=[{"role": "user", "content": f'Ingredientes básicos para hacer "{recipe_name}". Respondé: {{"items": ["ingrediente1", "ingrediente2", ...]}}'}]
-            )
-            raw = resp.content[0].text.strip()
-            if raw.startswith("```"):
-                raw = raw.strip("`").lstrip("json").strip()
-            items = json.loads(raw).get("items", [])
-            # 3. Guardar la receta en Notion con Fuente=Matrics
-            await save_recipe_to_notion(recipe_name, items, source="Matrics")
-            recipe_note = f"🍽️ No tenía esa receta — la agregué a Recetas (Fuente: Matrics)\n"
-
-    else:
-        recipe_note = ""
+            try:
+                resp = anthropic.messages.create(
+                    model="claude-sonnet-4-20250514", max_tokens=200,
+                    system="Respondé SOLO JSON sin markdown.",
+                    messages=[{"role": "user", "content": f'Ingredientes básicos para "{recipe_name}". Respondé: {{"items": ["ingrediente1", ...]}}'}]
+                )
+                raw = resp.content[0].text.strip()
+                if raw.startswith("```"):
+                    raw = raw.strip("`").lstrip("json").strip()
+                items = json.loads(raw).get("items", [])
+            except Exception:
+                items = []
+            await save_recipe_to_notion(recipe_name, source="Matrics")
+            recipe_note = f"🍽️ No tenía esa receta — la agregué a Recetas\n"
 
     if action == "list":
         async with httpx.AsyncClient() as http:
@@ -1341,76 +1360,61 @@ async def handle_shopping(text: str) -> str:
                       "sorts": [{"property": "Category", "direction": "ascending"}]}
             )
             if r.status_code != 200:
-                return "❌ No pude leer la lista de compras"
+                return f"❌ No pude leer la lista: {r.text[:100]}"
             results = r.json().get("results", [])
             if not results:
                 return "✅ ¡No te falta nada! La lista está vacía."
             lines = ["🛒 *Tu lista de compras:*\n"]
             for item in results:
                 name = item["properties"]["Name"]["title"][0]["plain_text"] if item["properties"]["Name"]["title"] else "?"
-                tipo = item["properties"].get("Category", {}).get("select", {})
-                tipo_name = tipo.get("name", "") if tipo else ""
-                lines.append(f"• {name}{f' _{tipo_name}_' if tipo_name else ''}")
+                cat  = (item["properties"].get("Category", {}).get("select") or {}).get("name", "")
+                lines.append(f"• {name}{f' _{cat}_' if cat else ''}")
             return "\n".join(lines)
 
     if not items:
         return "❓ No entendí qué producto querés actualizar."
 
-    results_text = []
-    for item_name in items:
-        display_name = format_item_name(item_name)
-        emoji = get_item_emoji(item_name)
-
-        if action == "add":
+    if action == "add":
+        try:
+            enriched = await enrich_items_with_claude(items)
+        except Exception:
+            enriched = [{"name": i.capitalize(), "emoji": "🛒", "category": "", "store": "", "frequency": "One time"} for i in items]
+        results_text = []
+        for item in enriched:
+            item_name = item.get("name", "")
             existing = await search_shopping_item(item_name)
             if existing:
                 async with httpx.AsyncClient() as http:
                     await http.patch(f"https://api.notion.com/v1/pages/{existing[0]['id']}",
                                      headers=notion_headers(),
                                      json={"properties": {"Stock": {"checkbox": False}}})
-                results_text.append(f"📋 {emoji} _{display_name}_ ya estaba, aparece como faltante")
+                results_text.append(f"📋 {item.get('emoji','🛒')} _{item_name}_ ya estaba, aparece como faltante")
             else:
-                async with httpx.AsyncClient() as http:
-                    r = await http.post("https://api.notion.com/v1/pages",
-                                        headers=notion_headers(),
-                                        json={
-                                            "parent": {"database_id": SHOPPING_DB_ID},
-                                            "icon": {"type": "emoji", "emoji": emoji},
-                                            "properties": {
-                                                "Name": {"title": [{"text": {"content": display_name}}]},
-                                                "Stock": {"checkbox": False}
-                                            }
-                                        })
-                    ok = r.status_code == 200
-                    err_detail = r.text[:150] if not ok else ""
-                results_text.append(f"✅ {emoji} _{display_name}_ agregado" if ok else f"❌ Error agregando _{display_name}_: {err_detail}")
+                ok, err = await add_shopping_item(item)
+                results_text.append(f"✅ {item.get('emoji','🛒')} _{item_name}_ agregado" if ok else f"❌ Error agregando _{item_name}_: {err}")
+        return recipe_note + "\n".join(results_text) + "\n\n📋 Lista actualizada en Notion"
 
-        elif action in ["out_of_stock", "in_stock"]:
-            in_stock = action == "in_stock"
-            existing = await search_shopping_item(item_name)
-            if existing:
-                async with httpx.AsyncClient() as http:
-                    await http.patch(f"https://api.notion.com/v1/pages/{existing[0]['id']}",
-                                     headers=notion_headers(),
-                                     json={"properties": {"Stock": {"checkbox": in_stock}}})
-                results_text.append(f"✅ _{display_name}_ marcado como en stock" if in_stock else f"🛒 _{display_name}_ agregado a la lista")
+    results_text = []
+    for item_name in items:
+        display  = item_name.capitalize()
+        in_stock = action == "in_stock"
+        existing = await search_shopping_item(item_name)
+        if existing:
+            async with httpx.AsyncClient() as http:
+                await http.patch(f"https://api.notion.com/v1/pages/{existing[0]['id']}",
+                                 headers=notion_headers(),
+                                 json={"properties": {"Stock": {"checkbox": in_stock}}})
+            results_text.append(f"✅ _{display}_ marcado como en stock" if in_stock else f"🛒 _{display}_ agregado a la lista")
+        else:
+            if not in_stock:
+                try:
+                    enriched = await enrich_items_with_claude([item_name])
+                    item_data = enriched[0] if enriched else {"name": display, "emoji": "🛒", "category": "", "store": "", "frequency": "One time"}
+                except Exception:
+                    item_data = {"name": display, "emoji": "🛒", "category": "", "store": "", "frequency": "One time"}
+                ok, _ = await add_shopping_item(item_data)
+                results_text.append(f"🛒 {item_data.get('emoji','🛒')} _{display}_ agregado como faltante" if ok else f"❌ Error agregando _{display}_")
             else:
-                if not in_stock:
-                    async with httpx.AsyncClient() as http:
-                        r = await http.post("https://api.notion.com/v1/pages",
-                                            headers=notion_headers(),
-                                            json={
-                                                "parent": {"database_id": SHOPPING_DB_ID},
-                                                "icon": {"type": "emoji", "emoji": emoji},
-                                                "properties": {
-                                                    "Name": {"title": [{"text": {"content": display_name}}]},
-                                                    "Stock": {"checkbox": False}
-                                                }
-                                            })
-                        ok = r.status_code == 200
-                    results_text.append(f"🛒 {emoji} _{display_name}_ agregado como faltante" if ok else f"❌ Error agregando _{display_name}_")
-                else:
-                    results_text.append(f"❓ _{display_name}_ no está en la lista")
+                results_text.append(f"❓ _{display}_ no está en la lista")
 
-    header = recipe_note if recipe_note else ""
-    return header + "\n".join(results_text) + "\n\n📋 Lista actualizada en Notion"
+    return "\n".join(results_text) + "\n\n📋 Lista actualizada en Notion"
