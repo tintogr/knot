@@ -14,7 +14,8 @@ NOTION_TOKEN   = os.environ["NOTION_TOKEN"]
 NOTION_DB_ID   = os.environ["NOTION_DATABASE_ID"]
 PLANTS_DB_ID   = os.environ.get("NOTION_PLANTS_DB_ID", "39d22615-0106-43f8-9f01-2632734c38da")
 SHOPPING_DB_ID = os.environ.get("NOTION_SHOPPING_DB_ID", "cb85fdf75d684f61bafea20b5eeb653f")
-RECIPES_DB_ID  = os.environ.get("NOTION_RECIPES_DB_ID", "5eda6aa7-3c8c-4fd6-8433-c6714bcfdd20")
+RECIPES_DB_ID   = os.environ.get("NOTION_RECIPES_DB_ID", "5eda6aa7-3c8c-4fd6-8433-c6714bcfdd20")
+MEETINGS_DB_ID  = os.environ.get("NOTION_MEETINGS_DB_ID", "ed5b5023-c17c-46e5-be7d-56655f0257ee")
 WA_TOKEN       = os.environ["WHATSAPP_TOKEN"]
 WA_PHONE_ID    = os.environ["WHATSAPP_PHONE_ID"]
 WA_API         = f"https://graph.facebook.com/v22.0/{WA_PHONE_ID}/messages"
@@ -30,6 +31,11 @@ def now_argentina() -> datetime:
 
 # ── Memoria de categorías ──────────────────────────────────────────────────────
 category_overrides: dict[str, list[str]] = {}
+
+# ── Preferencias del usuario (persiste hasta el próximo deploy) ───────────────
+user_prefs: dict = {
+    "daily_summary_hour": None,  # None = usa la variable de entorno DAILY_SUMMARY_HOUR
+}
 
 # ── Última entrada tocada (para correcciones contextuales) ────────────────────
 # Guarda {page_id, name} del último gasto creado/corregido/eliminado
@@ -152,22 +158,14 @@ async def get_weather() -> dict | None:
         return None
 
 def format_weather_lines(w: dict) -> list[str]:
-    """Formato para el resumen matutino: hoy + mañana."""
+    """Formato para el resumen matutino: solo hoy."""
     lines = [
-        "*Hoy:*",
         f"🌡️ {w['temp']}°C (sensación {w['sensacion']}°C)",
         f"{w['emoji']} {w['desc']}",
     ]
     if w["lluvia"] > 0:
         lines.append(f"🌧️ Lluvia: {w['lluvia']}mm")
     lines.append(f"💨 {w['wind_desc']} ({w['viento']} km/h)")
-    lines.append("")
-    lines.append("*Mañana:*")
-    lines.append(f"🌡️ {w['manana_min']}°C — {w['manana_max']}°C")
-    lines.append(f"{w['manana_emoji']} {w['manana_desc']}")
-    if w["manana_lluvia"] > 0:
-        lines.append(f"🌧️ Lluvia: {w['manana_lluvia']}mm")
-    lines.append(f"💨 {w['manana_wind_desc']} ({w['manana_viento']} km/h)")
     return lines
 
 def format_weather_chat(w: dict, include_tomorrow: bool = False) -> str:
@@ -738,19 +736,25 @@ async def delete_evento(text: str) -> tuple[bool, str]:
     now = now_argentina()
     tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
     response = anthropic.messages.create(
-        model="claude-sonnet-4-20250514", max_tokens=150,
+        model="claude-sonnet-4-20250514", max_tokens=200,
         system="Extraé info sobre qué evento(s) eliminar. Responde SOLO JSON.",
         messages=[{"role": "user", "content": f"""Hoy: {now.strftime("%Y-%m-%d")}, mañana: {tomorrow}
 Mensaje: {text}
 Respondé:
-{{"search_term": "nombre del evento o null",
+{{"search_terms": ["nombre evento 1", "nombre evento 2"],
   "target_date": "YYYY-MM-DD si se menciona fecha, sino null",
-  "delete_all": true si quiere borrar todos los eventos de esa fecha}}"""}]
+  "delete_all": true si quiere borrar todos los de esa fecha}}
+Si hay múltiples eventos mencionados, ponelos todos en search_terms."""}]
     )
     raw = response.content[0].text.strip()
     if raw.startswith("```"):
         raw = raw.strip("`").lstrip("json").strip()
     intent = json.loads(raw)
+    # Soportar tanto search_term (legacy) como search_terms (array)
+    search_terms = intent.get("search_terms") or []
+    if not search_terms and intent.get("search_term"):
+        search_terms = [intent["search_term"]]
+
     async with httpx.AsyncClient() as http:
         headers = {"Authorization": f"Bearer {access_token}"}
         if intent.get("target_date"):
@@ -760,32 +764,44 @@ Respondé:
         else:
             time_min = (now - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00-03:00")
             time_max = (now + timedelta(days=60)).strftime("%Y-%m-%dT23:59:59-03:00")
-        params = {"timeMin": time_min, "timeMax": time_max, "singleEvents": "true",
-                  "orderBy": "startTime", "maxResults": "10"}
-        if intent.get("search_term"):
-            params["q"] = intent["search_term"]
-        r = await http.get(
-            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
-            headers=headers, params=params
-        )
-        if r.status_code != 200:
-            return False, "Error buscando eventos"
-        events = r.json().get("items", [])
-        events = [e for e in events if "[TEMP]" not in (e.get("description") or "")]
-        if not events:
-            return False, "No encontré ningún evento para eliminar"
+
         deleted = []
-        for event in events:
-            del_r = await http.delete(
-                f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event['id']}",
-                headers=headers
+        # Si no hay search_terms ni delete_all, no hacer nada
+        if not search_terms and not intent.get("delete_all"):
+            return False, "No entendí qué evento querés eliminar"
+
+        # Si delete_all: buscar todos sin filtro de nombre
+        if intent.get("delete_all") and not search_terms:
+            search_terms = [None]  # búsqueda sin filtro de nombre
+
+        for term in search_terms:
+            params = {"timeMin": time_min, "timeMax": time_max,
+                      "singleEvents": "true", "orderBy": "startTime", "maxResults": "10"}
+            if term:
+                params["q"] = term
+            r = await http.get(
+                "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                headers=headers, params=params
             )
-            if del_r.status_code == 204:
-                deleted.append(event.get("summary", "Evento"))
-            if not intent.get("delete_all"):
-                break
+            if r.status_code != 200:
+                continue
+            events = [e for e in r.json().get("items", []) if "[TEMP]" not in (e.get("description") or "")]
+            if not events:
+                continue
+            # Tomar solo el primero por term (a menos que delete_all)
+            to_delete = events if intent.get("delete_all") else [events[0]]
+            for event in to_delete:
+                if event.get("summary") in deleted:
+                    continue  # evitar duplicados
+                del_r = await http.delete(
+                    f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event['id']}",
+                    headers=headers
+                )
+                if del_r.status_code == 204:
+                    deleted.append(event.get("summary", "Evento"))
+
         if not deleted:
-            return False, "Error eliminando el evento"
+            return False, "No encontré ningún evento para eliminar"
         if len(deleted) == 1:
             return True, f"🗑️ *{deleted[0]}* eliminado del calendario"
         lista = "\n".join(f"• {e}" for e in deleted)
@@ -829,6 +845,7 @@ ELIMINAR_EVENTO: eliminar o borrar un evento del calendario.
 RECORDATORIO: "recordame en X tiempo", "avisame en X", "haceme acordar".
 EVENTO: crear un evento nuevo — turno, reunión, cumple, cita, viaje.
 SHOPPING: gestionar lista de compras — "me quedé sin X", "compré X", "agregá X", "qué me falta".
+CONFIGURAR: cambiar una configuración de Matrics. Ej: "el mensaje de la mañana mandámelo a las 7", "cambiá el horario del resumen a las 8:30", "quiero el resumen diario a las 6".
 CHAT: cualquier pregunta, consulta o conversación. Si tiene "?" o pide información → CHAT.
 
 REGLA: si el mensaje PREGUNTA algo → siempre CHAT, nunca GASTO.""",
@@ -841,6 +858,8 @@ REGLA: si el mensaje PREGUNTA algo → siempre CHAT, nunca GASTO.""",
     if "ELIMINAR_GASTO" in r:   return "ELIMINAR_GASTO"
     if "CORREGIR_GASTO" in r:   return "CORREGIR_GASTO"
     if "SHOPPING" in r:         return "SHOPPING"
+    if "REUNION" in r:          return "REUNION"
+    if "CONFIGURAR" in r:       return "CONFIGURAR"
     if "RECORDATORIO" in r:     return "RECORDATORIO"
     if "PLANTA" in r:           return "PLANTA"
     if "EVENTO" in r:           return "EVENTO"
@@ -966,6 +985,135 @@ IMPORTANTE: Si no tenés datos concretos para responder, decilo directamente. No
     reply = response.content[0].text.strip()
     add_to_history(phone, "assistant", reply)
     return reply
+
+# ── MÓDULO CONFIGURACIÓN ──────────────────────────────────────────────────────
+async def handle_configurar(text: str) -> str:
+    """Interpreta y aplica cambios de configuración del usuario."""
+    response = anthropic.messages.create(
+        model="claude-sonnet-4-20250514", max_tokens=100,
+        system="Extraé qué configuración cambiar. Responde SOLO JSON.",
+        messages=[{"role": "user", "content": f"""Mensaje: {text}
+Respondé:
+{{"setting": "daily_summary_hour",
+  "value": hora en formato 24h como número entero (ej: 7, 8, 9, 18)}}
+Si no se menciona horario válido, value=null."""}]
+    )
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`").lstrip("json").strip()
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return "❌ No entendí qué configuración querés cambiar"
+
+    setting = data.get("setting")
+    value   = data.get("value")
+
+    if setting == "daily_summary_hour" and value is not None:
+        try:
+            hora = int(value)
+            if not 0 <= hora <= 23:
+                return "❌ El horario tiene que estar entre 0 y 23"
+            user_prefs["daily_summary_hour"] = hora
+            hora_fmt = f"{hora:02d}:00"
+            return f"✅ Listo — a partir de ahora el resumen matutino te llega a las *{hora_fmt}*\n_(Esta configuración se mantiene hasta el próximo deploy)_"
+        except Exception:
+            return "❌ No pude interpretar el horario"
+
+    return "❓ No entendí qué querés configurar. Podés decirme por ejemplo: _\"el resumen de la mañana mandámelo a las 7\"_"
+
+# ── MÓDULO REUNIONES ──────────────────────────────────────────────────────────
+async def handle_reunion(text: str, image_b64: str = None, image_type: str = None) -> str:
+    """Guarda notas de una reunión en la DB Reuniones de Notion."""
+    now = now_argentina()
+
+    # Claude extrae info de la reunión del texto e imagen
+    content_parts = []
+    if image_b64:
+        content_parts.append({"type": "image", "source": {"type": "base64", "media_type": image_type or "image/jpeg", "data": image_b64}})
+    prompt_reunion = (
+        f"Hoy: {now.strftime('%Y-%m-%d %H:%M')}\n"
+        f"Mensaje: {text or '(ver imagen adjunta)'}\n\n"
+        "Extraé info de la reunión. Respondé SOLO JSON:\n"
+        '{"nombre": "título/asunto de la reunión",'
+        '"con_quien": "nombre(s) de los participantes o null",'
+        '"fecha": "YYYY-MM-DD o null si no se menciona",'
+        '"notas": "transcripción o resumen de las notas"}'
+    )
+    content_parts.append({"type": "text", "text": prompt_reunion})
+
+    response = anthropic.messages.create(
+        model="claude-sonnet-4-20250514", max_tokens=600,
+        system="Extraé info de notas de reunión. Responde SOLO JSON válido sin markdown.",
+        messages=[{"role": "user", "content": content_parts}]
+    )
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`").lstrip("json").strip()
+
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return "❌ No pude interpretar las notas de la reunión"
+
+    nombre  = data.get("nombre") or "Reunión"
+    con_quien = data.get("con_quien") or ""
+    fecha   = data.get("fecha") or now.strftime("%Y-%m-%d")
+    notas   = data.get("notas") or ""
+
+    # Buscar si hay un evento en Calendar con ese nombre para linkearlo
+    cal_link = ""
+    access_token = await get_gcal_access_token()
+    if access_token and con_quien:
+        try:
+            async with httpx.AsyncClient() as http:
+                r = await http.get(
+                    "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    params={"q": con_quien, "timeMin": f"{fecha}T00:00:00-03:00",
+                            "timeMax": f"{fecha}T23:59:59-03:00",
+                            "singleEvents": "true", "maxResults": "3"}
+                )
+                if r.status_code == 200:
+                    events = r.json().get("items", [])
+                    if events:
+                        cal_link = events[0].get("htmlLink", "")
+        except Exception:
+            pass
+
+    # Guardar en Notion
+    props = {
+        "Nombre": {"title": [{"text": {"content": nombre}}]},
+        "Fuente": {"select": {"name": "Matrics"}},
+    }
+    if con_quien:
+        props["Con quién"] = {"rich_text": [{"text": {"content": con_quien}}]}
+    if notas:
+        props["Notas"] = {"rich_text": [{"text": {"content": notas[:2000]}}]}
+    if fecha:
+        props["Fecha"] = {"date": {"start": fecha}}
+    if cal_link:
+        props["Link Calendar"] = {"url": cal_link}
+
+    async with httpx.AsyncClient() as http:
+        r = await http.post(
+            "https://api.notion.com/v1/pages",
+            headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
+            json={"parent": {"database_id": MEETINGS_DB_ID}, "icon": {"type": "emoji", "emoji": "🤝"}, "properties": props}
+        )
+        if r.status_code != 200:
+            return f"❌ Error guardando la reunión: {r.text[:100]}"
+
+    # Armar confirmación
+    fecha_fmt = ""
+    try:
+        from datetime import datetime as dt2
+        fecha_fmt = dt2.strptime(fecha, "%Y-%m-%d").strftime("%d/%m/%Y")
+    except Exception:
+        fecha_fmt = fecha
+    con_str = f" con {con_quien}" if con_quien else ""
+    cal_str = f"\n🔗 Vinculada al evento de Calendar" if cal_link else ""
+    return f"🤝 *{nombre}* guardada en Reuniones{cal_str}\n📅 {fecha_fmt}{con_str}\n\n✅ Notas guardadas en Notion"
 
 # ── Webhook ────────────────────────────────────────────────────────────────────
 @app.get("/webhook")
@@ -1096,6 +1244,14 @@ async def process_message(message: dict):
             respuesta = await handle_shopping(text)
             await send_message(from_number, respuesta)
 
+        elif tipo == "CONFIGURAR":
+            respuesta = await handle_configurar(text)
+            await send_message(from_number, respuesta)
+
+        elif tipo == "REUNION":
+            respuesta = await handle_reunion(text, image_b64, image_type)
+            await send_message(from_number, respuesta)
+
         elif tipo == "CHAT":
             respuesta = await handle_chat(from_number, text)
             await send_message(from_number, respuesta)
@@ -1205,7 +1361,8 @@ async def cron_job():
                 loc_str = f"\n📍 {event.get('location')}" if event.get("location") else ""
                 await send_message(MY_NUMBER, f"⏰ *En 15 minutos:* {summary}{loc_str}")
                 fired.append(f"REM15: {summary}")
-        if now.hour == DAILY_SUMMARY_HOUR and now.minute == 0:
+        effective_hour = user_prefs.get("daily_summary_hour") or DAILY_SUMMARY_HOUR
+        if now.hour == effective_hour and now.minute == 0:
             await send_daily_summary(http, access_token, now)
             fired.append("DAILY_SUMMARY")
     return {"ok": True, "fired": fired, "time": now.strftime("%H:%M")}
