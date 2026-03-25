@@ -1466,52 +1466,104 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
             await send_message(phone, f"👍 _{recipe_name.capitalize()}_ guardada. Ingredientes no agregados a la lista.")
         return True
 
-    # FIX #13/#14: Ofrecer guardar receta generada por chat ───────────────────
-    if state_type == "save_recipe_offer":
+    # ── Revisión de receta (foto / texto / audio) ─────────────────────────────
+    if state_type == "recipe_review":
+        recipe_name = state.get("recipe_name", "Receta")
+        ingredients = state.get("ingredients", [])
         recipe_text = state.get("recipe_text", "")
+
+        if text.strip() == "recipe_ok":
+            del pending_state[phone]
+            pending_state[phone] = {
+                "type": "recipe_save_confirm",
+                "recipe_name": recipe_name,
+                "recipe_text": recipe_text,
+                "ingredients": ingredients,
+            }
+            await send_interactive_buttons(
+                phone,
+                f"¿Guardamos *{recipe_name.capitalize()}* en tus Recetas de Notion?",
+                [
+                    {"id": "recipe_save_yes", "title": "Sí, guardar"},
+                    {"id": "recipe_save_no",  "title": "No gracias"},
+                ]
+            )
+        elif text.strip() == "recipe_correct":
+            del pending_state[phone]
+            pending_state[phone] = {
+                "type": "recipe_correction_pending",
+                "recipe_name": recipe_name,
+                "recipe_text": recipe_text,
+                "ingredients": ingredients,
+            }
+            await send_message(phone, "✏️ Decime qué está mal — qué falta, qué sobra o qué cambiar.")
+        return True
+
+    # ── Corrección de receta ───────────────────────────────────────────────────
+    if state_type == "recipe_correction_pending":
+        recipe_name = state.get("recipe_name", "Receta")
+        recipe_text = state.get("recipe_text", "")
+        ingredients = state.get("ingredients", [])
         del pending_state[phone]
-        if text.strip() == "save_recipe_yes":
-            await send_message(phone, "⏳ Guardando receta...")
-            try:
-                ext_response = claude_create(
-                    model="claude-sonnet-4-20250514", max_tokens=400,
-                    system="Respondé SOLO JSON válido sin markdown.",
-                    messages=[{"role": "user", "content": f"""Del siguiente texto de receta, extraé el nombre y TODOS los ingredientes.
-Texto: {recipe_text[:2000]}
-Respondé:
-{{"name": "nombre de la receta",
-  "ingredients": ["ingrediente1", "ingrediente2", ...]}}"""}]
-                )
-                raw_ext = ext_response.content[0].text.strip()
-                if raw_ext.startswith("```"):
-                    raw_ext = raw_ext.strip("`").lstrip("json").strip()
-                extracted = json.loads(raw_ext)
-                recipe_name = extracted.get("name", "Receta")
-                ingredient_list = extracted.get("ingredients", [])
-            except Exception:
-                recipe_name = "Receta"
-                ingredient_list = []
+        try:
+            ing_names = [i.get("name", "") for i in ingredients]
+            corr_resp = claude_create(
+                model="claude-sonnet-4-20250514", max_tokens=600,
+                system="Respondé SOLO JSON válido sin markdown.",
+                messages=[{"role": "user", "content": f"""Receta: "{recipe_name}"
+Lista actual de ingredientes: {json.dumps(ing_names, ensure_ascii=False)}
+Corrección del usuario: {text}
 
-            enriched = await enrich_items_with_claude(ingredient_list) if ingredient_list else []
-            await save_recipe_to_notion(recipe_name, source="Matrics", ingredient_names=enriched, recipe_text=recipe_text)
+Aplicá la corrección y devolvé la lista corregida como array JSON simple:
+["ingrediente1", "ingrediente2", ...]"""}]
+            )
+            raw_corr = corr_resp.content[0].text.strip()
+            if raw_corr.startswith("```"):
+                raw_corr = raw_corr.strip("`").lstrip("json").strip()
+            corrected_names = json.loads(raw_corr)
+            enriched_corrected = await enrich_items_with_claude(corrected_names)
+        except Exception:
+            enriched_corrected = ingredients
+        ing_list = "\n".join(f"• {i.get('emoji','🛒')} {i.get('name','')}" for i in enriched_corrected)
+        pending_state[phone] = {
+            "type": "recipe_review",
+            "recipe_name": recipe_name,
+            "recipe_text": recipe_text,
+            "ingredients": enriched_corrected,
+        }
+        await send_interactive_buttons(
+            phone,
+            f"🍽️ *{recipe_name.capitalize()}* — versión corregida:\n\nIngredientes:\n{ing_list}\n\n¿Está todo bien o seguís corrigiendo?",
+            [
+                {"id": "recipe_ok",      "title": "Está bien"},
+                {"id": "recipe_correct", "title": "Seguir corrigiendo"},
+            ]
+        )
+        return True
 
-            if enriched:
-                ing_list = "\n".join(f"• {i.get('emoji','🛒')} {i.get('name','')}" for i in enriched)
-                pending_state[phone] = {
-                    "type": "recipe_ingredients",
-                    "recipe_name": recipe_name,
-                    "ingredients": enriched
-                }
-                await send_interactive_buttons(
-                    phone,
-                    f"🍽️ *{recipe_name.capitalize()}* guardada en Recipes ✅\n\nIngredientes:\n{ing_list}\n\n¿Los agregás a la lista de compras?",
-                    [
-                        {"id": "recipe_add_yes", "title": "Sí, agregar"},
-                        {"id": "recipe_add_no",  "title": "No por ahora"},
-                    ]
-                )
-            else:
-                await send_message(phone, f"🍽️ *{recipe_name.capitalize()}* guardada en Recipes ✅")
+    # ── Confirmar guardado de receta ───────────────────────────────────────────
+    if state_type == "recipe_save_confirm":
+        recipe_name = state.get("recipe_name", "Receta")
+        recipe_text = state.get("recipe_text", "")
+        ingredients = state.get("ingredients", [])
+        del pending_state[phone]
+        if text.strip() == "recipe_save_yes":
+            await send_message(phone, "⏳ Guardando receta en Notion...")
+            await save_recipe_to_notion(recipe_name, source="Matrics", ingredient_names=ingredients, recipe_text=recipe_text)
+            ing_list = "\n".join(f"• {i.get('emoji','🛒')} {i.get('name','')}" for i in ingredients)
+            pending_state[phone] = {
+                "type": "recipe_ingredients",
+                "recipe_name": recipe_name,
+                "ingredients": ingredients,
+            }
+            await send_interactive_buttons(
+                phone,
+                f"🍽️ *{recipe_name.capitalize()}* guardada en Recipes ✅\n\nIngredientes:\n{ing_list}\n\n¿Los agregás a la lista de compras?",
+                [
+                    {"id": "recipe_add_yes", "title": "Sí, agregar"},
+                    {"id": "recipe_add_no",  "title": "No por ahora"},
+                ]
+            )
         else:
             await send_message(phone, "👍 Receta no guardada.")
         return True
@@ -1839,7 +1891,8 @@ async def process_message(message: dict):
                 except Exception:
                     shopping_text = ""
             respuesta = await handle_shopping(shopping_text, phone=from_number)
-            await send_message(from_number, respuesta)
+            if respuesta is not None:
+                await send_message(from_number, respuesta)
 
         elif tipo == "CONFIGURAR":
             respuesta = await handle_configurar(text)
@@ -1852,18 +1905,40 @@ async def process_message(message: dict):
         elif tipo == "CHAT":
             respuesta = await handle_chat(from_number, text)
             await send_message(from_number, respuesta)
-            # FIX #13: si la respuesta es una receta, ofrecer guardarla
+            # Si la respuesta es una receta, ofrecer guardarla
             if "Ingredientes:" in respuesta and "Preparación:" in respuesta:
+                try:
+                    ext_response = claude_create(
+                        model="claude-sonnet-4-20250514", max_tokens=400,
+                        system="Respondé SOLO JSON válido sin markdown.",
+                        messages=[{"role": "user", "content": f"""Del siguiente texto de receta, extraé el nombre y TODOS los ingredientes.
+Texto: {respuesta[:2000]}
+Respondé:
+{{"name": "nombre de la receta",
+  "ingredients": ["ingrediente1", "ingrediente2", ...]}}"""}]
+                    )
+                    raw_ext = ext_response.content[0].text.strip()
+                    if raw_ext.startswith("```"):
+                        raw_ext = raw_ext.strip("`").lstrip("json").strip()
+                    extracted = json.loads(raw_ext)
+                    recipe_name_chat = extracted.get("name", "Receta")
+                    ingredient_list_chat = extracted.get("ingredients", [])
+                    enriched_chat = await enrich_items_with_claude(ingredient_list_chat) if ingredient_list_chat else []
+                except Exception:
+                    recipe_name_chat = "Receta"
+                    enriched_chat = []
                 pending_state[from_number] = {
-                    "type": "save_recipe_offer",
+                    "type": "recipe_save_confirm",
+                    "recipe_name": recipe_name_chat,
                     "recipe_text": respuesta,
+                    "ingredients": enriched_chat,
                 }
                 await send_interactive_buttons(
                     from_number,
-                    "¿Guardás esta receta en tus Recetas de Notion?",
+                    f"¿Guardamos *{recipe_name_chat.capitalize()}* en tus Recetas de Notion?",
                     [
-                        {"id": "save_recipe_yes", "title": "Sí, guardar"},
-                        {"id": "save_recipe_no",  "title": "No gracias"},
+                        {"id": "recipe_save_yes", "title": "Sí, guardar"},
+                        {"id": "recipe_save_no",  "title": "No gracias"},
                     ]
                 )
 
@@ -2347,39 +2422,33 @@ async def handle_shopping(text: str, phone: str = None) -> str:
                 recipe_note = f"📖 *{recipe_name.capitalize()}* (de tus recetas)\n"
         else:
             try:
-                # FIX #12/#14: usar ingredientes explícitos del texto si están disponibles
                 if recipe_ingredients_raw:
                     enriched_direct = await enrich_items_with_claude(recipe_ingredients_raw)
                     ok = True
                 else:
-                    enriched_direct, ok = await get_ingredients_and_enrich(recipe_name)
+                    enriched_direct, ok = await get_ingredients_and_enrich(recipe_name, recipe_text=text)
             except Exception:
                 enriched_direct, ok = [], False
             if ok and enriched_direct:
-                # Guardar receta en Notion
-                await save_recipe_to_notion(recipe_name, source="Matrics", ingredient_names=enriched_direct, recipe_text=text)
                 ing_list = "\n".join(f"• {i.get('emoji','🛒')} {i.get('name','')}" for i in enriched_direct)
                 if phone:
                     pending_state[phone] = {
-                        "type": "recipe_ingredients",
+                        "type": "recipe_review",
                         "recipe_name": recipe_name,
-                        "ingredients": enriched_direct
+                        "recipe_text": text,
+                        "ingredients": enriched_direct,
                     }
                     await send_interactive_buttons(
                         phone,
-                        f"🍽️ Receta guardada en Notion.\n\nIngredientes detectados:\n{ing_list}\n\n¿Los agregás a la lista de compras?",
+                        f"🍽️ *{recipe_name.capitalize()}*\n\nIngredientes detectados:\n{ing_list}\n\n¿Está todo bien o querés corregir algo?",
                         [
-                            {"id": "recipe_add_yes", "title": "Sí, agregar"},
-                            {"id": "recipe_add_no",  "title": "No por ahora"},
+                            {"id": "recipe_ok",      "title": "Está bien"},
+                            {"id": "recipe_correct", "title": "Quiero corregir"},
                         ]
                     )
-                    return f"🍽️ *{recipe_name.capitalize()}* guardada en Recipes ✅"
+                    return None
                 else:
-                    for item in enriched_direct:
-                        existing = await search_shopping_item(item.get("name",""))
-                        if not existing:
-                            await add_shopping_item(item)
-                    return f"🍽️ *{recipe_name.capitalize()}* guardada con {len(enriched_direct)} ingredientes."
+                    return f"🍽️ *{recipe_name.capitalize()}* — {len(enriched_direct)} ingredientes detectados."
             else:
                 items = []
                 recipe_note = f"⚠️ No pude inferir los ingredientes para esa receta\n"
