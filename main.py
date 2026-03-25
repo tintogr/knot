@@ -43,8 +43,6 @@ last_touched: dict[str, dict] = {}       # phone → {page_id, name}
 last_event_touched: dict[str, dict] = {} # phone → {event_id, summary}
 
 # ── Estado pendiente (follow-ups) ────────────────────────────────────────────
-# litros_followup: {type, page_id, name}
-# event_clarification: {type, candidates, edit_data}
 pending_state: dict[str, dict] = {}
 
 # ── WhatsApp helpers ───────────────────────────────────────────────────────────
@@ -235,7 +233,7 @@ Si algun campo no aplica, usa null.
 
 Categorias disponibles (podes poner mas de una si tiene sentido, ej: Salida + Birra):
 Supermercado, Sueldo, Servicios, Transporte, Vianda, Salud, Salud Mental,
-Salida, Birra, Ocio, Compras, Depto, Plantas, Viajes
+Salida, Birra, Ocio, Compras, Depto, Plantas, Viajes, Venta
 
 Distincion importante entre Servicios y Depto:
 - Servicios: alquiler, expensas, luz, gas, agua, internet, telefono — pagos recurrentes de servicios
@@ -269,7 +267,7 @@ Para el campo "emoji": elegir el emoji MAS especifico segun el contexto real del
 - Vianda/tupper -> \U0001f961
 - Si no es claro -> \U0001f4b8
 
-IMPORTANTE: Si in_out es "→INGRESO←", la categoria SOLO puede ser "Sueldo" o "Venta". No usar categorías de gastos para ingresos."""
+IMPORTANTE: Si in_out es "\u2192INGRESO\u2190", la categoria SOLO puede ser "Sueldo" o "Venta". No usar categorías de gastos para ingresos."""
 
 def build_user_prompt(text: str, exchange_rate: float) -> str:
     now = now_argentina()
@@ -667,7 +665,6 @@ async def get_gcal_access_token() -> str | None:
     return None
 
 async def create_evento_gcal(data: dict) -> tuple[bool, str]:
-    """Crea evento en Google Calendar. Retorna (success, event_id)."""
     access_token = await get_gcal_access_token()
     if not access_token:
         return False, ""
@@ -695,25 +692,20 @@ async def create_evento_gcal(data: dict) -> tuple[bool, str]:
         return False, ""
 
 def fuzzy_match_event(search_term: str, events: list) -> dict | None:
-    """Devuelve el evento que mejor matchea el search_term. Sin dependencias externas."""
     if not events:
         return None
     if not search_term:
-        return events[0]  # el más reciente
+        return events[0]
     search_lower = search_term.lower()
-    # 1. Coincidencia exacta
     for e in events:
         if search_lower == e.get("summary", "").lower():
             return e
-    # 2. Contiene el término completo
     for e in events:
         if search_lower in e.get("summary", "").lower():
             return e
-    # 3. El término está contenido en el evento
     for e in events:
         if e.get("summary", "").lower() in search_lower:
             return e
-    # 4. Máxima superposición de palabras
     search_words = set(search_lower.split())
     best_score = 0
     best_event = None
@@ -725,7 +717,7 @@ def fuzzy_match_event(search_term: str, events: list) -> dict | None:
             best_event = e
     if best_score > 0:
         return best_event
-    return events[0]  # fallback al más reciente
+    return events[0]
 
 async def search_and_edit_evento(text: str, phone: str = None) -> tuple[bool, str]:
     access_token = await get_gcal_access_token()
@@ -753,12 +745,10 @@ Respondé:
         time_min = (now - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00-03:00")
         time_max = (now + timedelta(days=60)).strftime("%Y-%m-%dT23:59:59-03:00")
 
-        # Caso 1: referencia vaga sin nombre → usar last_event_touched
         if not search_term:
             if phone and phone in last_event_touched:
                 entry = last_event_touched[phone]
                 event_id = entry["event_id"]
-                # Fetch directo del evento por ID
                 r = await http.get(
                     f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}",
                     headers=headers
@@ -770,7 +760,6 @@ Respondé:
             else:
                 return False, "¿De qué evento hablás? No encontré contexto reciente. Decime el nombre y te lo edito."
 
-        # Caso 2: hay nombre → buscar con ese término
         if not target_event and search_term:
             r = await http.get(
                 "https://www.googleapis.com/calendar/v3/calendars/primary/events",
@@ -782,7 +771,6 @@ Respondé:
                 candidates = r.json().get("items", [])
                 target_event = fuzzy_match_event(search_term, candidates)
 
-            # Si no encontró nada, intentar con la primera palabra sola
             if not target_event and search_term and len(search_term.split()) > 1:
                 first_word = search_term.split()[0]
                 r2 = await http.get(
@@ -795,7 +783,6 @@ Respondé:
                     candidates2 = r2.json().get("items", [])
                     target_event = fuzzy_match_event(search_term, candidates2)
 
-            # Último recurso: last_event_touched
             if not target_event and phone and phone in last_event_touched:
                 entry = last_event_touched[phone]
                 r3 = await http.get(
@@ -805,7 +792,6 @@ Respondé:
                 if r3.status_code == 200:
                     candidate = r3.json()
                     event_name = candidate.get("summary", "")
-                    # Solo usar si hay alguna similitud con lo que buscaba
                     search_words = set(search_term.lower().split())
                     event_words = set(event_name.lower().split())
                     if search_words & event_words:
@@ -814,7 +800,6 @@ Respondé:
             if not target_event:
                 return False, f"No encontré ningún evento que coincida con _{search_term}_. ¿Podés darme más detalles o el nombre exacto?"
 
-        # Aplicar cambios al evento
         event = dict(target_event)
         event_id = event["id"]
         event_name = event.get("summary", "Evento")
@@ -839,7 +824,6 @@ Respondé:
             json=event
         )
         if update_r.status_code in [200, 201]:
-            # Actualizar last_event_touched
             if phone:
                 last_event_touched[phone] = {"event_id": event_id, "summary": event.get("summary", event_name)}
             loc_str = f"\n📍 {edit_data['location']}" if edit_data.get("location") else ""
@@ -945,7 +929,7 @@ async def classify(text: str, has_image: bool, image_b64: str = None, image_type
     content.append({"type": "text", "text": prompt_text})
     response = anthropic.messages.create(
         model="claude-sonnet-4-20250514", max_tokens=10,
-        system="""Responde SOLO una palabra: GASTO, CORREGIR_GASTO, PLANTA, EVENTO, EDITAR_EVENTO, ELIMINAR_EVENTO, RECORDATORIO, SHOPPING o CHAT.
+        system="""Responde SOLO una palabra: GASTO, CORREGIR_GASTO, PLANTA, EVENTO, EDITAR_EVENTO, ELIMINAR_EVENTO, RECORDATORIO, SHOPPING, REUNION, CONFIGURAR o CHAT.
 
 GASTO: registrar un pago, compra o ingreso concreto con monto.
 CORREGIR_GASTO: corregir un gasto ya registrado. Ej: "me equivoqué, era 7000 no 7500", "cambiá el monto de la verdulería".
@@ -1228,29 +1212,21 @@ async def handle_reunion(text: str, image_b64: str = None, image_type: str = Non
 
 # ── PENDING STATE HANDLER ──────────────────────────────────────────────────────
 async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
-    """
-    Maneja respuestas a follow-ups pendientes.
-    Retorna True si se procesó el pending state, False si debe seguir el flujo normal.
-    """
     state_type = state.get("type")
 
     # ── Follow-up de litros ────────────────────────────────────────────────────
     if state_type == "litros_followup":
         page_id = state["page_id"]
         name    = state["name"]
-        # Intentar extraer un número del texto
         try:
-            # Limpiar el texto: "37 litros", "37.5", "37,5 litros" → 37.5
             clean = text.strip().replace(",", ".").split()[0]
             litros = float(clean)
             if litros <= 0 or litros > 9999:
                 raise ValueError("Número fuera de rango")
         except (ValueError, IndexError):
-            # No pudo parsear — ignorar el pending state y procesar normal
             del pending_state[phone]
             return False
 
-        # Actualizar Notion con los litros
         async with httpx.AsyncClient() as http:
             r = await http.patch(
                 f"https://api.notion.com/v1/pages/{page_id}",
@@ -1268,7 +1244,6 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
     if state_type == "event_clarification":
         candidates = state["candidates"]
         edit_data  = state["edit_data"]
-        # El usuario eligió un número (ej: "1", "2") o nombró un evento
         chosen = None
         text_strip = text.strip()
         if text_strip.isdigit():
@@ -1284,7 +1259,6 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
             return True
 
         del pending_state[phone]
-        # Aplicar la edición al evento elegido
         access_token = await get_gcal_access_token()
         if not access_token:
             await send_message(phone, "⚠️ Calendar no configurado")
@@ -1353,7 +1327,6 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
         if minutes is None:
             await send_message(phone, "👍 Sin recordatorio adicional")
             return True
-        event_id = state.get("event_id")
         event_summary = state.get("summary", "Evento")
         event_datetime = state.get("event_datetime")
         if event_datetime:
@@ -1371,6 +1344,30 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
                     await send_message(phone, "⚠️ Ese momento ya pasó, no puedo crear el recordatorio")
             except Exception:
                 await send_message(phone, "❌ Error creando el recordatorio")
+        return True
+
+    # ── Confirmación de ingredientes de receta ────────────────────────────────
+    if state_type == "recipe_ingredients":
+        recipe_name = state.get("recipe_name", "Receta")
+        ingredients = state.get("ingredients", [])
+        del pending_state[phone]
+        if text.strip() == "recipe_add_yes":
+            results_text = []
+            for item in ingredients:
+                item_name = item.get("name", "")
+                existing = await search_shopping_item(item_name)
+                if existing:
+                    async with httpx.AsyncClient() as http:
+                        await http.patch(f"https://api.notion.com/v1/pages/{existing[0]['id']}",
+                                         headers=notion_headers(),
+                                         json={"properties": {"Stock": {"checkbox": False}}})
+                    results_text.append(f"📋 {item.get('emoji','🛒')} _{item_name}_ ya estaba, aparece como faltante")
+                else:
+                    ok, err = await add_shopping_item(item)
+                    results_text.append(f"✅ {item.get('emoji','🛒')} _{item_name}_ agregado" if ok else f"❌ Error: {err[:50]}")
+            await send_message(phone, "\n".join(results_text) + "\n\n📋 Lista actualizada en Notion")
+        else:
+            await send_message(phone, f"👍 _{recipe_name.capitalize()}_ guardada. Ingredientes no agregados a la lista.")
         return True
 
     return False
@@ -1410,7 +1407,7 @@ async def process_message(message: dict):
         elif msg_type == "interactive":
             # Respuesta a botones interactivos
             btn = message.get("interactive", {}).get("button_reply", {})
-            text = btn.get("id", "")  # usamos el ID como texto para pending_state
+            text = btn.get("id", "")
             if not text:
                 return
         elif msg_type == "image":
@@ -1469,7 +1466,6 @@ async def process_message(message: dict):
                     reply += f"\n{cat_note}"
                 await send_message(from_number, reply)
 
-                # ── Follow-up litros para carga de combustible ─────────────────
                 name_lower = parsed.get("name", "").lower()
                 is_fuel = (
                     parsed.get("emoji") == "⛽" or
@@ -1559,15 +1555,15 @@ async def process_message(message: dict):
             shopping_text = text
             if not shopping_text.strip() and image_b64:
                 extr = anthropic.messages.create(
-                    model="claude-sonnet-4-20250514", max_tokens=400,
-                    system="Transcribí el contenido de la imagen. Si es una receta, describí el nombre y los ingredientes. Si es una lista de compras, listá los ítems. Responde en español, solo el texto extraído, sin comentarios.",
+                    model="claude-sonnet-4-20250514", max_tokens=600,
+                    system="Transcribí EXACTAMENTE lo que está escrito en la imagen. Si es una receta: copiá el nombre de la receta y SOLO los ingredientes que están explícitamente listados — no agregues ni inferras ingredientes que no estén escritos. Si es una lista de compras: listá solo los ítems visibles. Responde en español, solo el texto extraído, sin comentarios adicionales.",
                     messages=[{"role": "user", "content": [
                         {"type": "image", "source": {"type": "base64", "media_type": image_type or "image/jpeg", "data": image_b64}},
-                        {"type": "text", "text": "¿Qué dice esta imagen?"}
+                        {"type": "text", "text": "¿Qué dice esta imagen? Transcribí solo lo que ves escrito, sin agregar nada."}
                     ]}]
                 )
                 shopping_text = extr.content[0].text.strip()
-            respuesta = await handle_shopping(shopping_text)
+            respuesta = await handle_shopping(shopping_text, phone=from_number)
             await send_message(from_number, respuesta)
 
         elif tipo == "CONFIGURAR":
@@ -1746,8 +1742,9 @@ def notion_headers():
 SHOPPING_CATEGORIES = ["Frutas y verduras", "Enlatado", "Infusion", "Lacteo", "Especias",
                        "Limpieza", "Panificado", "Herramienta", "Construccion", "Higiene",
                        "Electrónica", "Carne", "Galletitas", "Alcohol", "Bebida", "Fiambre",
-                       "Grano", "Comida"]
-SHOPPING_STORES     = ["Super", "Panaderia", "Verduleria", "Dietetica"]
+                       "Grano", "Comida", "Cosmética"]
+# Tiendas sugeridas — no son restrictivas, Claude puede proponer otras (ej: Ferretería)
+SHOPPING_STORES     = ["Super", "Panaderia", "Verduleria", "Dietetica", "Farmacia", "Drogueria", "Ferreteria"]
 SHOPPING_FREQUENCY  = ["Often", "Monthly", "Annual", "One time"]
 
 async def get_ingredients_and_enrich(recipe_name: str) -> tuple[list[dict], bool]:
@@ -1756,23 +1753,31 @@ async def get_ingredients_and_enrich(recipe_name: str) -> tuple[list[dict], bool
         system="Respondé SOLO JSON válido sin markdown ni texto extra.",
         messages=[{"role": "user", "content": f"""Receta: "{recipe_name}"
 
-1. Listá los ingredientes necesarios
-2. Para cada uno, completá la metadata
+Listá SOLO los ingredientes que se mencionan explícitamente. No agregues ingredientes inferidos ni típicos de la receta si no están en el nombre o descripción.
 
 Respondé SOLO este array JSON:
 [{{
   "name": "nombre capitalizado",
   "emoji": "emoji específico del producto",
   "category": una de {SHOPPING_CATEGORIES},
-  "store": la más lógica de {SHOPPING_STORES},
+  "store": tienda más lógica (puede ser una de {SHOPPING_STORES} u otra si aplica, ej: "Ferreteria"),
   "frequency": uno de {SHOPPING_FREQUENCY}
 }}]
+
+Criterios store:
+- "Super": alimentos generales, lácteos, carnes
+- "Verduleria": frutas, verduras, hierbas frescas
+- "Panaderia": pan, facturas, masas
+- "Dietetica": semillas, frutos secos, legumbres, suplementos alimenticios
+- "Farmacia": medicamentos, productos de salud
+- "Drogueria": ingredientes para cosmética, jabonería, velas (cera, aceites esenciales, tensioactivos, arcilla, vitaminas cosméticas, fragancia)
+- "Ferreteria": herramientas, tornillos, materiales de construcción, electricidad
 
 Criterios frequency:
 - "Often": verduras, lácteos, pan, yerba, huevos
 - "Monthly": aceite, pasta, harina, arroz, enlatados, limpieza
-- "Annual": especias poco usadas, herramientas
-- "One time": ingrediente muy puntual"""}]
+- "Annual": herramientas, ingredientes cosméticos especiales
+- "One time": ingrediente muy puntual de una receta específica"""}]
     )
     raw = response.content[0].text.strip()
     if raw.startswith("```"):
@@ -1795,8 +1800,10 @@ Para cada item respondé un array con:
 - "name": nombre capitalizado
 - "emoji": emoji específico (nunca 🛒)
 - "category": una de {SHOPPING_CATEGORIES}
-- "store": la más lógica de {SHOPPING_STORES}
+- "store": tienda más lógica (puede ser una de {SHOPPING_STORES} u otra si aplica, ej: "Ferreteria")
 - "frequency": uno de {SHOPPING_FREQUENCY}
+
+Criterio store: "Drogueria" para cosméticos/jabonería. "Farmacia" para salud. "Ferreteria" para herramientas/tornillos/materiales. "Dietetica" solo para alimentos naturales/suplementos.
 
 Respondé SOLO el array JSON."""}]
     )
@@ -1903,14 +1910,16 @@ async def add_shopping_item(item: dict) -> tuple[bool, str]:
     name  = item.get("name", "").strip()
     emoji = item.get("emoji", "🛒")
     freq  = item.get("frequency", "One time")
+    store = item.get("store", "")
     props = {
         "Name":  {"title": [{"text": {"content": name}}]},
         "Stock": {"checkbox": False},
     }
     if item.get("category") in SHOPPING_CATEGORIES:
         props["Category"] = {"select": {"name": item["category"]}}
-    if item.get("store") in SHOPPING_STORES:
-        props["Store"] = {"multi_select": [{"name": item["store"]}]}
+    # Store: usar el valor de Claude aunque no esté en la lista predefinida
+    if store:
+        props["Store"] = {"multi_select": [{"name": store}]}
     if freq in SHOPPING_FREQUENCY:
         props["Frequency"] = {"status": {"name": freq}}
     async with httpx.AsyncClient() as http:
@@ -1921,7 +1930,7 @@ async def add_shopping_item(item: dict) -> tuple[bool, str]:
         )
         return r.status_code == 200, r.text[:150] if r.status_code != 200 else ""
 
-async def handle_shopping(text: str) -> str:
+async def handle_shopping(text: str, phone: str = None) -> str:
     try:
         intent = await parse_shopping_intent(text)
     except Exception as e:
@@ -1936,31 +1945,57 @@ async def handle_shopping(text: str) -> str:
     if action == "add" and is_recipe and recipe_name:
         notion_ingredients = await search_recipe_in_notion(recipe_name)
         if notion_ingredients:
-            items = notion_ingredients
-            recipe_note = f"📖 *{recipe_name.capitalize()}* (de tus recetas)\n"
+            # Receta ya existe en Notion — preguntar igual si agregar a shopping
+            if phone:
+                enriched = await enrich_items_with_claude(notion_ingredients)
+                ing_list = "\n".join(f"• {i.get('emoji','🛒')} {i.get('name','')}" for i in enriched)
+                pending_state[phone] = {
+                    "type": "recipe_ingredients",
+                    "recipe_name": recipe_name,
+                    "ingredients": enriched
+                }
+                await send_interactive_buttons(
+                    phone,
+                    f"📖 Receta encontrada en tus recetas.\n\nIngredientes:\n{ing_list}\n\n¿Los agregás a la lista de compras?",
+                    [
+                        {"id": "recipe_add_yes", "title": "Sí, agregar"},
+                        {"id": "recipe_add_no",  "title": "No por ahora"},
+                    ]
+                )
+                return f"📖 *{recipe_name.capitalize()}* encontrada en tus recetas ✅"
+            else:
+                items = notion_ingredients
+                recipe_note = f"📖 *{recipe_name.capitalize()}* (de tus recetas)\n"
         else:
             try:
                 enriched_direct, ok = await get_ingredients_and_enrich(recipe_name)
             except Exception:
                 enriched_direct, ok = [], False
             if ok and enriched_direct:
-                ingredient_names = [i.get("name","") for i in enriched_direct]
-                await save_recipe_to_notion(recipe_name, source="Matrics", ingredient_names=ingredient_names)
-                recipe_note = f"🍽️ *{recipe_name.capitalize()}* no estaba en tus recetas — la agregué a tu base de datos 🍗 Recipes en Notion\n"
-                results_text = []
-                for item in enriched_direct:
-                    item_name = item.get("name", "")
-                    existing = await search_shopping_item(item_name)
-                    if existing:
-                        async with httpx.AsyncClient() as http:
-                            await http.patch(f"https://api.notion.com/v1/pages/{existing[0]['id']}",
-                                             headers=notion_headers(),
-                                             json={"properties": {"Stock": {"checkbox": False}}})
-                        results_text.append(f"📋 {item.get('emoji','🛒')} _{item_name}_ ya estaba, aparece como faltante")
-                    else:
-                        ok2, err = await add_shopping_item(item)
-                        results_text.append(f"✅ {item.get('emoji','🛒')} _{item_name}_ agregado" if ok2 else f"❌ Error agregando _{item_name}_: {err[:80]}")
-                return recipe_note + "\n".join(results_text) + "\n\n📋 Lista actualizada en Notion"
+                # Guardar receta en Notion (sin ingredientes relacionados aún)
+                await save_recipe_to_notion(recipe_name, source="Matrics", ingredient_names=None)
+                ing_list = "\n".join(f"• {i.get('emoji','🛒')} {i.get('name','')}" for i in enriched_direct)
+                if phone:
+                    pending_state[phone] = {
+                        "type": "recipe_ingredients",
+                        "recipe_name": recipe_name,
+                        "ingredients": enriched_direct
+                    }
+                    await send_interactive_buttons(
+                        phone,
+                        f"🍽️ Receta guardada en Notion.\n\nIngredientes detectados:\n{ing_list}\n\n¿Los agregás a la lista de compras?",
+                        [
+                            {"id": "recipe_add_yes", "title": "Sí, agregar"},
+                            {"id": "recipe_add_no",  "title": "No por ahora"},
+                        ]
+                    )
+                    return f"🍽️ *{recipe_name.capitalize()}* guardada en Recipes ✅"
+                else:
+                    for item in enriched_direct:
+                        existing = await search_shopping_item(item.get("name",""))
+                        if not existing:
+                            await add_shopping_item(item)
+                    return f"🍽️ *{recipe_name.capitalize()}* guardada con {len(enriched_direct)} ingredientes."
             else:
                 items = []
                 recipe_note = f"⚠️ No pude inferir los ingredientes para esa receta\n"
