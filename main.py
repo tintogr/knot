@@ -17,7 +17,7 @@ def claude_create(**kwargs):
     last_err = None
     for attempt in range(3):
         try:
-            return claude_create(**kwargs)
+            return anthropic.messages.create(**kwargs)
         except Exception as e:
             last_err = e
             if "529" in str(e) or "overloaded" in str(e).lower():
