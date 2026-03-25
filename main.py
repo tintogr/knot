@@ -1833,7 +1833,8 @@ async def search_recipe_in_notion(recipe_name: str) -> list[str] | None:
 
 async def save_recipe_to_notion(recipe_name: str, source: str = "Matrics", ingredient_names: list[str] = None):
     try:
-                relation_ids = []
+        relation_ids = []
+        
         if ingredient_names:
             for ing_item in ingredient_names if isinstance(ingredient_names[0], dict) else [{"name": n} for n in ingredient_names]:
                 results = await search_shopping_item(ing_item.get("name", ""))
