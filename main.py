@@ -1463,7 +1463,7 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
                     results_text.append(f"✅ {item.get('emoji','🛒')} _{item_name}_ agregado" if ok else f"❌ Error: {err[:50]}")
             await send_message(phone, "\n".join(results_text) + "\n\n📋 Lista actualizada en Notion")
         else:
-            await send_message(phone, f"👍 _{recipe_name.capitalize()}_ guardada. Ingredientes no agregados a la lista.")
+            await send_message(phone, f"👍 _{recipe_name.capitalize()}_ guardada. Ingredientes no agregados a la lista de compras.")
         return True
 
     # ── Revisión de receta (foto / texto / audio) ─────────────────────────────
@@ -1549,7 +1549,10 @@ Aplicá la corrección y devolvé la lista corregida como array JSON simple:
         del pending_state[phone]
         if text.strip() == "recipe_save_yes":
             await send_message(phone, "⏳ Guardando receta en Notion...")
-            await save_recipe_to_notion(recipe_name, source="Matrics", ingredient_names=ingredients, recipe_text=recipe_text)
+            ok, err = await save_recipe_to_notion(recipe_name, source="Matrics", ingredient_names=ingredients, recipe_text=recipe_text)
+            if not ok:
+                await send_message(phone, f"❌ Error guardando la receta: {err}")
+                return True
             ing_list = "\n".join(f"• {i.get('emoji','🛒')} {i.get('name','')}" for i in ingredients)
             pending_state[phone] = {
                 "type": "recipe_ingredients",
@@ -2231,7 +2234,7 @@ async def search_recipe_in_notion(recipe_name: str) -> list[str] | None:
     except Exception:
         return None
 
-async def save_recipe_to_notion(recipe_name: str, source: str = "Matrics", ingredient_names: list[str] = None, recipe_text: str = None):
+async def save_recipe_to_notion(recipe_name: str, source: str = "Matrics", ingredient_names: list[str] = None, recipe_text: str = None) -> tuple[bool, str]:
     try:
         # Claude infiere propiedades de la receta
         try:
@@ -2254,21 +2257,24 @@ Respondé SOLO este JSON con las propiedades que puedas inferir:
         if ingredient_names:
             items_list = ingredient_names if (isinstance(ingredient_names, list) and ingredient_names and isinstance(ingredient_names[0], dict)) else [{"name": n} for n in ingredient_names]
             for ing_item in items_list:
-                results = await search_shopping_item(ing_item.get("name", ""))
+                ing_name = ing_item.get("name", "").strip()
+                if not ing_name:
+                    continue
+                results = await search_shopping_item(ing_name)
                 if results:
                     relation_ids.append({"id": results[0]["id"]})
                 else:
-                    # No existe en Shopping → crearlo con Stock: true
-                    name = ing_item.get("name", "").strip()
                     emoji = ing_item.get("emoji", "🛒")
                     ing_props = {
-                        "Name":  {"title": [{"text": {"content": name}}]},
+                        "Name":  {"title": [{"text": {"content": ing_name}}]},
                         "Stock": {"checkbox": True},
                     }
                     if ing_item.get("category") in SHOPPING_CATEGORIES:
                         ing_props["Category"] = {"select": {"name": ing_item["category"]}}
                     if ing_item.get("store"):
                         ing_props["Store"] = {"multi_select": [{"name": ing_item["store"]}]}
+                    if ing_item.get("frequency") in SHOPPING_FREQUENCY:
+                        ing_props["Frequency"] = {"status": {"name": ing_item["frequency"]}}
                     async with httpx.AsyncClient() as http:
                         r = await http.post(
                             "https://api.notion.com/v1/pages",
@@ -2277,6 +2283,8 @@ Respondé SOLO este JSON con las propiedades que puedas inferir:
                         )
                         if r.status_code == 200:
                             relation_ids.append({"id": r.json()["id"]})
+                        else:
+                            return False, f"Error creando ingrediente '{ing_name}': {r.text[:100]}"
 
         props = {
             "Name": {"title": [{"text": {"content": recipe_name.capitalize()}}]},
@@ -2296,7 +2304,7 @@ Respondé SOLO este JSON con las propiedades que puedas inferir:
             props["Ingredientess"] = {"relation": relation_ids}
 
         async with httpx.AsyncClient() as http:
-            await http.post(
+            r = await http.post(
                 "https://api.notion.com/v1/pages",
                 headers=notion_headers(),
                 json={
@@ -2305,8 +2313,11 @@ Respondé SOLO este JSON con las propiedades que puedas inferir:
                     "properties": props
                 }
             )
-    except Exception:
-        pass
+            if r.status_code in [200, 201]:
+                return True, ""
+            return False, f"Error creando receta en Notion: {r.text[:150]}"
+    except Exception as e:
+        return False, f"Excepción en save_recipe_to_notion: {str(e)[:150]}"
 
 # FIX #12/#14: parse_shopping_intent extrae ingredientes explícitos del texto
 async def parse_shopping_intent(text: str) -> dict:
