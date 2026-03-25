@@ -2241,11 +2241,15 @@ async def save_recipe_to_notion(recipe_name: str, source: str = "Matrics", ingre
                 model="claude-sonnet-4-20250514", max_tokens=200,
                 system="Respondé SOLO JSON válido sin markdown.",
                 messages=[{"role": "user", "content": f'''Receta: "{recipe_name}"
-Respondé SOLO este JSON con las propiedades que puedas inferir:
+Texto: {(recipe_text or "")[:500]}
+Respondé SOLO este JSON:
 {{"difficult": "Easy"|"Moderate"|"Hard"|null,
-  "type": ["Dessert"|"Dinner"],
+  "type": ["Postre"|"Cena"|"Almuerzo"|"Desayuno"|"Snack"|"Cosmética"],
   "coccion": "Horno"|"Sarten"|"Pochar"|"Frizzer "|"Varias prep."|null,
-  "healthy": "Healthy"|"Fatty"|"ni healthy ni fatty"|null}}'''}]
+  "healthy": "Healthy"|"Fatty"|"ni healthy ni fatty"|null}}
+
+Criterios type: si es jabón, champú, crema, cosmético → ["Cosmética"]. Postre → ["Postre"]. Cena → ["Cena"]. Almuerzo → ["Almuerzo"]. Desayuno → ["Desayuno"]. Puede tener más de uno.
+Criterios healthy: solo aplica a recetas de comida. Para cosméticos usá null.'''}]
             )
             raw_meta = props_response.content[0].text.strip().strip("`").lstrip("json").strip()
             meta = json.loads(raw_meta)
@@ -2289,13 +2293,10 @@ Respondé SOLO este JSON con las propiedades que puedas inferir:
             "Name": {"title": [{"text": {"content": recipe_name.capitalize()}}]},
             "Source": {"select": {"name": source}},
         }
-        if recipe_text:
-            props["Notes"] = {"rich_text": [{"text": {"content": recipe_text[:2000]}}]}
-        # Propiedades opcionales — se agregan solo si Claude las infirió
         if meta.get("difficult") in ["Easy", "Moderate", "Hard"]:
             props["Difficult "] = {"select": {"name": meta["difficult"]}}
         if meta.get("type") and isinstance(meta["type"], list):
-            valid_types = [t for t in meta["type"] if t in ["Dessert", "Dinner", "Breakfast", "Lunch", "Snack"]]
+            valid_types = [t for t in meta["type"] if t in ["Postre", "Cena", "Almuerzo", "Desayuno", "Snack", "Cosmética"]]
             if valid_types:
                 props["Type"] = {"multi_select": [{"name": t} for t in valid_types]}
         if meta.get("coccion") in ["Horno", "Sarten", "Pochar", "Frizzer ", "Varias prep."]:
@@ -2303,7 +2304,7 @@ Respondé SOLO este JSON con las propiedades que puedas inferir:
         if meta.get("healthy") in ["Healthy", "Fatty", "ni healthy ni fatty"]:
             props["😈 / 😇"] = {"select": {"name": meta["healthy"]}}
         if relation_ids:
-            props["Ingredientess"] = {"relation": relation_ids}
+            props["Ingredients"] = {"relation": relation_ids}
 
         async with httpx.AsyncClient() as http:
             r = await http.post(
@@ -2315,9 +2316,34 @@ Respondé SOLO este JSON con las propiedades que puedas inferir:
                     "properties": props
                 }
             )
-            if r.status_code in [200, 201]:
-                return True, ""
-            return False, f"Error creando receta en Notion (status {r.status_code}): {r.text[:200]}"
+            if r.status_code not in [200, 201]:
+                return False, f"Error creando receta en Notion (status {r.status_code}): {r.text[:200]}"
+
+            page_id = r.json().get("id", "")
+
+            # Guardar texto de receta como contenido de la página (no en Notes)
+            if recipe_text and page_id:
+                lines = recipe_text.split("\n") if "\n" in recipe_text else recipe_text.replace(". ", ".\n").split("\n")
+                blocks = []
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    blocks.append({
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {
+                            "rich_text": [{"type": "text", "text": {"content": line[:2000]}}]
+                        }
+                    })
+                if blocks:
+                    await http.patch(
+                        f"https://api.notion.com/v1/blocks/{page_id}/children",
+                        headers=notion_headers(),
+                        json={"children": blocks[:100]}
+                    )
+
+            return True, ""
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
@@ -2449,6 +2475,12 @@ async def handle_shopping(text: str, phone: str = None) -> str:
             if ok and enriched_direct:
                 ing_list = "\n".join(f"• {i.get('emoji','🛒')} {i.get('name','')}" for i in enriched_direct)
                 if phone:
+                    # Mostrar procedimiento si está disponible
+                    procedimiento = ""
+                    if text and len(text) > 200:
+                        # Truncar a 800 chars para no saturar WhatsApp
+                        proc_preview = text[:800] + ("..." if len(text) > 800 else "")
+                        procedimiento = f"\n\n📝 *Procedimiento:*\n{proc_preview}"
                     pending_state[phone] = {
                         "type": "recipe_review",
                         "recipe_name": recipe_name,
@@ -2457,7 +2489,7 @@ async def handle_shopping(text: str, phone: str = None) -> str:
                     }
                     await send_interactive_buttons(
                         phone,
-                        f"🍽️ *{recipe_name.capitalize()}*\n\nIngredientes detectados:\n{ing_list}\n\n¿Está todo bien o querés corregir algo?",
+                        f"🍽️ *{recipe_name.capitalize()}*\n\n*Ingredientes:*\n{ing_list}{procedimiento}\n\n¿Está todo bien o querés corregir algo?",
                         [
                             {"id": "recipe_ok",      "title": "Está bien"},
                             {"id": "recipe_correct", "title": "Quiero corregir"},
