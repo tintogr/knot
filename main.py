@@ -14,7 +14,7 @@ NOTION_TOKEN   = os.environ["NOTION_TOKEN"]
 NOTION_DB_ID   = os.environ["NOTION_DATABASE_ID"]
 PLANTS_DB_ID   = os.environ.get("NOTION_PLANTS_DB_ID", "39d22615-0106-43f8-9f01-2632734c38da")
 SHOPPING_DB_ID = os.environ.get("NOTION_SHOPPING_DB_ID", "cb85fdf75d684f61bafea20b5eeb653f")
-RECIPES_DB_ID = os.environ.get("NOTION_RECIPES_DB_ID", "8fa008a7-0720-475a-9868-7c3ba077bc50")
+RECIPES_DB_ID   = os.environ.get("NOTION_RECIPES_DB_ID", "5eda6aa7-3c8c-4fd6-8433-c6714bcfdd20")
 MEETINGS_DB_ID  = os.environ.get("NOTION_MEETINGS_DB_ID", "ed5b5023-c17c-46e5-be7d-56655f0257ee")
 WA_TOKEN       = os.environ["WHATSAPP_TOKEN"]
 WA_PHONE_ID    = os.environ["WHATSAPP_PHONE_ID"]
@@ -939,7 +939,7 @@ PLANTA: adquirir o mencionar una planta.
 EDITAR_EVENTO: modificar un evento existente en el calendario.
 ELIMINAR_EVENTO: eliminar o borrar un evento del calendario.
 RECORDATORIO: "recordame en X tiempo", "avisame en X", "haceme acordar".
-EVENTO: crear un evento nuevo — turno, reunión, cumple, cita, viaje.
+EVENTO: crear un evento nuevo — turno, reunión, cumple, cita, viaje. También frases como "hoy/mañana a las X tengo un evento/turno/reunión que se llama Y" → siempre EVENTO.
 SHOPPING: gestionar lista de compras — "me quedé sin X", "compré X", "agregá X", "qué me falta". También si se manda una imagen de receta o lista de ingredientes sin texto → SHOPPING.
 REUNION: cuando se comparten notas, resumen o fotos de una reunión/llamada. Ej: "reunión con Juan", "notas de la call de hoy", foto de pizarrón/apuntes de reunión.
 CONFIGURAR: cambiar una configuración de Matrics. Ej: "el mensaje de la mañana mandámelo a las 7", "cambiá el horario del resumen a las 8:30".
@@ -1833,39 +1833,63 @@ async def search_recipe_in_notion(recipe_name: str) -> list[str] | None:
 
 async def save_recipe_to_notion(recipe_name: str, source: str = "Matrics", ingredient_names: list[str] = None):
     try:
+        # Claude infiere propiedades de la receta
+        try:
+            props_response = anthropic.messages.create(
+                model="claude-sonnet-4-20250514", max_tokens=200,
+                system="Respondé SOLO JSON válido sin markdown.",
+                messages=[{"role": "user", "content": f'''Receta: "{recipe_name}"
+Respondé SOLO este JSON con las propiedades que puedas inferir:
+{{"difficult": "Easy"|"Moderate"|"Hard"|null,
+  "type": ["Dessert"|"Dinner"],
+  "coccion": "Horno"|"Sarten"|"Pochar"|"Frizzer "|"Varias prep."|null,
+  "healthy": "Healthy"|"Fatty"|"ni healthy ni fatty"|null}}'''}]
+            )
+            raw_meta = props_response.content[0].text.strip().strip("`").lstrip("json").strip()
+            meta = json.loads(raw_meta)
+        except Exception:
+            meta = {}
+
         relation_ids = []
-        
         if ingredient_names:
-            for ing_item in ingredient_names if isinstance(ingredient_names[0], dict) else [{"name": n} for n in ingredient_names]:
+            items_list = ingredient_names if (isinstance(ingredient_names, list) and ingredient_names and isinstance(ingredient_names[0], dict)) else [{"name": n} for n in ingredient_names]
+            for ing_item in items_list:
                 results = await search_shopping_item(ing_item.get("name", ""))
                 if results:
                     relation_ids.append({"id": results[0]["id"]})
                 else:
-                    # No existe en Shopping → crearlo con Stock: true (lo tiene)
-                    new_item = dict(ing_item)
-                    new_item["Stock"] = True
+                    # No existe en Shopping → crearlo con Stock: true
+                    name = ing_item.get("name", "").strip()
+                    emoji = ing_item.get("emoji", "🛒")
+                    ing_props = {
+                        "Name":  {"title": [{"text": {"content": name}}]},
+                        "Stock": {"checkbox": True},
+                    }
+                    if ing_item.get("category") in SHOPPING_CATEGORIES:
+                        ing_props["Category"] = {"select": {"name": ing_item["category"]}}
+                    if ing_item.get("store"):
+                        ing_props["Store"] = {"multi_select": [{"name": ing_item["store"]}]}
                     async with httpx.AsyncClient() as http:
-                        name = new_item.get("name", "").strip()
-                        emoji = new_item.get("emoji", "🛒")
-                        props = {
-                            "Name":  {"title": [{"text": {"content": name}}]},
-                            "Stock": {"checkbox": True},
-                        }
-                        if new_item.get("category") in SHOPPING_CATEGORIES:
-                            props["Category"] = {"select": {"name": new_item["category"]}}
-                        if new_item.get("store"):
-                            props["Store"] = {"multi_select": [{"name": new_item["store"]}]}
                         r = await http.post(
                             "https://api.notion.com/v1/pages",
                             headers=notion_headers(),
-                            json={"parent": {"database_id": SHOPPING_DB_ID}, "icon": {"type": "emoji", "emoji": emoji}, "properties": props}
+                            json={"parent": {"database_id": SHOPPING_DB_ID}, "icon": {"type": "emoji", "emoji": emoji}, "properties": ing_props}
                         )
                         if r.status_code == 200:
                             relation_ids.append({"id": r.json()["id"]})
+
         props = {
             "Name": {"title": [{"text": {"content": recipe_name.capitalize()}}]},
             "Source": {"select": {"name": source}},
         }
+        if meta.get("difficult"):
+            props["Difficult "] = {"select": {"name": meta["difficult"]}}
+        if meta.get("type"):
+            props["Type"] = {"multi_select": [{"name": t} for t in meta["type"]]}
+        if meta.get("coccion"):
+            props["Cocción "] = {"select": {"name": meta["coccion"]}}
+        if meta.get("healthy"):
+            props["😈 / 😇"] = {"select": {"name": meta["healthy"]}}
         if relation_ids:
             props["Ingredientess"] = {"relation": relation_ids}
 
