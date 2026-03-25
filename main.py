@@ -1551,7 +1551,11 @@ Respondé:
             if r.status_code in [200, 201]:
                 old_name = target.get("summary", "Evento")
                 time_str = f" {new_data['time']}" if new_data.get("time") else ""
-                await send_message(phone, f"✅ *{old_name}* actualizado al {new_data['date']}{time_str}")
+                try:
+                    fmt_date = datetime.strptime(new_data['date'], "%Y-%m-%d").strftime("%d/%m/%Y")
+                except Exception:
+                    fmt_date = new_data['date']
+                await send_message(phone, f"✅ *{old_name}* actualizado al {fmt_date}{time_str}")
                 last_event_touched[phone] = {"event_id": event_id, "summary": old_name}
             else:
                 await send_message(phone, "❌ Error actualizando el evento")
@@ -1753,7 +1757,11 @@ async def process_message(message: dict):
                     sim_lines = []
                     for e in similar:
                         e_start = e.get("start", {})
-                        e_date = e_start.get("dateTime", e_start.get("date", ""))[:10]
+                        e_date_raw = e_start.get("dateTime", e_start.get("date", ""))[:10]
+                        try:
+                            e_date = datetime.strptime(e_date_raw, "%Y-%m-%d").strftime("%d/%m/%Y")
+                        except Exception:
+                            e_date = e_date_raw
                         sim_lines.append(f"• {e.get('summary','')} ({e_date})")
                     sim_text = "\n".join(sim_lines)
                     pending_state[from_number] = {
@@ -2109,7 +2117,7 @@ async def enrich_items_with_claude(items: list[str]) -> list[dict]:
     if not items:
         return []
     response = claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=600,
+        model="claude-sonnet-4-20250514", max_tokens=1500,
         system="Enriquecé una lista de ítems. Responde SOLO JSON válido sin markdown.",
         messages=[{"role": "user", "content": f"""Items: {json.dumps(items, ensure_ascii=False)}
 
