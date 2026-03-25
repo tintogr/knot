@@ -2241,6 +2241,27 @@ async def search_recipe_in_notion(recipe_name: str) -> list[str] | None:
     except Exception:
         return None
 
+def _parse_bold(text: str) -> list:
+    """Convierte **texto** en rich_text de Notion con bold."""
+    parts = []
+    remaining = text
+    while "**" in remaining:
+        idx = remaining.find("**")
+        if idx > 0:
+            parts.append({"type": "text", "text": {"content": remaining[:idx]}})
+        remaining = remaining[idx+2:]
+        end = remaining.find("**")
+        if end == -1:
+            parts.append({"type": "text", "text": {"content": "**" + remaining}})
+            remaining = ""
+            break
+        parts.append({"type": "text", "text": {"content": remaining[:end]}, "annotations": {"bold": True}})
+        remaining = remaining[end+2:]
+    if remaining:
+        parts.append({"type": "text", "text": {"content": remaining}})
+    return parts if parts else [{"type": "text", "text": {"content": text}}]
+
+
 async def save_recipe_to_notion(recipe_name: str, source: str = "Matrics", ingredient_names: list[str] = None, recipe_text: str = None) -> tuple[bool, str]:
     try:
         # Claude infiere propiedades de la receta
@@ -2329,21 +2350,46 @@ Criterios healthy: solo aplica a recetas de comida. Para cosméticos usá null.'
 
             page_id = r.json().get("id", "")
 
-            # Guardar texto de receta como contenido de la página (no en Notes)
+            # Guardar texto de receta como contenido formateado en el cuerpo de la página
             if recipe_text and page_id:
-                lines = recipe_text.split("\n") if "\n" in recipe_text else recipe_text.replace(". ", ".\n").split("\n")
+                # Pedir a Claude que formatee la receta en Notion Markdown
+                try:
+                    fmt_resp = claude_create(
+                        model="claude-sonnet-4-20250514", max_tokens=1500,
+                        system="Formateá la siguiente receta para guardarla en Notion. Usá este formato:\n- Título de sección como ## (Ingredientes, Procedimiento, Notas)\n- Listas con - para ingredientes y pasos numerados con 1. 2. 3.\n- **negrita** para cantidades importantes o pasos clave\n- Responde SOLO el texto formateado, sin comentarios adicionales.",
+                        messages=[{"role": "user", "content": f"Receta: {recipe_name}\n\nTexto original:\n{recipe_text[:3000]}"}]
+                    )
+                    formatted = fmt_resp.content[0].text.strip()
+                except Exception:
+                    formatted = recipe_text
+
+                # Convertir a bloques de Notion
                 blocks = []
-                for line in lines:
-                    line = line.strip()
-                    if not line:
+                for line in formatted.split("\n"):
+                    line_stripped = line.strip()
+                    if not line_stripped:
                         continue
-                    blocks.append({
-                        "object": "block",
-                        "type": "paragraph",
-                        "paragraph": {
-                            "rich_text": [{"type": "text", "text": {"content": line[:2000]}}]
-                        }
-                    })
+                    if line_stripped.startswith("## "):
+                        blocks.append({"object": "block", "type": "heading_2",
+                            "heading_2": {"rich_text": [{"type": "text", "text": {"content": line_stripped[3:]}}]}})
+                    elif line_stripped.startswith("# "):
+                        blocks.append({"object": "block", "type": "heading_1",
+                            "heading_1": {"rich_text": [{"type": "text", "text": {"content": line_stripped[2:]}}]}})
+                    elif line_stripped.startswith("- "):
+                        content = line_stripped[2:]
+                        rich = _parse_bold(content)
+                        blocks.append({"object": "block", "type": "bulleted_list_item",
+                            "bulleted_list_item": {"rich_text": rich}})
+                    elif line_stripped[:2] in [f"{i}." for i in range(1, 30)] or (len(line_stripped) > 2 and line_stripped[0].isdigit() and line_stripped[1] == "."):
+                        content = line_stripped.split(".", 1)[-1].strip()
+                        rich = _parse_bold(content)
+                        blocks.append({"object": "block", "type": "numbered_list_item",
+                            "numbered_list_item": {"rich_text": rich}})
+                    else:
+                        rich = _parse_bold(line_stripped)
+                        blocks.append({"object": "block", "type": "paragraph",
+                            "paragraph": {"rich_text": rich}})
+
                 if blocks:
                     await http.patch(
                         f"https://api.notion.com/v1/blocks/{page_id}/children",
@@ -2489,16 +2535,16 @@ async def handle_shopping(text: str, phone: str = None) -> str:
                         "recipe_text": text,
                         "ingredients": enriched_direct,
                     }
-                    # Mandar ingredientes + procedimiento como texto libre (puede ser largo)
-                    procedimiento = ""
-                    if text and len(text) > 100:
-                        proc_preview = text[:600] + ("..." if len(text) > 600 else "")
-                        procedimiento = f"\n\n📝 *Procedimiento:*\n{proc_preview}"
+                    # Mensaje 1: ingredientes
                     await send_message(
                         phone,
-                        f"🍽️ *{recipe_name.capitalize()}*\n\n*Ingredientes:*\n{ing_list}{procedimiento}"
+                        f"🍽️ *{recipe_name.capitalize()}*\n\n*Ingredientes:*\n{ing_list}"
                     )
-                    # Botones en mensaje separado — body corto para no superar límite de 1024 chars
+                    # Mensaje 2: procedimiento (si existe) — sin repetir ingredientes
+                    if text and len(text) > 100:
+                        proc_preview = text[:800] + ("..." if len(text) > 800 else "")
+                        await send_message(phone, f"📝 *Procedimiento:*\n{proc_preview}")
+                    # Botones en mensaje corto separado
                     await send_interactive_buttons(
                         phone,
                         "¿Está todo bien o querés corregir algo?",
