@@ -32,7 +32,7 @@ SHOPPING_DB_ID = os.environ.get("NOTION_SHOPPING_DB_ID", "cb85fdf75d684f61bafea2
 RECIPES_DB_ID   = os.environ.get("NOTION_RECIPES_DB_ID", "8fa008a7-0720-475a-9868-7c3ba077bc50")
 MEETINGS_DB_ID  = os.environ.get("NOTION_MEETINGS_DB_ID", "ed5b5023-c17c-46e5-be7d-56655f0257ee")
 TASKS_DB_ID     = os.environ.get("NOTION_TASKS_DB_ID", "90b44158-7916-4837-94de-129dde448fc4")
-CONFIG_DB_ID    = os.environ.get("NOTION_CONFIG_DB_ID", "2f81017d-a20c-426a-ada8-8fcf0743338")
+CONFIG_DB_ID    = os.environ.get("NOTION_CONFIG_DB_ID", "2f81017d-a20c-426a-aada-88fcf0743338")
 WA_TOKEN       = os.environ["WHATSAPP_TOKEN"]
 WA_PHONE_ID    = os.environ["WHATSAPP_PHONE_ID"]
 WA_API         = f"https://graph.facebook.com/v22.0/{WA_PHONE_ID}/messages"
@@ -778,20 +778,20 @@ async def search_and_edit_evento(text: str, phone: str = None) -> tuple[bool, st
     if not access_token:
         return False, "Calendar no configurado"
     now = now_argentina()
-    # Contexto del último evento para correcciones naturales ("no era en abril, era el 29 de marzo")
-    last_event_ctx = ""
-    if phone and phone in last_event_touched:
-        last_event_ctx = f"\nÚltimo evento creado/editado: \"{last_event_touched[phone].get('summary', '')}\" — usalo como contexto si el mensaje no nombra un evento explícito."
+    last_summary = last_event_touched.get(phone, {}).get("summary", "") if phone else ""
+    last_event_ctx = f"\nÚltimo evento creado/editado: \"{last_summary}\"." if last_summary else ""
     response = claude_create(
         model="claude-sonnet-4-20250514", max_tokens=300,
         system=f"""Extraé qué evento editar y qué cambiar. Hoy es {now.strftime("%Y-%m-%d")}.{last_event_ctx}
 Reglas:
-- Si el mensaje es una CORRECCIÓN de algo recién dicho (ej: "no era abril era el 29 de marzo", "me equivoqué la hora es X") → search_term=null y aplicá la corrección al último evento.
-- Si el mensaje no menciona un nombre concreto de evento → search_term=null.
+- Si el mensaje menciona una actividad, nombre o keyword relacionado con un evento (ej: "gim", "gym", "gimnasio", "turno", "médico", "dentista") → poné esa keyword en search_term aunque no sea el nombre exacto.
+- Si el mensaje es claramente una corrección ("no era X era Y", "me equivoqué", "al final es el...") → si hay último evento usá search_term=null, si no hay último evento intentá inferir el evento por keywords.
+- Si el mensaje menciona una fecha "vieja" (la que se quiere cambiar) junto a una fecha "nueva", usá la fecha vieja para encontrar el evento y la nueva como new_date.
+- Extraé TODOS los cambios mencionados.
 - Responde SOLO JSON.""",
         messages=[{"role": "user", "content": f"""Mensaje: {text}
 Respondé:
-{{"search_term":"nombre del evento o null si es referencia vaga o corrección","location":"nueva ubicacion o null","new_title":"nuevo titulo o null","new_time":"HH:MM o null","new_date":"YYYY-MM-DD o null","description":"nueva descripcion o null"}}"""}]
+{{"search_term":"keyword o nombre del evento para buscar en Calendar, o null si hay último evento","location":"nueva ubicacion o null","new_title":"nuevo titulo o null","new_time":"HH:MM o null","new_date":"YYYY-MM-DD o null","description":"nueva descripcion o null"}}"""}]
     )
     raw = response.content[0].text.strip()
     if raw.startswith("```"):
@@ -859,7 +859,19 @@ Respondé:
                         target_event = candidate
 
             if not target_event:
-                return False, f"No encontré ningún evento que coincida con _{search_term}_. ¿Podés darme más detalles o el nombre exacto?"
+                # Último intento: buscar todos los eventos próximos y dejar que Claude elija
+                r_all = await http.get(
+                    "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                    headers=headers,
+                    params={"timeMin": time_min, "timeMax": time_max,
+                            "singleEvents": "true", "orderBy": "startTime", "maxResults": "20"}
+                )
+                if r_all.status_code == 200:
+                    all_events = [e for e in r_all.json().get("items", []) if "[TEMP]" not in (e.get("description") or "")]
+                    if all_events and search_term:
+                        target_event = fuzzy_match_event(search_term, all_events)
+                if not target_event:
+                    return False, f"No encontré ningún evento relacionado con _{search_term}_. ¿Podés darme más detalles?"
 
         event = dict(target_event)
         event_id = event["id"]
