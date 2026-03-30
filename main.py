@@ -2434,6 +2434,19 @@ Sé conciso, cálido, natural. Máximo 5 líneas en total.""",
 
     await send_message(MY_NUMBER, msg)
 
+@app.get("/debug/gmail")
+async def debug_gmail():
+    access_token = await get_gcal_access_token()
+    if not access_token:
+        return {"error": "no access token"}
+    async with httpx.AsyncClient(timeout=10) as http:
+        r = await http.get(
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"q": "is:unread is:important newer_than:2d", "maxResults": 3}
+        )
+        return {"status": r.status_code, "body": r.json()}
+
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "time": now_argentina().strftime("%H:%M"), "bot": "matrics"}
