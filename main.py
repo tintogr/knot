@@ -1181,7 +1181,7 @@ async def get_gmail_summary() -> str | None:
             r = await http.get(
                 "https://gmail.googleapis.com/gmail/v1/users/me/messages",
                 headers={"Authorization": f"Bearer {access_token}"},
-                params={"q": "is:unread is:important newer_than:45d", "maxResults": 20}
+                params={"q": "is:important newer_than:45d", "maxResults": 20}
             )
             if r.status_code != 200:
                 return None
