@@ -3040,6 +3040,6 @@ for item_name in items:
             results_text.append(f"🛒 {item_data.get('emoji','🛒')} _{display}_ agregado como faltante" if ok else f"❌ Error agregando _{display}_")
         else:
             results_text.append(f"❓ _{display}_ no está en la lista")
-            
+
 return "\n".join(results_text) + "\n\n📋 Lista actualizada en Notion"
 ```
