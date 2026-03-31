@@ -1182,7 +1182,7 @@ async def get_gmail_summary() -> str | None:
             r = await http.get(
                 "https://gmail.googleapis.com/gmail/v1/users/me/messages",
                 headers=headers,
-                params={"q": "is:important newer_than:30d", "maxResults": 20}
+                params={"q": "newer_than:45d", "maxResults": 30}
             )
             if r.status_code != 200:
                 return None
