@@ -1419,7 +1419,7 @@ async def handle_chat(phone: str, text: str) -> str:
         },
         {
             "name": "consultar_gmail",
-            "description": "Consulta los mails importantes no leídos de los últimos 2 días. Usá cuando el usuario pregunta sobre emails, correos, facturas recibidas, si le escribieron, notificaciones importantes, etc.",
+            "description": "Consulta los mails del último mes. Usá cuando el usuario pregunta sobre emails, facturas recibidas, montos a pagar, vencimientos, si le escribieron, servicios (luz, gas, internet, teléfono), etc. También usá junto con buscar_gastos cuando preguntan cuánto deberían haber pagado vs cuánto pagaron.",
             "input_schema": {
                 "type": "object",
                 "properties": {},
