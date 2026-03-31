@@ -1177,49 +1177,98 @@ async def get_gmail_summary() -> str | None:
     if not access_token:
         return None
     try:
-        async with httpx.AsyncClient(timeout=10) as http:
+        async with httpx.AsyncClient(timeout=15) as http:
+            headers = {"Authorization": f"Bearer {access_token}"}
             r = await http.get(
                 "https://gmail.googleapis.com/gmail/v1/users/me/messages",
-                headers={"Authorization": f"Bearer {access_token}"},
-                params={"q": "is:important newer_than:45d", "maxResults": 20}
+                headers=headers,
+                params={"q": "is:important newer_than:30d", "maxResults": 20}
             )
             if r.status_code != 200:
                 return None
             messages = r.json().get("messages", [])
             if not messages:
                 return None
+
             mail_data = []
-            for msg in messages[:8]:
+            for msg in messages[:10]:
                 msg_r = await http.get(
                     f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg['id']}",
-                    headers={"Authorization": f"Bearer {access_token}"},
-                    params={"format": "metadata", "metadataHeaders": ["Subject", "From", "Date"]}
+                    headers=headers,
+                    params={"format": "full"}
                 )
-                if msg_r.status_code == 200:
-                    headers = {h["name"]: h["value"] for h in msg_r.json().get("payload", {}).get("headers", [])}
-                    snippet = msg_r.json().get("snippet", "")
-                    mail_data.append({
-                        "from": headers.get("From", ""),
-                        "subject": headers.get("Subject", ""),
-                        "snippet": snippet[:200]
-                    })
+                if msg_r.status_code != 200:
+                    continue
+                msg_data = msg_r.json()
+                hdrs = {h["name"]: h["value"] for h in msg_data.get("payload", {}).get("headers", [])}
+                snippet = msg_data.get("snippet", "")
+
+                # Buscar PDFs adjuntos
+                pdf_texts = []
+                parts = msg_data.get("payload", {}).get("parts", [])
+                for part in parts:
+                    if part.get("mimeType") == "application/pdf":
+                        attachment_id = part.get("body", {}).get("attachmentId")
+                        if attachment_id:
+                            try:
+                                att_r = await http.get(
+                                    f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg['id']}/attachments/{attachment_id}",
+                                    headers=headers
+                                )
+                                if att_r.status_code == 200:
+                                    pdf_b64 = att_r.json().get("data", "").replace("-", "+").replace("_", "/")
+                                    if pdf_b64:
+                                        pdf_texts.append(pdf_b64)
+                            except Exception:
+                                pass
+
+                mail_data.append({
+                    "from": hdrs.get("From", ""),
+                    "subject": hdrs.get("Subject", ""),
+                    "snippet": snippet[:300],
+                    "pdf_attachments": pdf_texts
+                })
+
             if not mail_data:
                 return None
-            mail_text = "\n".join(
-                f"De: {m['from']}\nAsunto: {m['subject']}\nPreview: {m['snippet']}"
-                for m in mail_data
-            )
+
+            # Armar contenido para Claude — texto + PDFs
+            content = []
+            mail_summary_text = ""
+            for m in mail_data:
+                mail_summary_text += f"\nDe: {m['from']}\nAsunto: {m['subject']}\nPreview: {m['snippet']}\n"
+
+            content.append({"type": "text", "text": f"""Analizá estos mails importantes del último mes e identificá los verdaderamente relevantes.
+Importante: facturas/vencimientos con montos, mails de personas conocidas que requieren respuesta, algo urgente.
+Ignorá: newsletters, notificaciones automáticas, publicidad, confirmaciones rutinarias, notificaciones de GitHub/Railway/Notion.
+Si hay PDFs adjuntos, leelos y extraé la info relevante (monto, vencimiento, servicio).
+Resumí en español rioplatense, máx 5 líneas. Si no hay nada importante respondé solo: NONE
+
+Mails:
+{mail_summary_text}"""})
+
+            # Agregar PDFs como imágenes/documentos
+            for m in mail_data:
+                for pdf_b64 in m["pdf_attachments"][:2]:  # máx 2 PDFs por mail
+                    try:
+                        content.append({
+                            "type": "document",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "application/pdf",
+                                "data": pdf_b64
+                            }
+                        })
+                    except Exception:
+                        pass
+
             resp = claude_create(
-                model="claude-sonnet-4-20250514", max_tokens=300,
-                system="""Analizá estos mails no leídos e identificá solo los verdaderamente importantes.
-Importante: facturas/vencimientos, mails de personas conocidas que requieren respuesta, algo urgente.
-Ignorá: newsletters, notificaciones automáticas, publicidad, confirmaciones rutinarias.
-Si hay mails importantes, resumilos brevemente en español rioplatense, máx 3 líneas.
-Si no hay nada importante, respondé solo: NONE""",
-                messages=[{"role": "user", "content": mail_text}]
+                model="claude-sonnet-4-20250514", max_tokens=400,
+                messages=[{"role": "user", "content": content}]
             )
             result = resp.content[0].text.strip()
             return None if result == "NONE" else result
+
     except Exception:
         return None
 
