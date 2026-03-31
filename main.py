@@ -58,6 +58,7 @@ user_prefs: dict = {
     "resumen_nocturno_hour": 22,
     "resumen_nocturno_enabled": True,
     "news_topics": [],
+    "service_providers": {},   # {"electricidad": "CALF", "gas": "Camuzzi", ...}
     "_config_page_id": None,
 }
 
@@ -1172,7 +1173,66 @@ async def query_calendar(days_ahead: int = 2, days_back: int = 0) -> str | None:
                 lines.append(f"• {start.get('date', '')} — {e.get('summary', 'Evento')} (todo el día){loc_str}")
         return "\n".join(lines)
 
-async def get_gmail_summary() -> str | None:
+async def infer_service_providers() -> dict:
+    """Escanea mails del último mes e infiere proveedores de servicios."""
+    access_token = await get_gcal_access_token()
+    if not access_token:
+        return {}
+    try:
+        async with httpx.AsyncClient(timeout=15) as http:
+            headers = {"Authorization": f"Bearer {access_token}"}
+            r = await http.get(
+                "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+                headers=headers,
+                params={"q": "newer_than:60d (factura OR comprobante OR boleta OR vencimiento OR suministro OR servicio)", "maxResults": 30}
+            )
+            if r.status_code != 200:
+                return {}
+            messages = r.json().get("messages", [])
+            if not messages:
+                return {}
+
+            mail_summaries = []
+            for msg in messages[:15]:
+                msg_r = await http.get(
+                    f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg['id']}",
+                    headers=headers,
+                    params={"format": "metadata", "metadataHeaders": ["Subject", "From"]}
+                )
+                if msg_r.status_code == 200:
+                    hdrs = {h["name"]: h["value"] for h in msg_r.json().get("payload", {}).get("headers", [])}
+                    snippet = msg_r.json().get("snippet", "")[:150]
+                    mail_summaries.append(f"De: {hdrs.get('From','')}\nAsunto: {hdrs.get('Subject','')}\nPreview: {snippet}")
+
+            if not mail_summaries:
+                return {}
+
+            resp = claude_create(
+                model="claude-sonnet-4-20250514", max_tokens=300,
+                system="""Analizá estos mails de facturas/servicios e identificá qué empresa provee qué servicio.
+Respondé SOLO JSON con este formato:
+{"electricidad": "Nombre empresa", "gas": "Nombre empresa", "internet": "Nombre empresa", "agua": "Nombre empresa", "telefono": "Nombre empresa"}
+Solo incluí los servicios que puedas identificar con certeza. Si no hay info suficiente para un servicio, no lo incluyas.""",
+                messages=[{"role": "user", "content": "\n---\n".join(mail_summaries)}]
+            )
+            raw = resp.content[0].text.strip()
+            if raw.startswith("```"):
+                raw = raw.strip("`").lstrip("json").strip()
+            return json.loads(raw)
+    except Exception:
+        return {}
+
+async def get_gmail_summary(query_hint: str = None) -> str | None:
+    providers = user_prefs.get("service_providers", {})
+    provider_names = list(providers.values())
+    if query_hint:
+        base_query = query_hint
+    elif provider_names:
+        providers_query = " OR ".join(provider_names[:5])
+        base_query = f"newer_than:30d ({providers_query} OR factura OR comprobante)"
+    else:
+        base_query = "newer_than:30d (factura OR comprobante OR boleta)"
+
     access_token = await get_gcal_access_token()
     if not access_token:
         return None
@@ -1182,7 +1242,7 @@ async def get_gmail_summary() -> str | None:
             r = await http.get(
                 "https://gmail.googleapis.com/gmail/v1/users/me/messages",
                 headers=headers,
-                params={"q": "newer_than:45d", "maxResults": 30}
+                params={"q": base_query, "maxResults": 20}
             )
             if r.status_code != 200:
                 return None
@@ -1382,8 +1442,30 @@ IMPORTANTE: No inventes datos que no tenés."""
                     result = "No pude obtener el clima en este momento."
 
             elif tool_name == "consultar_gmail":
-                gmail_data = await get_gmail_summary()
-                result = gmail_data or "No hay mails importantes sin leer."
+                # Si no hay proveedores guardados, inferirlos primero
+                if not user_prefs.get("service_providers"):
+                    inferred = await infer_service_providers()
+                    if inferred:
+                        resumen = "\n".join(f"• {k.capitalize()}: *{v}*" for k, v in inferred.items())
+                        pending_state[phone] = {
+                            "type": "confirm_service_providers",
+                            "proposed": inferred
+                        }
+                        await send_message(phone, f"Encontré tus proveedores de servicios en tus mails:\n\n{resumen}\n\n¿Es correcto?")
+                        await send_interactive_buttons(
+                            phone,
+                            "¿Confirmo estos proveedores?",
+                            [
+                                {"id": "providers_ok", "title": "Sí, correcto"},
+                                {"id": "providers_no", "title": "Quiero corregir"},
+                            ]
+                        )
+                        result = "Inferí los proveedores y le pregunté al usuario para confirmar. No hay resultado de mail todavía."
+                    else:
+                        result = "No encontré mails suficientes para identificar proveedores de servicios."
+                else:
+                    gmail_data = await get_gmail_summary()
+                    result = gmail_data or "No encontré mails relevantes."
 
             elif tool_name == "web_search":
                 result = "Búsqueda web ejecutada."
@@ -1459,6 +1541,12 @@ async def load_user_config(wa_number: str):
             topics = get_txt("News Topics")
             if topics:
                 user_prefs["news_topics"] = [t.strip() for t in topics.split(",") if t.strip()]
+            providers = get_txt("Service Providers")
+            if providers:
+                try:
+                    user_prefs["service_providers"] = json.loads(providers)
+                except Exception:
+                    user_prefs["service_providers"] = {}
             user_prefs["_config_page_id"] = page["id"]
     except Exception:
         pass
@@ -1473,9 +1561,10 @@ async def save_user_config(wa_number: str):
         extras_str = " | ".join(user_prefs.get("resumen_extras", []))
         topics_str = ", ".join(user_prefs.get("news_topics", []))
         props = {
-            "Greeting Name":   {"rich_text": [{"text": {"content": user_prefs.get("greeting_name") or "Buenos días"}}]},
-            "Resumen Extras":  {"rich_text": [{"text": {"content": extras_str}}]},
-            "News Topics":     {"rich_text": [{"text": {"content": topics_str}}]},
+            "Greeting Name":     {"rich_text": [{"text": {"content": user_prefs.get("greeting_name") or "Buenos días"}}]},
+            "Resumen Extras":    {"rich_text": [{"text": {"content": extras_str}}]},
+            "News Topics":       {"rich_text": [{"text": {"content": topics_str}}]},
+            "Service Providers": {"rich_text": [{"text": {"content": json.dumps(user_prefs.get("service_providers", {}), ensure_ascii=False)}}]},
         }
         if user_prefs.get("daily_summary_hour") is not None:
             props["Resumen Hour"]   = {"number": user_prefs["daily_summary_hour"]}
@@ -1922,7 +2011,39 @@ Aplicá la corrección y devolvé la lista corregida como array JSON simple:
             await send_message(phone, "👍 Receta no guardada.")
         return True
 
-    if state_type == "confirm_event_or_update":
+    if state_type == "confirm_service_providers":
+        proposed = state.get("proposed", {})
+        del pending_state[phone]
+        if text.strip() == "providers_ok":
+            user_prefs["service_providers"] = proposed
+            await save_user_config(phone)
+            await send_message(phone, "✅ Listo, ya sé quiénes son tus proveedores de servicios. La próxima vez que me preguntes sobre facturas voy a buscar directamente.")
+        else:
+            # El usuario quiere corregir — pedir corrección en texto libre
+            pending_state[phone] = {"type": "correct_service_providers", "proposed": proposed}
+            await send_message(phone, "Dale, decime las correcciones. Por ejemplo: \"gas es Camuzzi, internet es Personal\"")
+        return True
+
+    if state_type == "correct_service_providers":
+        proposed = state.get("proposed", {})
+        del pending_state[phone]
+        try:
+            resp = claude_create(
+                model="claude-sonnet-4-20250514", max_tokens=200,
+                system="Aplicá las correcciones del usuario al JSON de proveedores. Respondé SOLO JSON.",
+                messages=[{"role": "user", "content": f"Proveedores actuales: {json.dumps(proposed, ensure_ascii=False)}\nCorrecciones: {text}\nRespondé el JSON corregido."}]
+            )
+            raw = resp.content[0].text.strip().strip("`").lstrip("json").strip()
+            corrected = json.loads(raw)
+            user_prefs["service_providers"] = corrected
+            await save_user_config(phone)
+            resumen = ", ".join(f"{k}: {v}" for k, v in corrected.items())
+            await send_message(phone, f"✅ Guardado: {resumen}")
+        except Exception:
+            await send_message(phone, "❌ No pude aplicar las correcciones. Intentá de nuevo.")
+        return True
+
+
         new_data = state.get("new_event_data", {})
         similar  = state.get("similar_events", [])
         del pending_state[phone]
@@ -2353,11 +2474,40 @@ def format_recordatorio(data: dict) -> str:
 @app.get("/cron")
 async def cron_job():
     await load_user_config(MY_NUMBER)
-    access_token = await get_gcal_access_token()
-    if not access_token:
-        return {"ok": False, "reason": "no gcal token"}
     now = now_argentina()
     fired = []
+
+    # ── Resumen diario — no depende del token de Calendar ─────────────────────
+    effective_hour   = user_prefs.get("daily_summary_hour")
+    effective_minute = user_prefs.get("daily_summary_minute")
+    if effective_hour is None:   effective_hour   = DAILY_SUMMARY_HOUR
+    if effective_minute is None: effective_minute = 0
+    if now.hour == effective_hour and now.minute == effective_minute:
+        try:
+            access_token_summary = await get_gcal_access_token()
+            async with httpx.AsyncClient() as http_summary:
+                await send_daily_summary(http_summary, access_token_summary, now)
+            fired.append("DAILY_SUMMARY")
+        except Exception:
+            pass
+
+    # ── Resumen nocturno — no depende del token de Calendar ───────────────────
+    nocturno_enabled = user_prefs.get("resumen_nocturno_enabled", True)
+    nocturno_hour    = user_prefs.get("resumen_nocturno_hour", 22)
+    if nocturno_enabled and now.hour == nocturno_hour and now.minute == 0:
+        try:
+            access_token_noc = await get_gcal_access_token()
+            async with httpx.AsyncClient() as http_noc:
+                await send_resumen_nocturno(http_noc, access_token_noc, now)
+            fired.append("RESUMEN_NOCTURNO")
+        except Exception:
+            pass
+
+    # ── Recordatorios — requieren Calendar ────────────────────────────────────
+    access_token = await get_gcal_access_token()
+    if not access_token:
+        return {"ok": True, "fired": fired, "time": now.strftime("%H:%M"), "warning": "no gcal token"}
+
     async with httpx.AsyncClient() as http:
         headers = {"Authorization": f"Bearer {access_token}"}
         r = await http.get(
@@ -2370,7 +2520,7 @@ async def cron_job():
             }
         )
         if r.status_code != 200:
-            return {"ok": False}
+            return {"ok": True, "fired": fired, "time": now.strftime("%H:%M")}
         for event in r.json().get("items", []):
             event_id  = event.get("id")
             summary   = event.get("summary", "Evento")
@@ -2413,17 +2563,8 @@ async def cron_job():
                 await send_message(MY_NUMBER, f"⏰ *En 15 minutos:* {summary}{loc_str}")
                 fired.append(f"REM15: {summary}")
 
-        effective_hour   = user_prefs.get("daily_summary_hour")   or DAILY_SUMMARY_HOUR
-        effective_minute = user_prefs.get("daily_summary_minute") or 0
-        if now.hour == effective_hour and now.minute == effective_minute:
-            await send_daily_summary(http, access_token, now)
-            fired.append("DAILY_SUMMARY")
-        nocturno_enabled = user_prefs.get("resumen_nocturno_enabled", True)
-        nocturno_hour    = user_prefs.get("resumen_nocturno_hour", 22)
-        if nocturno_enabled and now.hour == nocturno_hour and now.minute == 0:
-            await send_resumen_nocturno(http, access_token, now)
-            fired.append("RESUMEN_NOCTURNO")
     return {"ok": True, "fired": fired, "time": now.strftime("%H:%M")}
+
 
 async def send_daily_summary(http, access_token: str, now: datetime):
     r = await http.get(
