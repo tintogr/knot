@@ -1232,6 +1232,16 @@ async def handle_chat(phone: str, text: str) -> str:
         user_context_parts.append(f"Proveedores de servicios: {prov_str}.")
     if user_prefs.get("greeting_name"):
         user_context_parts.append(f"Nombre del usuario: {user_prefs['greeting_name']}.")
+    resumen_h = user_prefs.get("daily_summary_hour")
+    resumen_m = user_prefs.get("daily_summary_minute", 0)
+    if resumen_h is not None:
+        user_context_parts.append(f"Resumen diario configurado a las {resumen_h:02d}:{resumen_m:02d}.")
+    extras = user_prefs.get("resumen_extras", [])
+    if extras:
+        user_context_parts.append(f"Extras del resumen: {', '.join(extras)}.")
+    noc_h = user_prefs.get("resumen_nocturno_hour", 22)
+    noc_en = user_prefs.get("resumen_nocturno_enabled", True)
+    user_context_parts.append(f"Resumen nocturno: {'activado' if noc_en else 'desactivado'} a las {noc_h:02d}:00.")
     user_context = "\n".join(user_context_parts)
 
     tools = [
@@ -1306,6 +1316,23 @@ async def handle_chat(phone: str, text: str) -> str:
         {
             "type": "web_search_20250305",
             "name": "web_search"
+        },
+        {
+            "name": "configurar_matrics",
+            "description": "Cambia configuracion de Matrics: horario del resumen diario, extras del resumen, saludo, resumen nocturno. Usa SOLO cuando el usuario quiere CAMBIAR algo de la config, no cuando pregunta.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "hour": {"type": ["integer", "null"], "description": "Nueva hora del resumen diario (0-23)"},
+                    "minute": {"type": ["integer", "null"], "description": "Nuevos minutos del resumen (0-59), default 0"},
+                    "greeting_name": {"type": ["string", "null"], "description": "Nuevo nombre para el saludo matutino"},
+                    "add_extra": {"type": ["string", "null"], "description": "Instruccion extra a agregar al resumen"},
+                    "remove_extra": {"type": ["string", "null"], "description": "Extra a remover del resumen"},
+                    "nocturno_enabled": {"type": ["boolean", "null"], "description": "Activar/desactivar resumen nocturno"},
+                    "nocturno_hour": {"type": ["integer", "null"], "description": "Hora del resumen nocturno (0-23)"}
+                },
+                "required": []
+            }
         }
     ]
 
@@ -1320,6 +1347,7 @@ Tenes acceso a informacion real del usuario a traves de herramientas:
 - Su Gmail (mails recibidos, facturas, comprobantes, comunicaciones)
 - El clima actual y pronostico
 - Busqueda web para informacion externa
+- Configuracion de Matrics (cambiar horario del resumen, extras, saludo, nocturno)
 
 Antes de responder cualquier pregunta, pensa que fuentes son relevantes y consulta todas las que hagan falta.
 
@@ -1442,6 +1470,38 @@ IMPORTANTE: No inventes datos. Si no encontras info en ninguna fuente, decilo cl
                     result = gmail_data or "No encontre mails relevantes."
             elif tool_name == "web_search":
                 result = "Busqueda web ejecutada."
+            elif tool_name == "configurar_matrics":
+                changed = []
+                if tool_input.get("greeting_name"):
+                    user_prefs["greeting_name"] = tool_input["greeting_name"]
+                    changed.append(f"Saludo -> {tool_input['greeting_name']}")
+                if tool_input.get("add_extra"):
+                    ex = user_prefs.get("resumen_extras", [])
+                    ex.append(tool_input["add_extra"])
+                    user_prefs["resumen_extras"] = ex
+                    changed.append(f"Extra agregado: {tool_input['add_extra']}")
+                if tool_input.get("remove_extra"):
+                    ex = user_prefs.get("resumen_extras", [])
+                    user_prefs["resumen_extras"] = [e for e in ex if tool_input["remove_extra"].lower() not in e.lower()]
+                    changed.append(f"Extra removido: {tool_input['remove_extra']}")
+                if tool_input.get("hour") is not None:
+                    h = int(tool_input["hour"])
+                    m = int(tool_input.get("minute", 0) or 0)
+                    if 0 <= h <= 23:
+                        user_prefs["daily_summary_hour"] = h
+                        user_prefs["daily_summary_minute"] = m
+                        changed.append(f"Horario resumen -> {h:02d}:{m:02d}")
+                if tool_input.get("nocturno_enabled") is not None:
+                    user_prefs["resumen_nocturno_enabled"] = tool_input["nocturno_enabled"]
+                    changed.append(f"Resumen nocturno -> {'activado' if tool_input['nocturno_enabled'] else 'desactivado'}")
+                if tool_input.get("nocturno_hour") is not None:
+                    user_prefs["resumen_nocturno_hour"] = int(tool_input["nocturno_hour"])
+                    changed.append(f"Hora nocturno -> {int(tool_input['nocturno_hour']):02d}:00")
+                if changed:
+                    await save_user_config(MY_NUMBER)
+                    result = "Configuracion actualizada: " + ", ".join(changed)
+                else:
+                    result = "No se especifico que cambiar."
         except Exception as e:
             result = f"Error ejecutando {tool_name}: {str(e)[:100]}"
 
@@ -2403,7 +2463,7 @@ async def process_message(message: dict):
                 await send_message(from_number, respuesta)
 
         elif tipo == "CONFIGURAR":
-            respuesta = await handle_configurar(text)
+            respuesta = await handle_chat(from_number, text)
             await send_message(from_number, respuesta)
 
         elif tipo == "REUNION":
