@@ -5,6 +5,7 @@ import time
 import httpx
 from datetime import date, datetime, timedelta, timezone
 from calendar import monthrange
+from math import radians, sin, cos, sqrt, atan2
 from fastapi import FastAPI, Request, BackgroundTasks
 from anthropic import Anthropic
 
@@ -46,6 +47,128 @@ USER_LON = float(os.environ.get("USER_LON", "-68.06"))
 def now_argentina() -> datetime:
     return datetime.now(timezone.utc) - timedelta(hours=3)
 
+# ── Normalizacion de In-Out ───────────────────────────────────────────────────
+INGRESO_EXACT = "\u2192INGRESO\u2190"
+EGRESO_EXACT  = "\u2190 EGRESO \u2192"
+
+def normalize_in_out(raw: str) -> str:
+    """Fuerza el valor exacto de In-Out para que Notion no rompa formulas."""
+    if not raw:
+        return EGRESO_EXACT
+    upper = raw.upper().strip()
+    if "INGRESO" in upper:
+        return INGRESO_EXACT
+    return EGRESO_EXACT
+
+# ── Helpers de ubicacion ──────────────────────────────────────────────────────
+def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Distancia en km entre dos puntos GPS."""
+    R = 6371
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+    a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
+    return R * 2 * atan2(sqrt(a), sqrt(1-a))
+
+def get_current_location() -> tuple[float, float]:
+    """Devuelve lat, lon actual (dinamica si hay OwnTracks, sino default)."""
+    return current_location["lat"], current_location["lon"]
+
+def is_at_known_place() -> dict | None:
+    """Retorna el lugar conocido si el usuario esta en uno, sino None."""
+    lat, lon = get_current_location()
+    for place in user_prefs.get("known_places", []):
+        dist_m = haversine_km(lat, lon, place["lat"], place["lon"]) * 1000
+        radius = place.get("radius", 200)
+        if dist_m <= radius:
+            return place
+    return None
+
+def is_in_transit() -> bool:
+    """True si el usuario se esta moviendo (velocidad > 5 km/h)."""
+    return current_location.get("velocity", 0) > 5
+
+async def search_nearby_shops(lat: float, lon: float, shop_type: str) -> list[dict]:
+    """Busca comercios cercanos via Google Places API. Retorna lista vacia si no hay API key."""
+    api_key = os.environ.get("GOOGLE_PLACES_KEY")
+    if not api_key:
+        return []
+    type_map = {
+        "Super": "supermarket",
+        "Panaderia": "bakery",
+        "Verduleria": "grocery_or_supermarket",
+        "Farmacia": "pharmacy",
+        "Ferreteria": "hardware_store",
+        "Dietetica": "health_food_store",
+        "Drogueria": "drugstore",
+    }
+    place_type = type_map.get(shop_type, "store")
+    try:
+        async with httpx.AsyncClient(timeout=5) as http:
+            r = await http.get(
+                "https://maps.googleapis.com/maps/api/place/nearbysearch/json",
+                params={
+                    "location": f"{lat},{lon}",
+                    "radius": 500,
+                    "type": place_type,
+                    "key": api_key
+                }
+            )
+            if r.status_code == 200:
+                results = r.json().get("results", [])
+                return [{"name": p["name"], "address": p.get("vicinity", ""),
+                         "distance_m": int(haversine_km(lat, lon, p["geometry"]["location"]["lat"], p["geometry"]["location"]["lng"]) * 1000)}
+                        for p in results[:3]]
+    except Exception:
+        pass
+    return []
+
+async def check_shopping_proximity():
+    """Chequea si hay comercios cerca que vendan cosas de la lista de compras."""
+    if is_at_known_place() or is_in_transit():
+        return None
+    if not current_location.get("updated_at"):
+        return None
+    # Solo chequear si la ubicacion es reciente (ultimos 10 min)
+    age = (now_argentina() - current_location["updated_at"]).total_seconds()
+    if age > 600:
+        return None
+    # Buscar items pendientes agrupados por store
+    try:
+        async with httpx.AsyncClient() as http:
+            r = await http.post(
+                f"https://api.notion.com/v1/databases/{SHOPPING_DB_ID}/query",
+                headers=notion_headers(),
+                json={"filter": {"property": "Stock", "checkbox": {"equals": False}}, "page_size": 50}
+            )
+            if r.status_code != 200:
+                return None
+            items = r.json().get("results", [])
+            if not items:
+                return None
+            by_store = {}
+            for item in items:
+                stores = item["properties"].get("Store", {}).get("multi_select", [])
+                name = item["properties"]["Name"]["title"][0]["plain_text"] if item["properties"]["Name"]["title"] else ""
+                for s in stores:
+                    store_name = s["name"]
+                    if store_name not in by_store:
+                        by_store[store_name] = []
+                    by_store[store_name].append(name)
+            if not by_store:
+                return None
+            lat, lon = get_current_location()
+            for store_type, item_names in by_store.items():
+                shops = await search_nearby_shops(lat, lon, store_type)
+                if shops:
+                    return {
+                        "store_type": store_type,
+                        "items": item_names,
+                        "shops": shops
+                    }
+    except Exception:
+        pass
+    return None
+
 # ── Memoria de categorías ──────────────────────────────────────────────────────
 category_overrides: dict[str, list[str]] = {}
 
@@ -59,7 +182,17 @@ user_prefs: dict = {
     "resumen_nocturno_enabled": True,
     "news_topics": [],
     "service_providers": {},   # {"electricidad": "CALF", "gas": "Camuzzi", ...}
+    "known_places": [],        # [{"name": "Casa", "lat": -38.95, "lon": -68.06, "radius": 200}, ...]
     "_config_page_id": None,
+}
+
+# ── Ubicacion en tiempo real ──────────────────────────────────────────────────
+current_location: dict = {
+    "lat": float(os.environ.get("USER_LAT", "-38.95")),
+    "lon": float(os.environ.get("USER_LON", "-68.06")),
+    "updated_at": None,
+    "velocity": 0,
+    "source": "default",   # "default" | "owntracks" | "whatsapp"
 }
 
 # ── Última entrada tocada (gastos) ────────────────────────────────────────────
@@ -171,11 +304,12 @@ def wind_description(kmh: float) -> str:
 
 async def get_weather() -> dict | None:
     try:
+        lat, lon = get_current_location()
         async with httpx.AsyncClient(timeout=5) as http:
             r = await http.get(
                 "https://api.open-meteo.com/v1/forecast",
                 params={
-                    "latitude": USER_LAT, "longitude": USER_LON,
+                    "latitude": lat, "longitude": lon,
                     "current": "temperature_2m,apparent_temperature,precipitation,windspeed_10m,weathercode",
                     "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,windspeed_10m_max,weathercode",
                     "timezone": "America/Argentina/Buenos_Aires",
@@ -379,9 +513,10 @@ Emoji: elegi el mas especifico segun el contexto real."""
 async def create_notion_entry(data: dict, exchange_rate: float) -> tuple[bool, str]:
     if not data.get("value_ars") or not data.get("in_out"):
         return False, "No se pudo interpretar"
+    normalized_in_out = normalize_in_out(data["in_out"])
     props = {
         "Name":          {"title": [{"text": {"content": data["name"]}}]},
-        "In - Out":      {"select": {"name": data["in_out"]}},
+        "In - Out":      {"select": {"name": normalized_in_out}},
         "Value (ars)":   {"number": float(data["value_ars"])},
         "Exchange Rate": {"number": exchange_rate},
         "Method":        {"select": {"name": data.get("metodo", "Payment")}},
@@ -1253,6 +1388,12 @@ async def handle_chat(phone: str, text: str) -> str:
     noc_h = user_prefs.get("resumen_nocturno_hour", 22)
     noc_en = user_prefs.get("resumen_nocturno_enabled", True)
     user_context_parts.append(f"Resumen nocturno: {'activado' if noc_en else 'desactivado'} a las {noc_h:02d}:00.")
+    if current_location.get("source") == "owntracks":
+        place = is_at_known_place()
+        if place:
+            user_context_parts.append(f"Ubicacion actual: {place['name']}.")
+        else:
+            user_context_parts.append(f"Ubicacion actual: {current_location['lat']:.4f}, {current_location['lon']:.4f} (zona desconocida).")
     user_context = "\n".join(user_context_parts)
 
     tools = [
@@ -1854,6 +1995,12 @@ async def load_user_config(wa_number: str):
                     user_prefs["service_providers"] = json.loads(providers)
                 except Exception:
                     user_prefs["service_providers"] = {}
+            known = get_txt("Known Places")
+            if known:
+                try:
+                    user_prefs["known_places"] = json.loads(known)
+                except Exception:
+                    user_prefs["known_places"] = []
             user_prefs["_config_page_id"] = page["id"]
     except Exception:
         pass
@@ -1872,6 +2019,7 @@ async def save_user_config(wa_number: str):
             "Resumen Extras":    {"rich_text": [{"text": {"content": extras_str}}]},
             "News Topics":       {"rich_text": [{"text": {"content": topics_str}}]},
             "Service Providers": {"rich_text": [{"text": {"content": json.dumps(user_prefs.get("service_providers", {}), ensure_ascii=False)}}]},
+            "Known Places":      {"rich_text": [{"text": {"content": json.dumps(user_prefs.get("known_places", []), ensure_ascii=False)}}]},
         }
         if user_prefs.get("daily_summary_hour") is not None:
             props["Resumen Hour"]   = {"number": user_prefs["daily_summary_hour"]}
@@ -2394,6 +2542,22 @@ async def process_message(message: dict):
             else:
                 await send_message(from_number, "No pude transcribir el audio. Mandalo como texto.")
                 return
+        elif msg_type == "location":
+            loc = message.get("location", {})
+            lat = loc.get("latitude")
+            lon = loc.get("longitude")
+            if lat and lon:
+                current_location["lat"] = float(lat)
+                current_location["lon"] = float(lon)
+                current_location["updated_at"] = now_argentina()
+                current_location["source"] = "whatsapp"
+                current_location["velocity"] = 0
+                place = is_at_known_place()
+                if place:
+                    await send_message(from_number, f"📍 Ubicacion actualizada: *{place['name']}*")
+                else:
+                    await send_message(from_number, "📍 Ubicacion actualizada. No reconozco este lugar, queres que lo guarde?")
+            return
         else:
             return
 
@@ -2826,9 +2990,116 @@ Se conciso, calido, natural. Maximo 5 lineas en total.""",
 
     await send_message(MY_NUMBER, msg)
 
+# ── ENDPOINT UBICACION (OwnTracks) ────────────────────────────────────────────
+_last_proximity_check: dict[str, datetime] = {}
+_last_proximity_store: dict[str, str] = {}
+
+@app.post("/location")
+async def receive_location(request: Request):
+    """Recibe updates de OwnTracks (o cualquier fuente de ubicacion)."""
+    try:
+        body = await request.json()
+        # OwnTracks manda _type: "location"
+        msg_type = body.get("_type", "location")
+        if msg_type != "location":
+            return {"ok": True, "ignored": msg_type}
+
+        lat = body.get("lat")
+        lon = body.get("lon")
+        vel = body.get("vel", 0)  # velocidad en km/h
+        if lat is None or lon is None:
+            return {"ok": False, "error": "missing lat/lon"}
+
+        now = now_argentina()
+        current_location["lat"] = float(lat)
+        current_location["lon"] = float(lon)
+        current_location["velocity"] = float(vel) if vel else 0
+        current_location["updated_at"] = now
+        current_location["source"] = "owntracks"
+
+        # Chequear si hay oportunidad de compra cercana
+        # Solo si: no esta en lugar conocido, no esta en transito, no se chequeo hace poco
+        phone = MY_NUMBER
+        last_check = _last_proximity_check.get(phone)
+        should_check = (
+            not is_at_known_place()
+            and not is_in_transit()
+            and (not last_check or (now - last_check).total_seconds() > 1800)  # max cada 30 min
+            and 9 <= now.hour <= 21  # solo en horario razonable
+        )
+
+        if should_check:
+            _last_proximity_check[phone] = now
+            proximity = await check_shopping_proximity()
+            if proximity:
+                store_type = proximity["store_type"]
+                # No repetir mismo tipo de tienda en el mismo dia
+                last_store = _last_proximity_store.get(phone)
+                today = now.strftime("%Y-%m-%d")
+                store_key = f"{today}:{store_type}"
+                if last_store != store_key:
+                    _last_proximity_store[phone] = store_key
+                    items_str = ", ".join(proximity["items"][:5])
+                    shop = proximity["shops"][0]
+                    try:
+                        msg_resp = claude_create(
+                            model="claude-sonnet-4-20250514", max_tokens=150,
+                            system="Sos Matrics. Genera un mensaje breve y natural en espanol rioplatense avisando que el usuario esta cerca de una tienda donde puede comprar cosas que necesita. No seas pesado, se casual y util. Max 3 lineas.",
+                            messages=[{"role": "user", "content": f"El usuario esta cerca de {shop['name']} ({shop['address']}, a {shop['distance_m']}m). Necesita comprar: {items_str}. Tipo de tienda: {store_type}."}]
+                        )
+                        msg = msg_resp.content[0].text.strip()
+                    except Exception:
+                        msg = f"Estas cerca de {shop['name']} y te faltan: {items_str}"
+                    await send_message(phone, msg)
+
+        return {
+            "ok": True,
+            "lat": lat, "lon": lon,
+            "known_place": (is_at_known_place() or {}).get("name"),
+            "in_transit": is_in_transit()
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:100]}
+
+@app.post("/location/places")
+async def manage_known_places(request: Request):
+    """Agregar/listar lugares conocidos. POST con {action: add/list/remove, name, lat, lon, radius}."""
+    try:
+        body = await request.json()
+        action = body.get("action", "list")
+        places = user_prefs.get("known_places", [])
+
+        if action == "list":
+            return {"ok": True, "places": places}
+
+        elif action == "add":
+            name = body.get("name")
+            lat = body.get("lat")
+            lon = body.get("lon")
+            radius = body.get("radius", 200)
+            if not name or lat is None or lon is None:
+                return {"ok": False, "error": "missing name/lat/lon"}
+            places.append({"name": name, "lat": float(lat), "lon": float(lon), "radius": int(radius)})
+            user_prefs["known_places"] = places
+            await save_user_config(MY_NUMBER)
+            return {"ok": True, "added": name, "total": len(places)}
+
+        elif action == "remove":
+            name = body.get("name", "").lower()
+            user_prefs["known_places"] = [p for p in places if p["name"].lower() != name]
+            await save_user_config(MY_NUMBER)
+            return {"ok": True, "removed": name}
+
+        return {"ok": False, "error": "unknown action"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:100]}
+
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "time": now_argentina().strftime("%H:%M"), "bot": "matrics"}
+    return {"status": "ok", "time": now_argentina().strftime("%H:%M"), "bot": "matrics",
+            "location": {"lat": current_location["lat"], "lon": current_location["lon"],
+                         "source": current_location["source"],
+                         "known_place": (is_at_known_place() or {}).get("name")}}
 
 # ── MODULO SHOPPING ────────────────────────────────────────────────────────────
 def notion_headers():
