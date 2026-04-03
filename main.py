@@ -14,7 +14,7 @@ app = FastAPI()
 anthropic = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 def claude_create(**kwargs):
-    """Wrapper con reintentos automáticos para errores 529 (API sobrecargada)."""
+    """Wrapper con reintentos automaticos para errores 529 (API sobrecargada)."""
     last_err = None
     for attempt in range(3):
         try:
@@ -87,40 +87,79 @@ def is_in_transit() -> bool:
     """True si el usuario se esta moviendo (velocidad > 5 km/h)."""
     return current_location.get("velocity", 0) > 5
 
-async def search_nearby_shops(lat: float, lon: float, shop_type: str) -> list[dict]:
-    """Busca comercios cercanos via Google Places API. Retorna lista vacia si no hay API key."""
-    api_key = os.environ.get("GOOGLE_PLACES_KEY")
-    if not api_key:
-        return []
-    type_map = {
-        "Super": "supermarket",
-        "Panaderia": "bakery",
-        "Verduleria": "grocery_or_supermarket",
-        "Farmacia": "pharmacy",
-        "Ferreteria": "hardware_store",
-        "Dietetica": "health_food_store",
-        "Drogueria": "drugstore",
-    }
-    place_type = type_map.get(shop_type, "store")
+async def reverse_geocode(lat: float, lon: float) -> str | None:
+    """Devuelve nombre de barrio/zona usando Nominatim (OSM). Sin key, gratis."""
     try:
         async with httpx.AsyncClient(timeout=5) as http:
             r = await http.get(
-                "https://maps.googleapis.com/maps/api/place/nearbysearch/json",
-                params={
-                    "location": f"{lat},{lon}",
-                    "radius": 500,
-                    "type": place_type,
-                    "key": api_key
-                }
+                "https://nominatim.openstreetmap.org/reverse",
+                params={"lat": lat, "lon": lon, "format": "json", "zoom": 14, "addressdetails": 1},
+                headers={"User-Agent": "Matrics/1.0"}
             )
             if r.status_code == 200:
-                results = r.json().get("results", [])
-                return [{"name": p["name"], "address": p.get("vicinity", ""),
-                         "distance_m": int(haversine_km(lat, lon, p["geometry"]["location"]["lat"], p["geometry"]["location"]["lng"]) * 1000)}
-                        for p in results[:3]]
+                addr = r.json().get("address", {})
+                parts = []
+                for key in ["suburb", "neighbourhood", "city_district", "town", "city"]:
+                    val = addr.get(key)
+                    if val and val not in parts:
+                        parts.append(val)
+                        if len(parts) == 2:
+                            break
+                return ", ".join(parts) if parts else None
     except Exception:
         pass
-    return []
+    return None
+
+async def search_nearby_shops(lat: float, lon: float, radius: int = 500, shop_types: list = None) -> list[dict]:
+    """Busca comercios cercanos usando OpenStreetMap Overpass API (gratis, sin key)."""
+    if shop_types is None:
+        shop_types = ["supermarket", "convenience", "bakery", "hardware", "butcher", "greengrocer"]
+
+    node_queries = "\n".join(
+        f'  node["shop"="{t}"](around:{radius},{lat},{lon});'
+        for t in shop_types
+    )
+
+    query = f"""[out:json][timeout:10];
+(
+{node_queries}
+  node["amenity"="pharmacy"](around:{radius},{lat},{lon});
+);
+out body;"""
+
+    try:
+        async with httpx.AsyncClient(timeout=12) as http:
+            resp = await http.post(
+                "https://overpass-api.de/api/interpreter",
+                data={"data": query}
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            shops = []
+            for element in data.get("elements", []):
+                tags = element.get("tags", {})
+                name = tags.get("name")
+                if not name:
+                    continue
+                shop_type = tags.get("shop") or tags.get("amenity", "shop")
+                elat = element.get("lat", lat)
+                elon = element.get("lon", lon)
+                dist_m = round(haversine_km(lat, lon, elat, elon) * 1000)
+                shops.append({
+                    "name": name,
+                    "type": shop_type,
+                    "distance_m": dist_m,
+                    "lat": elat,
+                    "lon": elon,
+                })
+
+            shops.sort(key=lambda x: x["distance_m"])
+            return shops
+
+    except Exception as e:
+        print(f"[Overpass] Error buscando comercios: {e}")
+        return []
 
 async def check_shopping_proximity():
     """Chequea si hay comercios cerca que vendan cosas de la lista de compras."""
@@ -132,6 +171,16 @@ async def check_shopping_proximity():
     age = (now_argentina() - current_location["updated_at"]).total_seconds()
     if age > 600:
         return None
+    # Mapeo de tipos de tienda Matrics -> tipos OSM
+    store_type_map = {
+        "Super":      ["supermarket", "convenience"],
+        "Panaderia":  ["bakery"],
+        "Verduleria": ["greengrocer", "farm"],
+        "Farmacia":   ["supermarket"],  # pharmacy se busca via amenity siempre
+        "Ferreteria": ["hardware"],
+        "Dietetica":  ["health_food", "organic"],
+        "Drogueria":  ["chemist"],
+    }
     # Buscar items pendientes agrupados por store
     try:
         async with httpx.AsyncClient() as http:
@@ -158,7 +207,8 @@ async def check_shopping_proximity():
                 return None
             lat, lon = get_current_location()
             for store_type, item_names in by_store.items():
-                shops = await search_nearby_shops(lat, lon, store_type)
+                osm_types = store_type_map.get(store_type, ["supermarket"])
+                shops = await search_nearby_shops(lat, lon, shop_types=osm_types)
                 if shops:
                     return {
                         "store_type": store_type,
@@ -169,7 +219,7 @@ async def check_shopping_proximity():
         pass
     return None
 
-# ── Memoria de categorías ──────────────────────────────────────────────────────
+# ── Memoria de categorias ──────────────────────────────────────────────────────
 category_overrides: dict[str, list[str]] = {}
 
 # ── Preferencias del usuario ──────────────────────────────────────────────────
@@ -181,8 +231,8 @@ user_prefs: dict = {
     "resumen_nocturno_hour": 22,
     "resumen_nocturno_enabled": True,
     "news_topics": [],
-    "service_providers": {},   # {"electricidad": "CALF", "gas": "Camuzzi", ...}
-    "known_places": [],        # [{"name": "Casa", "lat": -38.95, "lon": -68.06, "radius": 200}, ...]
+    "service_providers": {},
+    "known_places": [],
     "_config_page_id": None,
 }
 
@@ -192,19 +242,20 @@ current_location: dict = {
     "lon": float(os.environ.get("USER_LON", "-68.06")),
     "updated_at": None,
     "velocity": 0,
-    "source": "default",   # "default" | "owntracks" | "whatsapp"
+    "source": "default",
+    "location_name": None,
 }
 
-# ── Última entrada tocada (gastos) ────────────────────────────────────────────
+# ── Ultima entrada tocada (gastos) ────────────────────────────────────────────
 last_touched: dict[str, dict] = {}
 
-# ── Último evento tocado (para ediciones contextuales) ────────────────────────
+# ── Ultimo evento tocado (para ediciones contextuales) ────────────────────────
 last_event_touched: dict[str, dict] = {}
 
 # ── Estado pendiente (follow-ups) ────────────────────────────────────────────
 pending_state: dict[str, dict] = {}
 
-# ── Deduplicación de mensajes ─────────────────────────────────────────────────
+# ── Deduplicacion de mensajes ─────────────────────────────────────────────────
 processed_message_ids: set[str] = set()
 MAX_PROCESSED_IDS = 500
 
@@ -256,7 +307,7 @@ async def get_media_base64(media_id: str) -> tuple[str, str]:
         img_r = await http.get(media_url, headers={"Authorization": f"Bearer {WA_TOKEN}"})
         return base64.b64encode(img_r.content).decode(), mime_type
 
-# ── Transcripción de audio con Groq Whisper ───────────────────────────────────
+# ── Transcripcion de audio con Groq Whisper ───────────────────────────────────
 async def transcribe_audio(media_id: str) -> str | None:
     groq_key = os.environ.get("GROQ_API_KEY")
     if not groq_key:
@@ -1356,10 +1407,10 @@ async def buscar_gastos(query: str, mes: str = None) -> str:
                 props = page.get("properties", {})
                 name = props.get("Name", {}).get("title", [{}])[0].get("plain_text", "?") if props.get("Name", {}).get("title") else "?"
                 value = props.get("Value (ars)", {}).get("number", 0) or 0
-                date = (props.get("Date", {}).get("date") or {}).get("start", "")[:10]
+                date_val = (props.get("Date", {}).get("date") or {}).get("start", "")[:10]
                 in_out = (props.get("In - Out", {}).get("select") or {}).get("name", "")
                 direction = "INGRESO" if "INGRESO" in in_out else "EGRESO"
-                lines.append(f"- {date} -- {name}: ${value:,.0f} ({direction})")
+                lines.append(f"- {date_val} -- {name}: ${value:,.0f} ({direction})")
             return "\n".join(lines)
     except Exception as e:
         return f"Error: {str(e)[:100]}"
@@ -1388,12 +1439,16 @@ async def handle_chat(phone: str, text: str) -> str:
     noc_h = user_prefs.get("resumen_nocturno_hour", 22)
     noc_en = user_prefs.get("resumen_nocturno_enabled", True)
     user_context_parts.append(f"Resumen nocturno: {'activado' if noc_en else 'desactivado'} a las {noc_h:02d}:00.")
+    # Ubicacion: siempre incluir, indicando si es real o default
     if current_location.get("source") == "owntracks":
         place = is_at_known_place()
         if place:
             user_context_parts.append(f"Ubicacion actual: {place['name']}.")
         else:
-            user_context_parts.append(f"Ubicacion actual: {current_location['lat']:.4f}, {current_location['lon']:.4f} (zona desconocida).")
+            loc_name = current_location.get("location_name") or f"{current_location['lat']:.4f}, {current_location['lon']:.4f}"
+            user_context_parts.append(f"Ubicacion actual: {loc_name}.")
+    else:
+        user_context_parts.append(f"Ubicacion aproximada: Neuquen (sin GPS activo).")
     user_context = "\n".join(user_context_parts)
 
     tools = [
@@ -2552,6 +2607,9 @@ async def process_message(message: dict):
                 current_location["updated_at"] = now_argentina()
                 current_location["source"] = "whatsapp"
                 current_location["velocity"] = 0
+                loc_name = await reverse_geocode(float(lat), float(lon))
+                if loc_name:
+                    current_location["location_name"] = loc_name
                 place = is_at_known_place()
                 if place:
                     await send_message(from_number, f"📍 Ubicacion actualizada: *{place['name']}*")
@@ -2917,10 +2975,24 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                     lines.append(f"- {start['dateTime'][11:16]} -- {e.get('summary', 'Evento')}{loc_str}")
                 else:
                     lines.append(f"- {e.get('summary', 'Evento')} (todo el dia){loc_str}")
+
+    # Facturas: cruzar Gmail con Notion antes de mostrar
     gmail_summary = await get_gmail_summary()
     if gmail_summary:
+        finances_context = await query_finances(now.strftime("%Y-%m"))
+        filtered_gmail = gmail_summary
+        if finances_context:
+            try:
+                filter_resp = claude_create(
+                    model="claude-sonnet-4-20250514", max_tokens=400,
+                    system="Sos Matrics. Recibis un resumen de mails con facturas y el registro de gastos del mes en Notion. Tu tarea: identificar cuales facturas YA FUERON PAGADAS comparando por proveedor/empresa. Los montos pueden diferir hasta un 5% (ej: factura $62.728 y pago registrado $62.000 son el mismo). Devuelve solo las facturas que NO esten pagadas, indicando monto y vencimiento. Si todas estan pagas, responde: 'Todas las facturas del mes estan registradas como pagadas.' Espanol rioplatense, conciso.",
+                    messages=[{"role": "user", "content": f"Mails con facturas:\n{gmail_summary}\n\nGastos registrados este mes:\n{finances_context}"}]
+                )
+                filtered_gmail = filter_resp.content[0].text.strip()
+            except Exception:
+                pass
         lines.append("")
-        lines.append(f"*Mails importantes:*\n{gmail_summary}")
+        lines.append(f"*Mails importantes:*\n{filtered_gmail}")
 
     extras = user_prefs.get("resumen_extras", [])
     if extras:
@@ -2937,7 +3009,10 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                 lines.append(extra_text)
         except Exception:
             pass
-    await send_message(MY_NUMBER, "\n".join(lines))
+
+    msg_text = "\n".join(lines)
+    await send_message(MY_NUMBER, msg_text)
+    add_to_history(MY_NUMBER, "assistant", msg_text)
 
 async def send_resumen_nocturno(http, access_token: str, now: datetime):
     manana = now + timedelta(days=1)
@@ -2989,6 +3064,7 @@ Se conciso, calido, natural. Maximo 5 lineas en total.""",
             msg = "Buenas noches! Manana el dia esta libre. Que descanses"
 
     await send_message(MY_NUMBER, msg)
+    add_to_history(MY_NUMBER, "assistant", msg)
 
 # ── ENDPOINT UBICACION (OwnTracks) ────────────────────────────────────────────
 _last_proximity_check: dict[str, datetime] = {}
@@ -2999,14 +3075,13 @@ async def receive_location(request: Request):
     """Recibe updates de OwnTracks (o cualquier fuente de ubicacion)."""
     try:
         body = await request.json()
-        # OwnTracks manda _type: "location"
         msg_type = body.get("_type", "location")
         if msg_type != "location":
             return {"ok": True, "ignored": msg_type}
 
         lat = body.get("lat")
         lon = body.get("lon")
-        vel = body.get("vel", 0)  # velocidad en km/h
+        vel = body.get("vel", 0)
         if lat is None or lon is None:
             return {"ok": False, "error": "missing lat/lon"}
 
@@ -3017,15 +3092,19 @@ async def receive_location(request: Request):
         current_location["updated_at"] = now
         current_location["source"] = "owntracks"
 
+        # Reverse geocode para saber nombre del lugar
+        loc_name = await reverse_geocode(float(lat), float(lon))
+        if loc_name:
+            current_location["location_name"] = loc_name
+
         # Chequear si hay oportunidad de compra cercana
-        # Solo si: no esta en lugar conocido, no esta en transito, no se chequeo hace poco
         phone = MY_NUMBER
         last_check = _last_proximity_check.get(phone)
         should_check = (
             not is_at_known_place()
             and not is_in_transit()
-            and (not last_check or (now - last_check).total_seconds() > 1800)  # max cada 30 min
-            and 9 <= now.hour <= 21  # solo en horario razonable
+            and (not last_check or (now - last_check).total_seconds() > 1800)
+            and 9 <= now.hour <= 21
         )
 
         if should_check:
@@ -3033,7 +3112,6 @@ async def receive_location(request: Request):
             proximity = await check_shopping_proximity()
             if proximity:
                 store_type = proximity["store_type"]
-                # No repetir mismo tipo de tienda en el mismo dia
                 last_store = _last_proximity_store.get(phone)
                 today = now.strftime("%Y-%m-%d")
                 store_key = f"{today}:{store_type}"
@@ -3045,7 +3123,7 @@ async def receive_location(request: Request):
                         msg_resp = claude_create(
                             model="claude-sonnet-4-20250514", max_tokens=150,
                             system="Sos Matrics. Genera un mensaje breve y natural en espanol rioplatense avisando que el usuario esta cerca de una tienda donde puede comprar cosas que necesita. No seas pesado, se casual y util. Max 3 lineas.",
-                            messages=[{"role": "user", "content": f"El usuario esta cerca de {shop['name']} ({shop['address']}, a {shop['distance_m']}m). Necesita comprar: {items_str}. Tipo de tienda: {store_type}."}]
+                            messages=[{"role": "user", "content": f"El usuario esta cerca de {shop['name']} (a {shop['distance_m']}m). Necesita comprar: {items_str}. Tipo de tienda: {store_type}."}]
                         )
                         msg = msg_resp.content[0].text.strip()
                     except Exception:
@@ -3055,6 +3133,7 @@ async def receive_location(request: Request):
         return {
             "ok": True,
             "lat": lat, "lon": lon,
+            "location_name": current_location.get("location_name"),
             "known_place": (is_at_known_place() or {}).get("name"),
             "in_transit": is_in_transit()
         }
@@ -3099,6 +3178,7 @@ async def health_check():
     return {"status": "ok", "time": now_argentina().strftime("%H:%M"), "bot": "matrics",
             "location": {"lat": current_location["lat"], "lon": current_location["lon"],
                          "source": current_location["source"],
+                         "location_name": current_location.get("location_name"),
                          "known_place": (is_at_known_place() or {}).get("name")}}
 
 # ── MODULO SHOPPING ────────────────────────────────────────────────────────────
