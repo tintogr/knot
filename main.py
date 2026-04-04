@@ -1447,8 +1447,8 @@ async def handle_chat(phone: str, text: str) -> str:
             user_context_parts.append(f"Ubicacion GPS actual (OwnTracks): {place['name']}.")
         else:
             loc_name = current_location.get("location_name")
-            lat_c = current_location["lat"]
-            lon_c = current_location["lon"]
+            lat_c = float(current_location.get("lat") or USER_LAT)
+            lon_c = float(current_location.get("lon") or USER_LON)
             if loc_name:
                 user_context_parts.append(f"Ubicacion GPS actual (OwnTracks): {loc_name} (coords: {lat_c:.4f}, {lon_c:.4f}).")
             else:
