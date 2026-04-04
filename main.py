@@ -1452,7 +1452,7 @@ async def handle_chat(phone: str, text: str) -> str:
             if loc_name:
                 user_context_parts.append(f"Ubicacion GPS actual (OwnTracks): {loc_name} (coords: {lat_c:.4f}, {lon_c:.4f}).")
             else:
-                user_context_parts.append(f"Ubicacion GPS actual (OwnTracks): coords {lat_c:.4f}, {lon_c:.4f}. IMPORTANTE: no inventes el nombre de la ciudad a partir de las coordenadas — si el usuario pregunta donde esta, dale las coordenadas o preguntale.")
+                user_context_parts.append(f"Ubicacion GPS actual (OwnTracks): coords {lat_c:.4f}, {lon_c:.4f}. IMPORTANTE: no inventes el nombre de la ciudad a partir de las coordenadas.")
     else:
         user_context_parts.append(f"Ubicacion aproximada: Neuquen (sin GPS activo).")
     user_context = "\n".join(user_context_parts)
