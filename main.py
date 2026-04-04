@@ -556,6 +556,25 @@ Emoji: elegi el mas especifico segun el contexto real."""
         if is_fuel and not data.get("litros"):
             pending_state[phone] = {"type": "litros_followup", "page_id": page_id, "name": data["name"]}
             reply += "\n\n⛽ Cuantos litros cargaste?"
+        elif data.get("value_ars", 0) > 1000:
+            pending_tasks = await get_pending_factura_tasks()
+            if pending_tasks:
+                amount = data.get("value_ars", 0)
+                matched = None
+                for task in pending_tasks:
+                    prov = task["provider"].lower()
+                    if prov and (prov in name_lower or any(w in name_lower for w in prov.split() if len(w) > 3)):
+                        task_amount = task.get("amount", 0)
+                        if not task_amount or abs(amount - task_amount) / max(task_amount, 1) <= 0.10:
+                            matched = task
+                            break
+                if matched:
+                    pending_state[phone] = {
+                        "type": "confirm_factura_paid",
+                        "task_page_id": matched["page_id"],
+                        "task_name": matched["name"],
+                    }
+                    reply += f"\n\n¿Este pago corresponde a *{matched['name']}*?"
 
     add_to_history(phone, "user", text)
     add_to_history(phone, "assistant", reply)
@@ -1431,7 +1450,7 @@ async def handle_chat(phone: str, text: str) -> str:
     if user_prefs.get("greeting_name"):
         user_context_parts.append(f"Nombre del usuario: {user_prefs['greeting_name']}.")
     resumen_h = user_prefs.get("daily_summary_hour")
-    resumen_m = user_prefs.get("daily_summary_minute") or 0
+    resumen_m = user_prefs.get("daily_summary_minute", 0)
     if resumen_h is not None:
         user_context_parts.append(f"Resumen diario configurado a las {resumen_h:02d}:{resumen_m:02d}.")
     extras = user_prefs.get("resumen_extras", [])
@@ -2061,18 +2080,6 @@ async def load_user_config(wa_number: str):
                 except Exception:
                     user_prefs["known_places"] = []
             user_prefs["_config_page_id"] = page["id"]
-
-            # Restaurar ubicacion si hay coordenadas guardadas y OwnTracks no mando nada aun
-            saved_lat = get_num("Latitude")
-            saved_lon = get_num("Longitude")
-            saved_city = get_txt("City")
-            if saved_lat is not None and saved_lon is not None:
-                if current_location.get("source") == "default":
-                    current_location["lat"] = float(saved_lat)
-                    current_location["lon"] = float(saved_lon)
-                    current_location["source"] = "restored"
-                    if saved_city:
-                        current_location["location_name"] = saved_city
     except Exception:
         pass
 
@@ -2505,6 +2512,20 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
                 await send_message(phone, "No tengo suficiente info para hacer la correccion.")
         else:
             await send_message(phone, "Quedo como estaba.")
+        return True
+
+    if state_type == "confirm_factura_paid":
+        task_page_id = state.get("task_page_id")
+        task_name = state.get("task_name", "la factura")
+        del pending_state[phone]
+        if text.strip().lower() in ["si", "dale", "ok", "yes", "correcto", "s"]:
+            ok = await mark_factura_task_paid(task_page_id)
+            if ok:
+                await send_message(phone, f"✅ *{task_name}* marcada como pagada en Tasks")
+            else:
+                await send_message(phone, "No pude actualizar la task en Notion")
+        else:
+            await send_message(phone, "Ok, la task queda pendiente")
         return True
 
     if state_type == "confirm_service_providers":
@@ -2966,6 +2987,95 @@ async def query_servicios_mes(month: str = None) -> str:
     except Exception as e:
         return f"Error: {str(e)[:80]}"
 
+# ── TAREAS DE FACTURAS ─────────────────────────────────────────────────────────
+async def get_pending_factura_tasks() -> list[dict]:
+    """Retorna tasks de facturas pendientes (Finanzas + Matrics + no Listo)."""
+    try:
+        async with httpx.AsyncClient() as http:
+            r = await http.post(
+                f"https://api.notion.com/v1/databases/{TASKS_DB_ID.replace('-','')}/query",
+                headers=notion_headers(),
+                json={
+                    "filter": {"and": [
+                        {"property": "Category", "select": {"equals": "Finanzas"}},
+                        {"property": "Status", "status": {"does_not_equal": "Listo"}},
+                        {"property": "Source", "select": {"equals": "Matrics"}}
+                    ]},
+                    "page_size": 20
+                }
+            )
+            if r.status_code != 200:
+                return []
+            tasks = []
+            for page in r.json().get("results", []):
+                props = page.get("properties", {})
+                name = props.get("Name", {}).get("title", [{}])[0].get("plain_text", "") if props.get("Name", {}).get("title") else ""
+                notes_rt = props.get("Notes", {}).get("rich_text", [])
+                notes = notes_rt[0]["plain_text"] if notes_rt else ""
+                due = (props.get("Due Date", {}).get("date") or {}).get("start", "")
+                meta = {}
+                try:
+                    meta = json.loads(notes)
+                except Exception:
+                    pass
+                tasks.append({
+                    "page_id": page["id"],
+                    "name": name,
+                    "due": due,
+                    "provider": meta.get("provider", ""),
+                    "amount": meta.get("amount", 0),
+                    "period": meta.get("period", ""),
+                })
+            return tasks
+    except Exception:
+        return []
+
+async def create_factura_task(provider: str, amount: float, due_date: str, period: str) -> tuple[bool, str]:
+    """Crea una task de factura pendiente. Evita duplicados por proveedor + periodo."""
+    existing = await get_pending_factura_tasks()
+    for t in existing:
+        prov_low = t["provider"].lower()
+        if prov_low and (prov_low in provider.lower() or provider.lower() in prov_low):
+            if not period or not t["period"] or period.lower() in t["period"].lower():
+                return False, "duplicate"
+    now = now_argentina()
+    meta = json.dumps({"provider": provider, "amount": amount, "period": period}, ensure_ascii=False)
+    props = {
+        "Name":     {"title": [{"text": {"content": f"💰 Pagar {provider} — {period}"}}]},
+        "Category": {"select": {"name": "Finanzas"}},
+        "Status":   {"status": {"name": "Sin empezar"}},
+        "Source":   {"select": {"name": "Matrics"}},
+        "Notes":    {"rich_text": [{"text": {"content": meta}}]},
+    }
+    if due_date:
+        try:
+            due_dt = datetime.strptime(due_date, "%Y-%m-%d")
+            props["Due Date"] = {"date": {"start": due_date}}
+            days_left = (due_dt.date() - now.date()).days
+            props["Priority"] = {"select": {"name": "Alta" if days_left <= 3 else "Media"}}
+        except Exception:
+            pass
+    async with httpx.AsyncClient() as http:
+        r = await http.post(
+            "https://api.notion.com/v1/pages",
+            headers=notion_headers(),
+            json={"parent": {"database_id": TASKS_DB_ID.replace("-", "")}, "properties": props}
+        )
+        return (True, r.json().get("id", "")) if r.status_code == 200 else (False, r.text[:100])
+
+async def mark_factura_task_paid(page_id: str) -> bool:
+    """Marca una task de factura como Listo."""
+    try:
+        async with httpx.AsyncClient() as http:
+            r = await http.patch(
+                f"https://api.notion.com/v1/pages/{page_id}",
+                headers=notion_headers(),
+                json={"properties": {"Status": {"status": {"name": "Listo"}}}}
+            )
+            return r.status_code == 200
+    except Exception:
+        return False
+
 async def send_daily_summary(http, access_token: str, now: datetime):
     r = await http.get(
         "https://www.googleapis.com/calendar/v3/calendars/primary/events",
@@ -3063,6 +3173,35 @@ Mostrar SOLO las facturas sin pago registrado claro. Si todas estan pagas, decil
             pass
         lines.append("")
         lines.append(f"*Facturas:*\n{filtered_gmail}")
+        # Auto-crear tasks en Notion para facturas pendientes
+        if filtered_gmail and "pagadas" not in filtered_gmail.lower():
+            try:
+                tasks_resp = claude_create(
+                    model="claude-sonnet-4-20250514", max_tokens=400,
+                    system="Extraé las facturas pendientes del texto. Responde SOLO array JSON sin markdown.",
+                    messages=[{"role": "user", "content": f"""Texto con facturas pendientes:
+{filtered_gmail}
+Extraé cada factura. Responde SOLO:
+[{{"provider": "nombre empresa", "amount": numero o null, "due_date": "YYYY-MM-DD o null", "period": "Mes YYYY"}}]"""}]
+                )
+                raw_inv = tasks_resp.content[0].text.strip().strip("`").lstrip("json").strip()
+                invoices = json.loads(raw_inv)
+                created = []
+                for inv in invoices:
+                    if not inv.get("provider"):
+                        continue
+                    ok, _ = await create_factura_task(
+                        provider=inv.get("provider", ""),
+                        amount=float(inv.get("amount") or 0),
+                        due_date=inv.get("due_date") or "",
+                        period=inv.get("period") or now.strftime("%B %Y")
+                    )
+                    if ok:
+                        created.append(inv["provider"])
+                if created:
+                    lines.append(f"_📋 Tasks creadas: {', '.join(created)}_")
+            except Exception:
+                pass
 
     extras = user_prefs.get("resumen_extras", [])
     if extras:
@@ -3139,28 +3278,6 @@ Se conciso, calido, natural. Maximo 5 lineas en total.""",
 # ── ENDPOINT UBICACION (OwnTracks) ────────────────────────────────────────────
 _last_proximity_check: dict[str, datetime] = {}
 _last_proximity_store: dict[str, str] = {}
-_last_location_save: datetime | None = None
-
-async def save_location_to_notion(lat: float, lon: float, loc_name: str = None):
-    """Persiste la ubicacion en Notion Config para sobrevivir reinicios."""
-    page_id = user_prefs.get("_config_page_id")
-    if not page_id:
-        return
-    try:
-        props = {
-            "Latitude":  {"number": lat},
-            "Longitude": {"number": lon},
-        }
-        if loc_name:
-            props["City"] = {"rich_text": [{"text": {"content": loc_name}}]}
-        async with httpx.AsyncClient(timeout=5) as http:
-            await http.patch(
-                f"https://api.notion.com/v1/pages/{page_id}",
-                headers=notion_headers(),
-                json={"properties": props}
-            )
-    except Exception:
-        pass
 
 @app.post("/location")
 async def receive_location(request: Request):
@@ -3188,12 +3305,6 @@ async def receive_location(request: Request):
         loc_name = await reverse_geocode(float(lat), float(lon))
         if loc_name:
             current_location["location_name"] = loc_name
-
-        # Persistir ubicacion en Notion (max cada 5 min)
-        global _last_location_save
-        if not _last_location_save or (now - _last_location_save).total_seconds() > 300:
-            _last_location_save = now
-            await save_location_to_notion(float(lat), float(lon), current_location.get("location_name"))
 
         # Chequear si hay oportunidad de compra cercana
         phone = MY_NUMBER
