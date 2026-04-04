@@ -2949,6 +2949,8 @@ async def process_message(message: dict):
             respuesta = await handle_shopping(shopping_text, phone=from_number)
             if respuesta is not None:
                 await send_message(from_number, respuesta)
+                add_to_history(from_number, "user", text)
+                add_to_history(from_number, "assistant", respuesta)
 
         elif tipo == "CONFIGURAR":
             respuesta = await handle_chat(from_number, text)
@@ -4348,12 +4350,14 @@ async def handle_shopping(text: str, phone: str = None) -> str:
                 )
                 if r.status_code == 200:
                     results = r.json().get("results", [])
-                    for item in results:
-                        await http.patch(
-                            f"https://api.notion.com/v1/pages/{item['id']}",
+                    import asyncio
+                    async def _patch_item(session, page_id):
+                        await session.patch(
+                            f"https://api.notion.com/v1/pages/{page_id}",
                             headers=notion_headers(),
                             json={"properties": {"Stock": {"checkbox": action == "in_stock"}}}
                         )
+                    await asyncio.gather(*[_patch_item(http, item["id"]) for item in results])
                     return f"Listo, {len(results)} items marcados como {'en stock' if action == 'in_stock' else 'faltantes'}."
         return "No entendi que producto queres actualizar."
 
