@@ -1481,15 +1481,15 @@ async def handle_chat(phone: str, text: str) -> str:
     if user_prefs.get("greeting_name"):
         user_context_parts.append(f"Nombre del usuario: {user_prefs['greeting_name']}.")
     resumen_h = user_prefs.get("daily_summary_hour")
-    resumen_m = user_prefs.get("daily_summary_minute", 0)
+    resumen_m = user_prefs.get("daily_summary_minute") or 0
     if resumen_h is not None:
-        user_context_parts.append(f"Resumen diario configurado a las {resumen_h:02d}:{resumen_m:02d}.")
+        user_context_parts.append(f"Resumen diario configurado a las {int(resumen_h):02d}:{int(resumen_m):02d}.")
     extras = user_prefs.get("resumen_extras", [])
     if extras:
         user_context_parts.append(f"Extras del resumen: {', '.join(extras)}.")
-    noc_h = user_prefs.get("resumen_nocturno_hour", 22)
+    noc_h = user_prefs.get("resumen_nocturno_hour") or 22
     noc_en = user_prefs.get("resumen_nocturno_enabled", True)
-    user_context_parts.append(f"Resumen nocturno: {'activado' if noc_en else 'desactivado'} a las {noc_h:02d}:00.")
+    user_context_parts.append(f"Resumen nocturno: {'activado' if noc_en else 'desactivado'} a las {int(noc_h):02d}:00.")
     # Ubicacion: siempre incluir, indicando si es real o default
     if current_location.get("source") == "owntracks":
         place = is_at_known_place()
@@ -3562,6 +3562,28 @@ async def check_geo_reminders(lat: float, lon: float) -> list[dict]:
 # ── ENDPOINT UBICACION (OwnTracks) ────────────────────────────────────────────
 _last_proximity_check: dict[str, datetime] = {}
 _last_proximity_store: dict[str, str] = {}
+_last_location_save: datetime | None = None
+
+async def save_location_to_notion(lat: float, lon: float, loc_name: str = None):
+    """Persiste la ubicacion en Notion Config para sobrevivir reinicios."""
+    page_id = user_prefs.get("_config_page_id")
+    if not page_id:
+        return
+    try:
+        props = {
+            "Latitude":  {"number": lat},
+            "Longitude": {"number": lon},
+        }
+        if loc_name:
+            props["City"] = {"rich_text": [{"text": {"content": loc_name}}]}
+        async with httpx.AsyncClient(timeout=5) as http:
+            await http.patch(
+                f"https://api.notion.com/v1/pages/{page_id}",
+                headers=notion_headers(),
+                json={"properties": props}
+            )
+    except Exception:
+        pass
 
 @app.post("/location")
 async def receive_location(request: Request):
@@ -3589,6 +3611,12 @@ async def receive_location(request: Request):
         loc_name = await reverse_geocode(float(lat), float(lon))
         if loc_name:
             current_location["location_name"] = loc_name
+
+        # Persistir ubicacion en Notion (max cada 5 min)
+        global _last_location_save
+        if not _last_location_save or (now - _last_location_save).total_seconds() > 300:
+            _last_location_save = now
+            await save_location_to_notion(float(lat), float(lon), current_location.get("location_name"))
 
         # Chequear geo-reminders
         if not is_in_transit() and 9 <= now.hour <= 22:
