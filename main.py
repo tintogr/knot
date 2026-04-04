@@ -4170,7 +4170,7 @@ async def parse_shopping_intent(text: str) -> dict:
         messages=[{"role": "user", "content": f"""Mensaje: {safe_text}
 
 Responde:
-{{"action": "out_of_stock"|"in_stock"|"add"|"list",
+{{"action": "out_of_stock" (necesito comprarlo, me falta) | "in_stock" (ya lo compre, ya lo tengo) | "add" (agregar a la lista) | "list" (ver la lista),
   "items": ["item1", "item2"],
   "recipe_name": "nombre de la receta o null",
   "is_recipe_request": true/false,
@@ -4331,7 +4331,10 @@ async def handle_shopping(text: str, phone: str = None) -> str:
             for item in results:
                 name = item["properties"]["Name"]["title"][0]["plain_text"] if item["properties"]["Name"]["title"] else "?"
                 cat  = (item["properties"].get("Category", {}).get("select") or {}).get("name", "")
-                lines.append(f"- {name}{f' _{cat}_' if cat else ''}")
+                notes_rt = item["properties"].get("Notes", {}).get("rich_text", [])
+                notes = notes_rt[0]["plain_text"].strip() if notes_rt else ""
+                qty_str = f" _({notes})_" if notes else ""
+                lines.append(f"- {name}{qty_str}{f' _{cat}_' if cat else ''}")
             return "\n".join(lines)
 
     if not items or (len(items) == 1 and items[0].lower() in ["todo", "all", "todos", "everything"]):
