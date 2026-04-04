@@ -1431,7 +1431,7 @@ async def handle_chat(phone: str, text: str) -> str:
     if user_prefs.get("greeting_name"):
         user_context_parts.append(f"Nombre del usuario: {user_prefs['greeting_name']}.")
     resumen_h = user_prefs.get("daily_summary_hour")
-    resumen_m = user_prefs.get("daily_summary_minute", 0)
+    resumen_m = user_prefs.get("daily_summary_minute") or 0
     if resumen_h is not None:
         user_context_parts.append(f"Resumen diario configurado a las {resumen_h:02d}:{resumen_m:02d}.")
     extras = user_prefs.get("resumen_extras", [])
