@@ -11,6 +11,12 @@ from anthropic import Anthropic
 
 app = FastAPI()
 
+@app.on_event("startup")
+async def startup_event():
+    """Carga config del usuario al arrancar para no esperar al primer mensaje."""
+    await load_user_config(MY_NUMBER)
+    await load_geo_reminders()
+
 anthropic = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 def claude_create(**kwargs):
@@ -33,7 +39,8 @@ PLANTS_DB_ID   = os.environ.get("NOTION_PLANTS_DB_ID", "39d22615-0106-43f8-9f01-
 SHOPPING_DB_ID = os.environ.get("NOTION_SHOPPING_DB_ID", "cb85fdf75d684f61bafea20b5eeb653f")
 RECIPES_DB_ID  = os.environ.get("NOTION_RECIPES_DB_ID", "8fa008a7-0720-475a-9868-7c3ba077bc50")
 MEETINGS_DB_ID = os.environ.get("NOTION_MEETINGS_DB_ID", "ed5b5023-c17c-46e5-be7d-56655f0257ee")
-TASKS_DB_ID    = os.environ.get("NOTION_TASKS_DB_ID", "90b44158-7916-4837-94de-129dde448fc4")
+TASKS_DB_ID         = os.environ.get("NOTION_TASKS_DB_ID", "90b44158-7916-4837-94de-129dde448fc4")
+GEO_REMINDERS_DB_ID = os.environ.get("NOTION_GEO_REMINDERS_DB_ID", "5fe7a531722843a5af93de1c54a14e02")
 CONFIG_DB_ID   = os.environ.get("NOTION_CONFIG_DB_ID", "2f81017d-a20c-426a-aada-88fcf0743338")
 WA_TOKEN       = os.environ["WHATSAPP_TOKEN"]
 WA_PHONE_ID    = os.environ["WHATSAPP_PHONE_ID"]
@@ -111,17 +118,25 @@ async def reverse_geocode(lat: float, lon: float) -> str | None:
         pass
     return None
 
-async def search_nearby_shops(lat: float, lon: float, radius: int = 500, shop_types: list = None) -> list[dict]:
+async def search_nearby_shops(lat: float, lon: float, radius: int = 500, shop_types: list = None, name_filter: str = None) -> list[dict]:
     """Busca comercios cercanos usando OpenStreetMap Overpass API (gratis, sin key)."""
     if shop_types is None:
         shop_types = ["supermarket", "convenience", "bakery", "hardware", "butcher", "greengrocer"]
 
-    node_queries = "\n".join(
-        f'  node["shop"="{t}"](around:{radius},{lat},{lon});'
-        for t in shop_types
-    )
-
-    query = f"""[out:json][timeout:10];
+    if name_filter:
+        # Busqueda por nombre de comercio especifico
+        query = f"""[out:json][timeout:10];
+(
+  node["name"~"{name_filter}",i](around:{radius},{lat},{lon});
+  way["name"~"{name_filter}",i](around:{radius},{lat},{lon});
+);
+out body;"""
+    else:
+        node_queries = "\n".join(
+            f'  node["shop"="{t}"](around:{radius},{lat},{lon});'
+            for t in shop_types
+        )
+        query = f"""[out:json][timeout:10];
 (
 {node_queries}
   node["amenity"="pharmacy"](around:{radius},{lat},{lon});
@@ -147,12 +162,23 @@ out body;"""
                 elat = element.get("lat", lat)
                 elon = element.get("lon", lon)
                 dist_m = round(haversine_km(lat, lon, elat, elon) * 1000)
+                # Extraer direccion si está disponible en OSM
+                street = tags.get("addr:street", "")
+                number = tags.get("addr:housenumber", "")
+                address = f"{street} {number}".strip() if street else ""
+                # Horarios de apertura
+                hours = tags.get("opening_hours", "")
+                # Link de Google Maps
+                maps_link = f"https://www.google.com/maps?q={elat},{elon}"
                 shops.append({
                     "name": name,
                     "type": shop_type,
                     "distance_m": dist_m,
                     "lat": elat,
                     "lon": elon,
+                    "address": address,
+                    "opening_hours": hours,
+                    "maps_link": maps_link,
                 })
 
             shops.sort(key=lambda x: x["distance_m"])
@@ -246,6 +272,9 @@ current_location: dict = {
     "source": "default",
     "location_name": None,
 }
+
+# ── Geo-reminders en memoria (se cargan de Notion al arrancar) ────────────────
+geo_reminders_cache: list[dict] = []
 
 # ── Ultima entrada tocada (gastos) ────────────────────────────────────────────
 last_touched: dict[str, dict] = {}
@@ -1134,7 +1163,8 @@ ELIMINAR_SHOPPING: eliminar o borrar un item de la lista de compras.
 PLANTA: adquirir o mencionar una planta.
 EDITAR_EVENTO: modificar un evento existente en el calendario.
 ELIMINAR_EVENTO: eliminar o borrar un evento del calendario.
-RECORDATORIO: "recordame en X tiempo", "avisame en X". NUNCA para cambios de horario del resumen.
+RECORDATORIO: "recordame en X tiempo", "avisame en X". NUNCA para cambios de horario del resumen. NUNCA cuando menciona un lugar fisico o comercio.
+GEO_REMINDER: recordatorios basados en ubicacion. "recordame cuando pase cerca de X", "cuando este en/cerca de X avisame que Y", "cuando vaya a La Anonima recordame Z". Cualquier recordatorio que involucre un lugar fisico, comercio, o persona con direccion.
 EVENTO: crear un evento nuevo -- turno, reunion, cumple, cita, viaje.
 SHOPPING: gestionar lista de compras o recetas.
 REUNION: notas o fotos de una reunion/llamada.
@@ -1157,6 +1187,7 @@ IMAGENES SIN TEXTO:
     if "ELIMINAR_SHOPPING" in r:  return "ELIMINAR_SHOPPING"
     if "ELIMINAR_GASTO" in r:     return "ELIMINAR_GASTO"
     if "CORREGIR_GASTO" in r:     return "CORREGIR_GASTO"
+    if "GEO_REMINDER" in r:       return "GEO_REMINDER"
     if "SHOPPING" in r:           return "SHOPPING"
     if "REUNION" in r:            return "REUNION"
     if "CONFIGURAR" in r:         return "CONFIGURAR"
@@ -1450,15 +1481,15 @@ async def handle_chat(phone: str, text: str) -> str:
     if user_prefs.get("greeting_name"):
         user_context_parts.append(f"Nombre del usuario: {user_prefs['greeting_name']}.")
     resumen_h = user_prefs.get("daily_summary_hour")
-    resumen_m = user_prefs.get("daily_summary_minute") or 0
+    resumen_m = user_prefs.get("daily_summary_minute", 0)
     if resumen_h is not None:
-        user_context_parts.append(f"Resumen diario configurado a las {int(resumen_h):02d}:{int(resumen_m):02d}.")
+        user_context_parts.append(f"Resumen diario configurado a las {resumen_h:02d}:{resumen_m:02d}.")
     extras = user_prefs.get("resumen_extras", [])
     if extras:
         user_context_parts.append(f"Extras del resumen: {', '.join(extras)}.")
-    noc_h = user_prefs.get("resumen_nocturno_hour") or 22
+    noc_h = user_prefs.get("resumen_nocturno_hour", 22)
     noc_en = user_prefs.get("resumen_nocturno_enabled", True)
-    user_context_parts.append(f"Resumen nocturno: {'activado' if noc_en else 'desactivado'} a las {int(noc_h):02d}:00.")
+    user_context_parts.append(f"Resumen nocturno: {'activado' if noc_en else 'desactivado'} a las {noc_h:02d}:00.")
     # Ubicacion: siempre incluir, indicando si es real o default
     if current_location.get("source") == "owntracks":
         place = is_at_known_place()
@@ -1583,7 +1614,7 @@ Antes de responder cualquier pregunta, pensa que fuentes son relevantes y consul
 
 RAZONAMIENTO IMPORTANTE para preguntas sobre pagos de servicios:
 1. Busca la factura en Gmail para saber el monto exacto que deberia haberse pagado
-2. Busca en Notion usando MULTIPLES terminos: el nombre de la empresa (ej: "CALF") Y el tipo de servicio (ej: "luz", "electricidad") Y variantes posibles
+2. Busca en Notion usando MULTIPLES terminos: el nombre de la empresa (ej: "CALF") Y el tipo de servicio (ej: "luz", "electricidad") Y variantes posibles. SIEMPRE busca en el mes actual Y en el mes anterior — los servicios se pagan frecuentemente el mes siguiente al de la factura.
 3. Si encontras un pago en Notion con monto parecido al de la factura, asumi que corresponde al mismo gasto aunque el nombre sea diferente
 4. Si el monto registrado difiere del de la factura, mencionalo y ofrece corregirlo
 5. Si no encontras ningun pago relacionado, deci que no aparece registrado
@@ -2080,6 +2111,18 @@ async def load_user_config(wa_number: str):
                 except Exception:
                     user_prefs["known_places"] = []
             user_prefs["_config_page_id"] = page["id"]
+
+            # Restaurar ubicacion si hay coordenadas guardadas y OwnTracks no mando nada aun
+            saved_lat = get_num("Latitude")
+            saved_lon = get_num("Longitude")
+            saved_city = get_txt("City")
+            if saved_lat is not None and saved_lon is not None:
+                if current_location.get("source") == "default":
+                    current_location["lat"] = float(saved_lat)
+                    current_location["lon"] = float(saved_lon)
+                    current_location["source"] = "restored"
+                    if saved_city:
+                        current_location["location_name"] = saved_city
     except Exception:
         pass
 
@@ -2514,6 +2557,41 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
             await send_message(phone, "Quedo como estaba.")
         return True
 
+    if state_type == "geo_reminder_awaiting_location":
+        description = state.get("description", "Recordatorio")
+        recurrent = state.get("recurrent", False)
+        # El usuario puede responder con texto (direccion) o con ubicacion de WA
+        # La ubicacion de WA se maneja en process_message antes de llegar aca
+        del pending_state[phone]
+        # Intentar geocodificar lo que escribio
+        try:
+            async with httpx.AsyncClient(timeout=5) as http:
+                r = await http.get(
+                    "https://nominatim.openstreetmap.org/search",
+                    params={"q": text, "format": "json", "limit": 1},
+                    headers={"User-Agent": "Matrics/1.0"}
+                )
+                if r.status_code == 200 and r.json():
+                    result = r.json()[0]
+                    place_lat = float(result["lat"])
+                    place_lon = float(result["lon"])
+                    place_name = result.get("display_name", text)[:60]
+                    ok, _ = await create_geo_reminder(
+                        description=description,
+                        rtype="place",
+                        lat=place_lat,
+                        lon=place_lon,
+                        recurrent=recurrent,
+                    )
+                    if ok:
+                        freq = "Cada vez que" if recurrent else "La proxima vez que"
+                        await send_message(phone, f"📍 *Geo-reminder guardado*\n_{description}_\nUbicacion: *{place_name}*\n{freq} estes cerca, te aviso.")
+                        return True
+        except Exception:
+            pass
+        await send_message(phone, "No pude encontrar esa direccion. Intentá compartir la ubicacion directamente desde WhatsApp (📎 → Ubicacion).")
+        return True
+
     if state_type == "confirm_factura_paid":
         task_page_id = state.get("task_page_id")
         task_name = state.get("task_name", "la factura")
@@ -2579,6 +2657,83 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
     except Exception:
         pass
     return {"ok": True}
+
+async def handle_geo_reminder(phone: str, text: str) -> str:
+    """Crea un geo-reminder a partir de lenguaje natural."""
+    now = now_argentina()
+    lat, lon = get_current_location()
+    response = claude_create(
+        model="claude-sonnet-4-20250514", max_tokens=300,
+        system=f"""Extrae info de un recordatorio geolocalizacion. Hoy: {now.strftime("%Y-%m-%d")}.
+Responde SOLO JSON valido sin markdown:
+{{"description": "que recordar",
+  "type": "place" o "shop",
+  "shop_name": "nombre del comercio si es tipo shop, null si no",
+  "address": "direccion si la menciona, null si no",
+  "recurrent": true si es algo que se repite cada vez que pasa, false si es una vez,
+  "needs_location": true si necesitas que el usuario comparta la ubicacion del lugar}}""",
+        messages=[{"role": "user", "content": text}]
+    )
+    raw = response.content[0].text.strip().strip("`").lstrip("json").strip()
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return "No pude interpretar el recordatorio. Intentalo de nuevo."
+
+    description = data.get("description", text)
+    rtype = data.get("type", "place")
+    shop_name = data.get("shop_name")
+    recurrent = data.get("recurrent", False)
+    needs_location = data.get("needs_location", False)
+    address = data.get("address")
+
+    # Si es tipo shop, crear directamente
+    if rtype == "shop" and shop_name:
+        ok, _ = await create_geo_reminder(
+            description=description,
+            rtype="shop",
+            shop_name=shop_name,
+            recurrent=recurrent,
+        )
+        if ok:
+            freq = "Cada vez que" if recurrent else "La proxima vez que"
+            return f"📍 *Geo-reminder guardado*\n_{description}_\n{freq} estes cerca de *{shop_name}*, te aviso."
+        return "No pude guardar el geo-reminder."
+
+    # Si tiene direccion, geocodificar
+    if address:
+        try:
+            async with httpx.AsyncClient(timeout=5) as http:
+                r = await http.get(
+                    "https://nominatim.openstreetmap.org/search",
+                    params={"q": address, "format": "json", "limit": 1},
+                    headers={"User-Agent": "Matrics/1.0"}
+                )
+                if r.status_code == 200 and r.json():
+                    result = r.json()[0]
+                    place_lat = float(result["lat"])
+                    place_lon = float(result["lon"])
+                    place_name = result.get("display_name", address)[:60]
+                    ok, _ = await create_geo_reminder(
+                        description=description,
+                        rtype="place",
+                        lat=place_lat,
+                        lon=place_lon,
+                        recurrent=recurrent,
+                    )
+                    if ok:
+                        freq = "Cada vez que" if recurrent else "La proxima vez que"
+                        return f"📍 *Geo-reminder guardado*\n_{description}_\nAsumi que el lugar es *{place_name}*.\n{freq} estes a menos de 300m, te aviso.\n\n¿Es correcto o queres ajustar la ubicacion?"
+        except Exception:
+            pass
+
+    # Si necesita ubicacion o no pudo geocodificar
+    pending_state[phone] = {
+        "type": "geo_reminder_awaiting_location",
+        "description": description,
+        "recurrent": recurrent,
+    }
+    return f"Para crear ese recordatorio necesito la ubicacion del lugar.\n¿Podés compartirla por WhatsApp (📎 → Ubicacion) o decirme la direccion exacta?"
 
 # ── Keywords para detectar carga de combustible ──────────────────────────────
 FUEL_KEYWORDS = {"nafta", "combustible", "gnc", "gasoil", "premium", "super nafta",
@@ -2647,6 +2802,25 @@ async def process_message(message: dict):
                 loc_name = await reverse_geocode(float(lat), float(lon))
                 if loc_name:
                     current_location["location_name"] = loc_name
+                # Si habia un geo_reminder esperando ubicacion, procesarlo
+                if from_number in pending_state and pending_state[from_number].get("type") == "geo_reminder_awaiting_location":
+                    state = pending_state.pop(from_number)
+                    description = state.get("description", "Recordatorio")
+                    recurrent = state.get("recurrent", False)
+                    ok, _ = await create_geo_reminder(
+                        description=description,
+                        rtype="place",
+                        lat=float(lat),
+                        lon=float(lon),
+                        recurrent=recurrent,
+                    )
+                    place_label = loc_name or f"{lat:.4f}, {lon:.4f}"
+                    if ok:
+                        freq = "Cada vez que" if recurrent else "La proxima vez que"
+                        await send_message(from_number, f"📍 *Geo-reminder guardado*\n_{description}_\nUbicacion: *{place_label}*\n{freq} estes cerca, te aviso.")
+                    else:
+                        await send_message(from_number, "No pude guardar el geo-reminder.")
+                    return
                 place = is_at_known_place()
                 if place:
                     await send_message(from_number, f"📍 Ubicacion actualizada: *{place['name']}*")
@@ -2712,6 +2886,10 @@ async def process_message(message: dict):
             reply = await handle_evento_agent(from_number, text, image_b64, image_type)
             if reply:
                 await send_message(from_number, reply)
+
+        elif tipo == "GEO_REMINDER":
+            respuesta = await handle_geo_reminder(from_number, text)
+            await send_message(from_number, respuesta)
 
         elif tipo == "RECORDATORIO":
             parsed = await parse_recordatorio(text)
@@ -3275,6 +3453,112 @@ Se conciso, calido, natural. Maximo 5 lineas en total.""",
     await send_message(MY_NUMBER, msg)
     add_to_history(MY_NUMBER, "assistant", msg)
 
+async def load_geo_reminders():
+    """Carga geo-reminders activos de Notion a memoria."""
+    global geo_reminders_cache
+    try:
+        async with httpx.AsyncClient() as http:
+            r = await http.post(
+                f"https://api.notion.com/v1/databases/{GEO_REMINDERS_DB_ID.replace('-','')}/query",
+                headers=notion_headers(),
+                json={"filter": {"property": "Active", "checkbox": {"equals": True}}, "page_size": 50}
+            )
+            if r.status_code != 200:
+                return
+            reminders = []
+            for page in r.json().get("results", []):
+                props = page.get("properties", {})
+                name = props.get("Name", {}).get("title", [{}])[0].get("plain_text", "") if props.get("Name", {}).get("title") else ""
+                rtype = (props.get("Type", {}).get("select") or {}).get("name", "place")
+                shop_name_rt = props.get("Shop Name", {}).get("rich_text", [])
+                shop_name = shop_name_rt[0]["plain_text"] if shop_name_rt else ""
+                lat = props.get("Latitude", {}).get("number")
+                lon = props.get("Longitude", {}).get("number")
+                radius = props.get("Radius", {}).get("number") or 300
+                recurrent = props.get("Recurrent", {}).get("checkbox", False)
+                reminders.append({
+                    "page_id": page["id"],
+                    "name": name,
+                    "type": rtype,
+                    "shop_name": shop_name,
+                    "lat": lat,
+                    "lon": lon,
+                    "radius": radius,
+                    "recurrent": recurrent,
+                })
+            geo_reminders_cache = reminders
+            print(f"[GeoReminders] Cargados {len(reminders)} reminders activos")
+    except Exception as e:
+        print(f"[GeoReminders] Error cargando: {e}")
+
+async def create_geo_reminder(description: str, rtype: str, lat: float = None, lon: float = None,
+                               shop_name: str = None, radius: int = 300, recurrent: bool = False) -> tuple[bool, str]:
+    """Crea un geo-reminder en Notion y lo agrega al cache en memoria."""
+    props = {
+        "Name":      {"title": [{"text": {"content": description}}]},
+        "Type":      {"select": {"name": rtype}},
+        "Active":    {"checkbox": True},
+        "Recurrent": {"checkbox": recurrent},
+        "Radius":    {"number": radius},
+    }
+    if lat is not None:
+        props["Latitude"] = {"number": lat}
+    if lon is not None:
+        props["Longitude"] = {"number": lon}
+    if shop_name:
+        props["Shop Name"] = {"rich_text": [{"text": {"content": shop_name}}]}
+    try:
+        async with httpx.AsyncClient() as http:
+            r = await http.post(
+                "https://api.notion.com/v1/pages",
+                headers=notion_headers(),
+                json={"parent": {"database_id": GEO_REMINDERS_DB_ID.replace("-", "")}, "properties": props}
+            )
+            if r.status_code == 200:
+                page_id = r.json().get("id", "")
+                geo_reminders_cache.append({
+                    "page_id": page_id, "name": description, "type": rtype,
+                    "shop_name": shop_name or "", "lat": lat, "lon": lon,
+                    "radius": radius, "recurrent": recurrent,
+                })
+                return True, page_id
+            return False, r.text[:100]
+    except Exception as e:
+        return False, str(e)[:100]
+
+async def deactivate_geo_reminder(page_id: str):
+    """Desactiva un geo-reminder (one-time) despues de dispararse."""
+    try:
+        async with httpx.AsyncClient() as http:
+            await http.patch(
+                f"https://api.notion.com/v1/pages/{page_id}",
+                headers=notion_headers(),
+                json={"properties": {"Active": {"checkbox": False}}}
+            )
+        global geo_reminders_cache
+        geo_reminders_cache = [r for r in geo_reminders_cache if r["page_id"] != page_id]
+    except Exception:
+        pass
+
+async def check_geo_reminders(lat: float, lon: float) -> list[dict]:
+    """Devuelve geo-reminders que se dispararon por la ubicacion actual."""
+    triggered = []
+    now = now_argentina()
+    for reminder in geo_reminders_cache:
+        if reminder["type"] == "place":
+            if reminder.get("lat") and reminder.get("lon"):
+                dist_m = haversine_km(lat, lon, reminder["lat"], reminder["lon"]) * 1000
+                if dist_m <= reminder.get("radius", 300):
+                    triggered.append(reminder)
+        elif reminder["type"] == "shop":
+            shop_name = reminder.get("shop_name", "")
+            if shop_name:
+                shops = await search_nearby_shops(lat, lon, radius=500, name_filter=shop_name)
+                if shops:
+                    reminder["_matched_shop"] = shops[0]
+                    triggered.append(reminder)
+    return triggered
+
 # ── ENDPOINT UBICACION (OwnTracks) ────────────────────────────────────────────
 _last_proximity_check: dict[str, datetime] = {}
 _last_proximity_store: dict[str, str] = {}
@@ -3306,6 +3590,25 @@ async def receive_location(request: Request):
         if loc_name:
             current_location["location_name"] = loc_name
 
+        # Chequear geo-reminders
+        if not is_in_transit() and 9 <= now.hour <= 22:
+            triggered = await check_geo_reminders(float(lat), float(lon))
+            for reminder in triggered:
+                shop = reminder.get("_matched_shop")
+                if shop:
+                    shop_info = f"*{shop['name']}* a {shop['distance_m']}m"
+                    if shop.get("address"):
+                        shop_info += f"\n📍 {shop['address']}"
+                    if shop.get("opening_hours"):
+                        shop_info += f"\n🕐 {shop['opening_hours']}"
+                    shop_info += f"\n🗺️ {shop['maps_link']}"
+                    msg = f"📍 Recordatorio de ubicación\n{reminder['name']}\n\n{shop_info}"
+                else:
+                    msg = f"📍 Recordatorio de ubicación\n{reminder['name']}"
+                await send_message(MY_NUMBER, msg)
+                if not reminder.get("recurrent"):
+                    await deactivate_geo_reminder(reminder["page_id"])
+
         # Chequear si hay oportunidad de compra cercana
         phone = MY_NUMBER
         last_check = _last_proximity_check.get(phone)
@@ -3328,16 +3631,22 @@ async def receive_location(request: Request):
                     _last_proximity_store[phone] = store_key
                     items_str = ", ".join(proximity["items"][:5])
                     shop = proximity["shops"][0]
+                    shop_detail = f"*{shop['name']}* a {shop['distance_m']}m"
+                    if shop.get("address"):
+                        shop_detail += f"\n📍 {shop['address']}"
+                    if shop.get("opening_hours"):
+                        shop_detail += f"\n🕐 {shop['opening_hours']}"
+                    shop_detail += f"\n🗺️ {shop['maps_link']}"
                     try:
                         msg_resp = claude_create(
                             model="claude-sonnet-4-20250514", max_tokens=150,
-                            system="Sos Matrics. Genera un mensaje breve y natural en espanol rioplatense avisando que el usuario esta cerca de una tienda donde puede comprar cosas que necesita. No seas pesado, se casual y util. Max 3 lineas.",
-                            messages=[{"role": "user", "content": f"El usuario esta cerca de {shop['name']} (a {shop['distance_m']}m). Necesita comprar: {items_str}. Tipo de tienda: {store_type}."}]
+                            system="Sos Matrics. Genera un mensaje breve y natural en espanol rioplatense avisando que el usuario esta cerca de una tienda donde puede comprar cosas que necesita. No seas pesado, se casual y util. Max 2 lineas de texto, sin repetir la info del comercio que ya se muestra aparte.",
+                            messages=[{"role": "user", "content": f"El usuario esta cerca de {shop['name']} (a {shop['distance_m']}m). Necesita comprar: {items_str}."}]
                         )
-                        msg = msg_resp.content[0].text.strip()
+                        msg_text = msg_resp.content[0].text.strip()
                     except Exception:
-                        msg = f"Estas cerca de {shop['name']} y te faltan: {items_str}"
-                    await send_message(phone, msg)
+                        msg_text = f"Estas cerca y te faltan: {items_str}"
+                    await send_message(phone, f"{msg_text}\n\n{shop_detail}")
 
         return {
             "ok": True,
