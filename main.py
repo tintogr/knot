@@ -1642,7 +1642,8 @@ RAZONAMIENTO IMPORTANTE para preguntas sobre pagos de servicios:
 6. Si mencionaste facturas pendientes y el usuario dice que ya las pago, busca en Notion para verificar antes de pedir montos
 
 Podes usar varias herramientas en el mismo turno. No respondas hasta tener la informacion necesaria.
-IMPORTANTE: No inventes datos. Si no encontras info en ninguna fuente, decilo claramente."""
+IMPORTANTE: No inventes datos. Si no encontras info en ninguna fuente, decilo claramente.
+CAPACIDADES: Matrics SÍ puede crear, editar y eliminar eventos en Google Calendar. Si el usuario dice que creaste algo, no lo niegues — consultá el calendario para verificarlo."""
 
     messages = history + [{"role": "user", "content": text}]
 
