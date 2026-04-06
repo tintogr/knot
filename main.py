@@ -1997,7 +1997,8 @@ EVENTOS RECURRENTES:
 - Ejemplo: si pide "todos los lunes a las 17:20", date debe ser el PROXIMO lunes, y recurrence "RRULE:FREQ=WEEKLY;BYDAY=MO".
 - Si dice "durante este mes", agrega COUNT con las semanas restantes del mes.
 - Si no especifica fin, no pongas COUNT ni UNTIL (sera indefinido).
-- NUNCA pongas una fecha que caiga en un dia diferente al BYDAY del RRULE."""
+- NUNCA pongas una fecha que caiga en un dia diferente al BYDAY del RRULE.
+- IMPORTANTE: usa siempre null en JSON (no None). Los campos opcionales van con null, nunca con la palabra None."""
 
     content = []
     if image_b64:
