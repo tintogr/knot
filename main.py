@@ -1656,7 +1656,7 @@ async def handle_chat(phone: str, text: str) -> str:
                     "entry_type": {"type": "string", "enum": ["Proyecto", "Idea", "Reunion"], "description": "Tipo de entrada"},
                     "area": {"type": "string", "enum": ["Laboral", "Hobby", "Personal"], "description": "Area a la que pertenece"},
                     "description": {"type": ["string", "null"], "description": "Descripcion detallada si la hay"},
-                    "priority": {"type": ["string", "null"], "enum": ["Alta", "Media", "Baja", null], "description": "Prioridad"},
+                    "priority": {"type": ["string", "null"], "enum": ["Alta", "Media", "Baja", None], "description": "Prioridad"},
                     "emoji": {"type": "string", "description": "Emoji representativo"}
                 },
                 "required": ["name", "entry_type", "area", "emoji"]
@@ -2194,22 +2194,31 @@ EVENTOS RECURRENTES:
     if evento_creado and evento_creado["data"].get("time"):
         data = evento_creado["data"]
         event_dt = f"{data['date']}T{data['time']}"
-        pending_state[phone] = {
-            "type": "event_reminder",
-            "event_id": evento_creado["event_id"],
-            "summary": data.get("summary", "Evento"),
-            "event_datetime": event_dt
-        }
+        is_recurring = bool(data.get("recurrence"))
         await send_message(phone, reply)
-        await send_interactive_buttons(
-            phone,
-            "Queres que te avise antes?",
-            [
-                {"id": "rem_15", "title": "15 min antes"},
-                {"id": "rem_60", "title": "1 hora antes"},
-                {"id": "rem_no", "title": "No gracias"},
-            ]
-        )
+        if is_recurring:
+            pending_state[phone] = {
+                "type": "recurring_event_reminder",
+                "event_id": evento_creado["event_id"],
+                "summary": data.get("summary", "Evento"),
+            }
+            await send_message(phone, "Queres que te avise antes de cada " + data.get("summary", "sesion") + "? Decime con cuanta anticipacion (ej: '30 min', '1 hora', 'la noche anterior'). Podes elegir hasta 2 recordatorios.\n\nSi no queres recordatorio, manda 'no'.")
+        else:
+            pending_state[phone] = {
+                "type": "event_reminder",
+                "event_id": evento_creado["event_id"],
+                "summary": data.get("summary", "Evento"),
+                "event_datetime": event_dt
+            }
+            await send_interactive_buttons(
+                phone,
+                "Queres que te avise antes?",
+                [
+                    {"id": "rem_15", "title": "15 min antes"},
+                    {"id": "rem_60", "title": "1 hora antes"},
+                    {"id": "rem_no", "title": "No gracias"},
+                ]
+            )
         add_to_history(phone, "user", text)
         add_to_history(phone, "assistant", reply)
         return None
@@ -2556,6 +2565,56 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
                 await send_message(phone, "Error creando el recordatorio")
         return True
 
+if state_type == "recurring_event_reminder":
+        event_id = state.get("event_id")
+        summary = state.get("summary", "Evento")
+        del pending_state[phone]
+        if text.strip().lower() in ["no", "no gracias", "nah", "paso"]:
+            await send_message(phone, "Dale, sin recordatorio.")
+            return True
+        try:
+            resp = claude_create(
+                model="claude-sonnet-4-20250514", max_tokens=100,
+                system="Extrae los recordatorios que pide el usuario. Convierte a minutos. Max 2. Responde SOLO JSON sin markdown: {\"minutes\": [30, 60]} o {\"minutes\": [15]}. Si dice 'la noche anterior' usa 720 (12hs). Si dice '1 dia antes' usa 1440. Si dice '2 horas' usa 120.",
+                messages=[{"role": "user", "content": text}]
+            )
+            raw = resp.content[0].text.strip()
+            if raw.startswith("```"):
+                raw = raw.strip("`").lstrip("json").strip()
+            parsed = json.loads(raw)
+            minutes_list = parsed.get("minutes", [])[:2]
+        except Exception:
+            minutes_list = [60]
+        if not minutes_list:
+            await send_message(phone, "No entendi la anticipacion. Te pongo 1 hora antes por defecto.")
+            minutes_list = [60]
+        access_token = await get_gcal_access_token()
+        if access_token and event_id:
+            try:
+                async with httpx.AsyncClient() as http:
+                    r = await http.patch(
+                        f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}",
+                        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+                        json={"reminders": {"useDefault": False, "overrides": [{"method": "popup", "minutes": m} for m in minutes_list]}}
+                    )
+                    if r.status_code == 200:
+                        labels = []
+                        for m in minutes_list:
+                            if m >= 1440:
+                                labels.append(str(m // 1440) + " dia" + ("s" if m >= 2880 else "") + " antes")
+                            elif m >= 60:
+                                labels.append(str(m // 60) + " hora" + ("s" if m >= 120 else "") + " antes")
+                            else:
+                                labels.append(str(m) + " min antes")
+                        rems_str = " y ".join(labels)
+                        await send_message(phone, "Listo! Te aviso " + rems_str + " de cada " + summary + ".")
+                    else:
+                        await send_message(phone, "No pude configurar el recordatorio en Calendar.")
+            except Exception:
+                await send_message(phone, "Error configurando el recordatorio.")
+        else:
+            await send_message(phone, "No pude acceder a Calendar para el recordatorio.")
+        return True
     if state_type == "recipe_ingredients":
         recipe_name = state.get("recipe_name", "Receta")
         ingredients = state.get("ingredients", [])
