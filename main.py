@@ -55,6 +55,15 @@ USER_LON = float(os.environ.get("USER_LON", "-68.06"))
 def now_argentina() -> datetime:
     return datetime.now(timezone.utc) - timedelta(hours=3)
 
+DIAS_SEMANA = ["lunes", "martes", "miercoles", "jueves", "viernes", "sabado", "domingo"]
+
+def hoy_str(now: datetime = None) -> str:
+    """Retorna 'lunes 06/04/2026 16:14' en español."""
+    if not now:
+        now = now_argentina()
+    dia = DIAS_SEMANA[now.weekday()]
+    return f"{dia} {now.strftime('%d/%m/%Y')} {now.strftime('%H:%M')}"
+
 # ── Normalizacion de In-Out ───────────────────────────────────────────────────
 INGRESO_EXACT = "\u2192INGRESO\u2190"
 EGRESO_EXACT  = "\u2190 EGRESO \u2192"
@@ -1665,7 +1674,7 @@ async def handle_chat(phone: str, text: str) -> str:
     ]
 
     system = f"""Sos Matrics, asistente personal en WhatsApp. Respondes conciso y natural en espanol rioplatense.
-Hoy: {now.strftime("%d/%m/%Y")} {now.strftime("%H:%M")}.
+Hoy: {hoy_str(now)}.
 {user_context}
 Si el usuario pregunta algo que ya sabes por su configuracion, responde directamente sin usar herramientas.
 
@@ -1978,7 +1987,7 @@ async def handle_evento_agent(phone: str, text: str, image_b64=None, image_type=
     ]
 
     system = f"""Sos Matrics, asistente personal en WhatsApp. Hablas en espanol rioplatense, natural y conciso.
-Hoy: {now.strftime("%d/%m/%Y")} {now.strftime("%H:%M")}.{last_ev_ctx}
+Hoy: {hoy_str(now)}.{last_ev_ctx}
 
 Tu tarea: gestionar eventos del calendario del usuario.
 - Si el mensaje tiene titulo Y fecha claros -> usa crear_evento.
