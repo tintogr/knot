@@ -1548,7 +1548,6 @@ async def handle_chat(phone: str, text: str) -> str:
     noc_h = user_prefs.get("resumen_nocturno_hour") or 22
     noc_en = user_prefs.get("resumen_nocturno_enabled", True)
     user_context_parts.append(f"Resumen nocturno: {'activado' if noc_en else 'desactivado'} a las {int(noc_h):02d}:00.")
-    # Ubicacion: siempre incluir, indicando si es real o default
     if current_location.get("source") == "owntracks":
         place = is_at_known_place()
         if place:
@@ -1729,165 +1728,169 @@ Si algo no esta en tus tools directas pero es una capacidad de Matrics, decile q
         add_to_history(phone, "assistant", reply)
         return reply
 
+    # ── Helper para ejecutar tools de chat ────────────────────────────────
+    async def _execute_chat_tool(t_name, t_input):
+        t_result = ""
+        if t_name == "consultar_calendario":
+            dias_adelante = t_input.get("dias_adelante", 2)
+            dias_atras = t_input.get("dias_atras", 0)
+            t_result = await query_calendar(days_ahead=dias_adelante, days_back=dias_atras) or "No hay eventos en ese periodo."
+        elif t_name == "consultar_finanzas":
+            mes = t_input.get("mes") or now.strftime("%Y-%m")
+            t_result = await query_finances(mes) or "No hay registros para " + mes + "."
+        elif t_name == "corregir_gasto":
+            search_term = t_input.get("search_term", "")
+            new_value = t_input.get("new_value_ars")
+            mes = t_input.get("mes") or now.strftime("%Y-%m")
+            year_c, mon_c = map(int, mes.split("-"))
+            from calendar import monthrange as mr
+            last_day = mr(year_c, mon_c)[1]
+            try:
+                async with httpx.AsyncClient() as http:
+                    r = await http.post(
+                        f"https://api.notion.com/v1/databases/{NOTION_DB_ID.replace('-','')}/query",
+                        headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
+                        json={
+                            "filter": {"and": [
+                                {"property": "Date", "date": {"on_or_after": mes + "-01"}},
+                                {"property": "Date", "date": {"on_or_before": f"{mes}-{last_day:02d}"}},
+                                {"property": "Name", "title": {"contains": search_term[:30]}}
+                            ]},
+                            "sorts": [{"property": "Date", "direction": "descending"}],
+                            "page_size": 1
+                        }
+                    )
+                    if r.status_code == 200 and r.json().get("results"):
+                        page = r.json()["results"][0]
+                        page_id = page["id"]
+                        old_name = page["properties"]["Name"]["title"][0]["plain_text"] if page["properties"]["Name"]["title"] else search_term
+                        old_value = page["properties"].get("Value (ars)", {}).get("number", 0) or 0
+                        upd = await http.patch(
+                            f"https://api.notion.com/v1/pages/{page_id}",
+                            headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
+                            json={"properties": {"Value (ars)": {"number": float(new_value)}}}
+                        )
+                        if upd.status_code == 200:
+                            t_result = "Correccion exitosa: '" + old_name + "' actualizado de $" + f"{old_value:,.0f}" + " a $" + f"{new_value:,.0f}" + " ARS."
+                        else:
+                            t_result = "Error actualizando en Notion: " + upd.text[:100]
+                    else:
+                        t_result = "No encontre ningun gasto llamado '" + search_term + "' en " + mes + "."
+            except Exception as e:
+                t_result = "Error: " + str(e)[:100]
+        elif t_name == "buscar_gastos":
+            query = t_input.get("query", "")
+            mes = t_input.get("mes") or now.strftime("%Y-%m")
+            t_result = await buscar_gastos(query, mes)
+        elif t_name == "consultar_clima":
+            w = await get_weather()
+            if w:
+                incluir_manana = t_input.get("incluir_manana", False)
+                t_result = format_weather_chat(w, include_tomorrow=incluir_manana)
+            else:
+                t_result = "No pude obtener el clima en este momento."
+        elif t_name == "consultar_gmail":
+            if not user_prefs.get("service_providers"):
+                inferred = await infer_service_providers()
+                if inferred:
+                    resumen = "\n".join("- " + k.capitalize() + ": *" + v + "*" for k, v in inferred.items())
+                    pending_state[phone] = {
+                        "type": "confirm_service_providers",
+                        "proposed": inferred
+                    }
+                    await send_message(phone, "Encontre tus proveedores de servicios en tus mails:\n\n" + resumen + "\n\nEs correcto?")
+                    await send_interactive_buttons(
+                        phone,
+                        "Confirmo estos proveedores?",
+                        [
+                            {"id": "providers_ok", "title": "Si, correcto"},
+                            {"id": "providers_no", "title": "Quiero corregir"},
+                        ]
+                    )
+                    t_result = "Inferi los proveedores y le pregunte al usuario para confirmar. No hay resultado de mail todavia."
+                else:
+                    t_result = "No encontre mails suficientes para identificar proveedores de servicios."
+            else:
+                gmail_data = await get_gmail_summary()
+                t_result = gmail_data or "No encontre mails relevantes."
+        elif t_name == "web_search":
+            t_result = "Busqueda web ejecutada."
+        elif t_name == "configurar_matrics":
+            changed = []
+            if t_input.get("greeting_name"):
+                user_prefs["greeting_name"] = t_input["greeting_name"]
+                changed.append("Saludo -> " + t_input["greeting_name"])
+            if t_input.get("add_extra"):
+                ex = user_prefs.get("resumen_extras", [])
+                ex.append(t_input["add_extra"])
+                user_prefs["resumen_extras"] = ex
+                changed.append("Extra agregado: " + t_input["add_extra"])
+            if t_input.get("remove_extra"):
+                ex = user_prefs.get("resumen_extras", [])
+                user_prefs["resumen_extras"] = [e for e in ex if t_input["remove_extra"].lower() not in e.lower()]
+                changed.append("Extra removido: " + t_input["remove_extra"])
+            if t_input.get("hour") is not None:
+                h = int(t_input["hour"])
+                m = int(t_input.get("minute", 0) or 0)
+                if 0 <= h <= 23:
+                    user_prefs["daily_summary_hour"] = h
+                    user_prefs["daily_summary_minute"] = m
+                    changed.append(f"Horario resumen -> {h:02d}:{m:02d}")
+            if t_input.get("nocturno_enabled") is not None:
+                user_prefs["resumen_nocturno_enabled"] = t_input["nocturno_enabled"]
+                estado = "activado" if t_input["nocturno_enabled"] else "desactivado"
+                changed.append("Resumen nocturno -> " + estado)
+            if t_input.get("nocturno_hour") is not None:
+                user_prefs["resumen_nocturno_hour"] = int(t_input["nocturno_hour"])
+                changed.append(f"Hora nocturno -> {int(t_input['nocturno_hour']):02d}:00")
+            if changed:
+                await save_user_config(MY_NUMBER)
+                t_result = "Configuracion actualizada: " + ", ".join(changed)
+            else:
+                t_result = "No se especifico que cambiar."
+        elif t_name == "crear_proyecto":
+            proj_name = t_input.get("name", "Proyecto")
+            entry_type = t_input.get("entry_type", "Proyecto")
+            area = t_input.get("area", "Personal")
+            description = t_input.get("description", "")
+            priority = t_input.get("priority")
+            emoji = t_input.get("emoji", "📋")
+            proj_props = {
+                "Name": {"title": [{"text": {"content": proj_name}}]},
+                "Entry Type": {"select": {"name": entry_type}},
+                "Area": {"select": {"name": area}},
+                "Status": {"status": {"name": "Sin empezar"}},
+                "Source": {"select": {"name": "Matrics"}},
+                "Date": {"date": {"start": now.strftime("%Y-%m-%d")}},
+            }
+            if description:
+                proj_props["Description"] = {"rich_text": [{"text": {"content": description[:2000]}}]}
+            if priority in ["Alta", "Media", "Baja"]:
+                proj_props["Priority"] = {"select": {"name": priority}}
+            try:
+                async with httpx.AsyncClient() as http_proj:
+                    r_proj = await http_proj.post(
+                        "https://api.notion.com/v1/pages",
+                        headers=notion_headers(),
+                        json={"parent": {"database_id": PROJECTS_DB_ID.replace("-", "")}, "icon": {"type": "emoji", "emoji": emoji}, "properties": proj_props}
+                    )
+                    if r_proj.status_code == 200:
+                        t_result = "Proyecto creado: " + emoji + " " + proj_name + " (" + entry_type + ", " + area + "). Guardado en Notion."
+                    else:
+                        t_result = "Error creando proyecto: " + r_proj.text[:100]
+            except Exception as e_proj:
+                t_result = "Error: " + str(e_proj)[:100]
+        return t_result
+
+    # ── Primera ronda de tools ────────────────────────────────────────────
     tool_results = []
     for block in response.content:
         if block.type != "tool_use":
             continue
-        tool_name = block.name
-        tool_input = block.input
-        result = ""
         try:
-            if tool_name == "consultar_calendario":
-                dias_adelante = tool_input.get("dias_adelante", 2)
-                dias_atras = tool_input.get("dias_atras", 0)
-                result = await query_calendar(days_ahead=dias_adelante, days_back=dias_atras) or "No hay eventos en ese periodo."
-            elif tool_name == "consultar_finanzas":
-                mes = tool_input.get("mes") or now.strftime("%Y-%m")
-                result = await query_finances(mes) or f"No hay registros para {mes}."
-            elif tool_name == "corregir_gasto":
-                search_term = tool_input.get("search_term", "")
-                new_value = tool_input.get("new_value_ars")
-                mes = tool_input.get("mes") or now.strftime("%Y-%m")
-                year, mon = map(int, mes.split("-"))
-                from calendar import monthrange as mr
-                last_day = mr(year, mon)[1]
-                try:
-                    async with httpx.AsyncClient() as http:
-                        r = await http.post(
-                            f"https://api.notion.com/v1/databases/{NOTION_DB_ID.replace('-','')}/query",
-                            headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
-                            json={
-                                "filter": {"and": [
-                                    {"property": "Date", "date": {"on_or_after": f"{mes}-01"}},
-                                    {"property": "Date", "date": {"on_or_before": f"{mes}-{last_day:02d}"}},
-                                    {"property": "Name", "title": {"contains": search_term[:30]}}
-                                ]},
-                                "sorts": [{"property": "Date", "direction": "descending"}],
-                                "page_size": 1
-                            }
-                        )
-                        if r.status_code == 200 and r.json().get("results"):
-                            page = r.json()["results"][0]
-                            page_id = page["id"]
-                            old_name = page["properties"]["Name"]["title"][0]["plain_text"] if page["properties"]["Name"]["title"] else search_term
-                            old_value = page["properties"].get("Value (ars)", {}).get("number", 0) or 0
-                            upd = await http.patch(
-                                f"https://api.notion.com/v1/pages/{page_id}",
-                                headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
-                                json={"properties": {"Value (ars)": {"number": float(new_value)}}}
-                            )
-                            if upd.status_code == 200:
-                                result = f"Correccion exitosa: '{old_name}' actualizado de ${old_value:,.0f} a ${new_value:,.0f} ARS."
-                            else:
-                                result = f"Error actualizando en Notion: {upd.text[:100]}"
-                        else:
-                            result = f"No encontre ningun gasto llamado '{search_term}' en {mes}."
-                except Exception as e:
-                    result = f"Error: {str(e)[:100]}"
-            elif tool_name == "buscar_gastos":
-                query = tool_input.get("query", "")
-                mes = tool_input.get("mes") or now.strftime("%Y-%m")
-                result = await buscar_gastos(query, mes)
-            elif tool_name == "consultar_clima":
-                w = await get_weather()
-                if w:
-                    incluir_manana = tool_input.get("incluir_manana", False)
-                    result = format_weather_chat(w, include_tomorrow=incluir_manana)
-                else:
-                    result = "No pude obtener el clima en este momento."
-            elif tool_name == "consultar_gmail":
-                if not user_prefs.get("service_providers"):
-                    inferred = await infer_service_providers()
-                    if inferred:
-                        resumen = "\n".join(f"- {k.capitalize()}: *{v}*" for k, v in inferred.items())
-                        pending_state[phone] = {
-                            "type": "confirm_service_providers",
-                            "proposed": inferred
-                        }
-                        await send_message(phone, f"Encontre tus proveedores de servicios en tus mails:\n\n{resumen}\n\nEs correcto?")
-                        await send_interactive_buttons(
-                            phone,
-                            "Confirmo estos proveedores?",
-                            [
-                                {"id": "providers_ok", "title": "Si, correcto"},
-                                {"id": "providers_no", "title": "Quiero corregir"},
-                            ]
-                        )
-                        result = "Inferi los proveedores y le pregunte al usuario para confirmar. No hay resultado de mail todavia."
-                    else:
-                        result = "No encontre mails suficientes para identificar proveedores de servicios."
-                else:
-                    gmail_data = await get_gmail_summary()
-                    result = gmail_data or "No encontre mails relevantes."
-            elif tool_name == "web_search":
-                result = "Busqueda web ejecutada."
-            elif tool_name == "configurar_matrics":
-                changed = []
-                if tool_input.get("greeting_name"):
-                    user_prefs["greeting_name"] = tool_input["greeting_name"]
-                    changed.append(f"Saludo -> {tool_input['greeting_name']}")
-                if tool_input.get("add_extra"):
-                    ex = user_prefs.get("resumen_extras", [])
-                    ex.append(tool_input["add_extra"])
-                    user_prefs["resumen_extras"] = ex
-                    changed.append(f"Extra agregado: {tool_input['add_extra']}")
-                if tool_input.get("remove_extra"):
-                    ex = user_prefs.get("resumen_extras", [])
-                    user_prefs["resumen_extras"] = [e for e in ex if tool_input["remove_extra"].lower() not in e.lower()]
-                    changed.append(f"Extra removido: {tool_input['remove_extra']}")
-                if tool_input.get("hour") is not None:
-                    h = int(tool_input["hour"])
-                    m = int(tool_input.get("minute", 0) or 0)
-                    if 0 <= h <= 23:
-                        user_prefs["daily_summary_hour"] = h
-                        user_prefs["daily_summary_minute"] = m
-                        changed.append(f"Horario resumen -> {h:02d}:{m:02d}")
-                if tool_input.get("nocturno_enabled") is not None:
-                    user_prefs["resumen_nocturno_enabled"] = tool_input["nocturno_enabled"]
-                    changed.append(f"Resumen nocturno -> {'activado' if tool_input['nocturno_enabled'] else 'desactivado'}")
-                if tool_input.get("nocturno_hour") is not None:
-                    user_prefs["resumen_nocturno_hour"] = int(tool_input["nocturno_hour"])
-                    changed.append(f"Hora nocturno -> {int(tool_input['nocturno_hour']):02d}:00")
-                if changed:
-                    await save_user_config(MY_NUMBER)
-                    result = "Configuracion actualizada: " + ", ".join(changed)
-                else:
-                    result = "No se especifico que cambiar."
-            elif tool_name == "crear_proyecto":
-                proj_name = tool_input.get("name", "Proyecto")
-                entry_type = tool_input.get("entry_type", "Proyecto")
-                area = tool_input.get("area", "Personal")
-                description = tool_input.get("description", "")
-                priority = tool_input.get("priority")
-                emoji = tool_input.get("emoji", "📋")
-                proj_props = {
-                    "Name": {"title": [{"text": {"content": proj_name}}]},
-                    "Entry Type": {"select": {"name": entry_type}},
-                    "Area": {"select": {"name": area}},
-                    "Status": {"status": {"name": "Sin empezar"}},
-                    "Source": {"select": {"name": "Matrics"}},
-                    "Date": {"date": {"start": now.strftime("%Y-%m-%d")}},
-                }
-                if description:
-                    proj_props["Description"] = {"rich_text": [{"text": {"content": description[:2000]}}]}
-                if priority in ["Alta", "Media", "Baja"]:
-                    proj_props["Priority"] = {"select": {"name": priority}}
-                try:
-                    async with httpx.AsyncClient() as http_proj:
-                        r_proj = await http_proj.post(
-                            "https://api.notion.com/v1/pages",
-                            headers=notion_headers(),
-                            json={"parent": {"database_id": PROJECTS_DB_ID.replace("-", "")}, "icon": {"type": "emoji", "emoji": emoji}, "properties": proj_props}
-                        )
-                        if r_proj.status_code == 200:
-                            result = f"Proyecto creado: {emoji} {proj_name} ({entry_type}, {area}). Guardado en Notion."
-                        else:
-                            result = f"Error creando proyecto: {r_proj.text[:100]}"
-                except Exception as e_proj:
-                    result = f"Error: {str(e_proj)[:100]}"
+            result = await _execute_chat_tool(block.name, block.input)
         except Exception as e:
-            result = f"Error ejecutando {tool_name}: {str(e)[:100]}"
-
+            result = "Error ejecutando " + block.name + ": " + str(e)[:100]
         tool_results.append({
             "type": "tool_result",
             "tool_use_id": block.id,
@@ -1904,20 +1907,46 @@ Si algo no esta en tus tools directas pero es una capacidad de Matrics, decile q
         {"role": "user", "content": tool_results}
     ]
 
-    try:
-        final_response = claude_create(
-            model="claude-sonnet-4-20250514", max_tokens=800,
-            system=system,
-            messages=messages,
-            tools=tools
-        )
-        reply = next((b.text for b in final_response.content if hasattr(b, "text") and b.text), "").strip()
-    except Exception:
-        reply = next((b.text for b in response.content if hasattr(b, "text") and b.text), "Error procesando").strip()
+    # ── Loop para rondas adicionales de tools (max 4 rondas extra) ────────
+    reply = ""
+    for _round in range(4):
+        try:
+            next_response = claude_create(
+                model="claude-sonnet-4-20250514", max_tokens=800,
+                system=system,
+                messages=messages,
+                tools=tools
+            )
+        except Exception:
+            reply = "Error procesando tu mensaje."
+            break
+
+        round_text = next((b.text for b in next_response.content if hasattr(b, "text") and b.text), "").strip()
+        if round_text:
+            reply = round_text
+
+        round_tools = [b for b in next_response.content if b.type == "tool_use"]
+        if not round_tools:
+            break
+
+        round_results = []
+        for block in round_tools:
+            try:
+                result = await _execute_chat_tool(block.name, block.input)
+            except Exception as e:
+                result = "Error: " + str(e)[:100]
+            round_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
+
+        messages = messages + [
+            {"role": "assistant", "content": next_response.content},
+            {"role": "user", "content": round_results}
+        ]
+
+    if not reply:
+        reply = "No pude completar la consulta. Intenta de nuevo."
 
     add_to_history(phone, "assistant", reply)
     return reply
-
 # ── HANDLER EVENTOS (tool calling) ────────────────────────────────────────────
 async def handle_evento_agent(phone: str, text: str, image_b64=None, image_type=None) -> str | None:
     now = now_argentina()
