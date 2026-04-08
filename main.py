@@ -58,11 +58,26 @@ def now_argentina() -> datetime:
 DIAS_SEMANA = ["lunes", "martes", "miercoles", "jueves", "viernes", "sabado", "domingo"]
 
 def hoy_str(now: datetime = None) -> str:
-    """Retorna 'lunes 06/04/2026 16:14' en español."""
+    """Retorna 'martes 07/04/2026 08:33' en espanol."""
     if not now:
         now = now_argentina()
     dia = DIAS_SEMANA[now.weekday()]
     return f"{dia} {now.strftime('%d/%m/%Y')} {now.strftime('%H:%M')}"
+
+def semana_str(now: datetime = None) -> str:
+    """Retorna tabla de los proximos 7 dias para que Claude no calcule."""
+    if not now:
+        now = now_argentina()
+    lines = []
+    for i in range(8):
+        d = now + timedelta(days=i)
+        label = "HOY" if i == 0 else "MANANA" if i == 1 else ""
+        dia = DIAS_SEMANA[d.weekday()]
+        entry = f"{dia} {d.strftime('%d/%m/%Y')}"
+        if label:
+            entry += f" ({label})"
+        lines.append(entry)
+    return " | ".join(lines)
 
 # ── Normalizacion de In-Out ───────────────────────────────────────────────────
 INGRESO_EXACT = "\u2192INGRESO\u2190"
@@ -538,7 +553,8 @@ async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=N
     history = get_history(phone)
 
     system = f"""Sos Matrics, asistente personal por WhatsApp. Hablas en espanol rioplatense, natural y conciso.
-Hoy: {now.strftime("%Y-%m-%d")} {now.strftime("%H:%M")}. Tasa dolar blue: ${exchange_rate:,.0f} ARS/USD.
+Hoy: {hoy_str(now)}. Calendario: {semana_str(now)}.
+Tasa dolar blue
 
 Tu tarea: registrar gastos e ingresos del usuario.
 - Si el mensaje tiene descripcion Y monto -> usa la tool registrar_gasto directamente.
@@ -1674,6 +1690,8 @@ async def handle_chat(phone: str, text: str) -> str:
 
     system = f"""Sos Matrics, asistente personal en WhatsApp. Respondes conciso y natural en espanol rioplatense.
 Hoy: {hoy_str(now)}.
+Calendario de referencia: {semana_str(now)}.
+REGLA CRITICA: cuando el usuario menciona un dia de la semana, usa EXACTAMENTE la fecha de la tabla de arriba. NO calcules fechas mentalmente.
 {user_context}
 Si el usuario pregunta algo que ya sabes por su configuracion, responde directamente sin usar herramientas.
 
@@ -2016,7 +2034,9 @@ async def handle_evento_agent(phone: str, text: str, image_b64=None, image_type=
     ]
 
     system = f"""Sos Matrics, asistente personal en WhatsApp. Hablas en espanol rioplatense, natural y conciso.
-Hoy: {hoy_str(now)}.{last_ev_ctx}
+Hoy: {hoy_str(now)}.
+Calendario de referencia: {semana_str(now)}.{last_ev_ctx}
+REGLA CRITICA: cuando el usuario menciona un dia de la semana, usa EXACTAMENTE la fecha de esta tabla. NO calcules fechas mentalmente.
 
 Tu tarea: gestionar eventos del calendario del usuario.
 - Si el mensaje tiene titulo Y fecha claros -> usa crear_evento.
