@@ -1655,7 +1655,8 @@ async def handle_chat(phone: str, text: str) -> str:
         },
         {
             "type": "web_search_20250305",
-            "name": "web_search"
+            "name": "web_search",
+            "description": "Busca informacion externa en internet. NO usar para calculos de fechas, dias de la semana, calendarios o aritmetica de tiempo — eso se resuelve con la tabla de referencia del system prompt."
         },
         {
             "name": "configurar_matrics",
