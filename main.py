@@ -1545,6 +1545,62 @@ async def buscar_gastos(query: str, mes: str = None) -> str:
         return f"Error: {str(e)[:100]}"
 
 
+def calcular_fecha_exacta(descripcion: str) -> str:
+    """Calcula fechas exactas a partir de descripciones en lenguaje natural."""
+    import calendar
+    now = now_argentina()
+    desc = descripcion.lower().strip()
+    DIAS = {"lunes": 0, "martes": 1, "miercoles": 2, "miércoles": 2, "jueves": 3,
+            "viernes": 4, "sabado": 5, "sábado": 5, "domingo": 6}
+    MESES = {"enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
+             "julio": 7, "agosto": 8, "septiembre": 9, "octubre": 10, "noviembre": 11, "diciembre": 12}
+    ORDINAL = {"primer": 1, "primero": 1, "segundo": 2, "tercer": 3, "tercero": 3,
+               "cuarto": 4, "quinto": 5, "ultimo": -1, "último": -1}
+
+    # Detectar año
+    year = now.year
+    import re
+    year_match = re.search(r'\b(202\d)\b', desc)
+    if year_match:
+        year = int(year_match.group(1))
+    elif "año que viene" in desc or "proximo año" in desc or "próximo año" in desc:
+        year = now.year + 1
+
+    # Detectar mes
+    target_month = None
+    for nombre, num in MESES.items():
+        if nombre in desc:
+            target_month = num
+            break
+
+    # Detectar ordinal + dia de semana + mes
+    for ord_name, ord_num in ORDINAL.items():
+        for dia_name, dia_num in DIAS.items():
+            if ord_name in desc and dia_name in desc and target_month:
+                # Encontrar todos los dias de esa semana en ese mes
+                _, days_in_month = calendar.monthrange(year, target_month)
+                ocurrencias = []
+                for day in range(1, days_in_month + 1):
+                    if datetime(year, target_month, day).weekday() == dia_num:
+                        ocurrencias.append(day)
+                if ord_num == -1:
+                    chosen = ocurrencias[-1]
+                elif ord_num <= len(ocurrencias):
+                    chosen = ocurrencias[ord_num - 1]
+                else:
+                    return f"No existe el {ord_name} {dia_name} de ese mes."
+                result_date = datetime(year, target_month, chosen)
+                dia_semana = DIAS_SEMANA[result_date.weekday()]
+                return f"{dia_semana} {result_date.strftime('%d/%m/%Y')}"
+
+    # "dentro de X dias"
+    match = re.search(r'dentro de (\d+) d[ií]as?', desc)
+    if match:
+        target = now + timedelta(days=int(match.group(1)))
+        return f"{DIAS_SEMANA[target.weekday()]} {target.strftime('%d/%m/%Y')}"
+
+    return f"No pude interpretar la fecha: '{descripcion}'"
+
 async def handle_chat(phone: str, text: str) -> str:
     history = get_history(phone)
     add_to_history(phone, "user", text)
@@ -1656,6 +1712,17 @@ async def handle_chat(phone: str, text: str) -> str:
         {
             "type": "web_search_20250305",
             "name": "web_search"
+        },
+        {
+            "name": "calcular_fecha",
+            "description": "Calcula fechas exactas a partir de descripciones como 'el segundo sabado de septiembre', 'el ultimo viernes de octubre', 'dentro de 15 dias'. Usar SIEMPRE antes de crear o editar un evento cuando la fecha viene de una descripcion relativa.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "descripcion": {"type": "string", "description": "La descripcion de la fecha tal como la dijo el usuario. Ej: 'el segundo sabado de septiembre', 'el proximo viernes', 'dentro de 10 dias'"}
+                },
+                "required": ["descripcion"]
+            }
         },
         {
             "name": "configurar_matrics",
@@ -1819,6 +1886,8 @@ Si algo no esta en tus tools directas pero es una capacidad de Matrics, decile q
                         t_result = "No encontre ningun gasto llamado '" + search_term + "' en " + mes + "."
             except Exception as e:
                 t_result = "Error: " + str(e)[:100]
+        elif t_name == "calcular_fecha":
+            t_result = calcular_fecha_exacta(t_input.get("descripcion", ""))
         elif t_name == "buscar_gastos":
             query = t_input.get("query", "")
             mes = t_input.get("mes") or now.strftime("%Y-%m")
