@@ -1951,6 +1951,7 @@ Si algo no esta en tus tools directas pero es una capacidad de Matrics, decile q
                         update_r = await http.patch(
                             f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}",
                             headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+                            params={"sendUpdates": "none"},
                             json=patch_body
                         )
                     if update_r.status_code == 200:
@@ -2202,6 +2203,7 @@ EVENTOS RECURRENTES:
                         update_r = await http.patch(
                             f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}",
                             headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+                            params={"sendUpdates": "none"},
                             json=patch_body
                         )
                     if update_r.status_code == 200:
