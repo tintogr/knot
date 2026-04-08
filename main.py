@@ -1765,6 +1765,7 @@ async def handle_chat(phone: str, text: str) -> str:
                     "search_term": {"type": "string", "description": "Palabra clave para identificar el geo-reminder. Ej: 'ferreteria', 'anonima'"},
                     "new_radius": {"type": ["integer", "null"], "description": "Nuevo radio en metros, o null para no cambiar"},
                     "new_recurrent": {"type": ["boolean", "null"], "description": "True para recurrente, False para una sola vez, null para no cambiar"},
+                    "new_name": {"type": ["string", "null"], "description": "Nuevo nombre para el geo-reminder, o null para no cambiar"},
                     "deactivate": {"type": "boolean", "description": "True para desactivar el reminder completamente"}
                 },
                 "required": ["search_term"]
@@ -1957,11 +1958,15 @@ Si algo no esta en tus tools directas pero es una capacidad de Matrics, decile q
             except Exception as e:
                 t_result = "Error: " + str(e)[:100]
         elif t_name == "editar_geo_reminder":
-            search_term = t_input.get("search_term", "").lower()
+            import unicodedata
+            def strip_accents(s):
+                return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+            search_term = strip_accents(t_input.get("search_term", "").lower())
             new_radius = t_input.get("new_radius")
             new_recurrent = t_input.get("new_recurrent")
+            new_name = t_input.get("new_name")
             deactivate = t_input.get("deactivate", False)
-            matched = [r for r in geo_reminders_cache if search_term in r["name"].lower() or search_term in r.get("shop_name", "").lower()]
+            matched = [r for r in geo_reminders_cache if search_term in strip_accents(r["name"].lower()) or search_term in strip_accents(r.get("shop_name", "").lower())]
             if not matched:
                 t_result = f"No encontre ningun geo-reminder relacionado con '{search_term}'."
             else:
@@ -1976,6 +1981,9 @@ Si algo no esta en tus tools directas pero es una capacidad de Matrics, decile q
                 if new_recurrent is not None:
                     props["Recurrent"] = {"checkbox": new_recurrent}
                     reminder["recurrent"] = new_recurrent
+                if new_name:
+                    props["Name"] = {"title": [{"text": {"content": new_name}}]}
+                    reminder["name"] = new_name
                 try:
                     async with httpx.AsyncClient() as http:
                         r = await http.patch(
@@ -1989,6 +1997,8 @@ Si algo no esta en tus tools directas pero es una capacidad de Matrics, decile q
                             t_result = f"Geo-reminder '{reminder['name']}' desactivado."
                         else:
                             changes = []
+                            if new_name:
+                                changes.append(f"nombre -> '{new_name}'")
                             if new_radius is not None:
                                 changes.append(f"radio -> {new_radius}m")
                             if new_recurrent is not None:
