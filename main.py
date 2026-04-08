@@ -2111,41 +2111,44 @@ EVENTOS RECURRENTES:
             if not target_event:
                 t_result = err
             else:
-                event = dict(target_event)
-                event_id = event["id"]
-                event_name = event.get("summary", "Evento")
+                event_id = target_event["id"]
+                event_name = target_event.get("summary", "Evento")
+                patch_body = {}
                 if t_input.get("new_title"):
-                    event["summary"] = t_input["new_title"]
+                    patch_body["summary"] = t_input["new_title"]
                 if t_input.get("new_location"):
-                    event["location"] = t_input["new_location"]
+                    patch_body["location"] = t_input["new_location"]
                 if t_input.get("new_description"):
-                    event["description"] = t_input["new_description"]
+                    patch_body["description"] = t_input["new_description"]
                 if t_input.get("new_date") or t_input.get("new_time"):
-                    if "dateTime" in event.get("start", {}):
-                        old_dt = event["start"]["dateTime"][:16]
+                    if "dateTime" in target_event.get("start", {}):
+                        old_dt = target_event["start"]["dateTime"][:16]
                         new_date = t_input.get("new_date") or old_dt[:10]
                         new_time = t_input.get("new_time") or old_dt[11:16]
-                        event["start"] = {"dateTime": f"{new_date}T{new_time}:00", "timeZone": "America/Argentina/Buenos_Aires"}
-                        if "dateTime" in event.get("end", {}):
-                            dur = datetime.strptime(event["end"]["dateTime"][:16], "%Y-%m-%dT%H:%M") - datetime.strptime(old_dt, "%Y-%m-%dT%H:%M")
+                        patch_body["start"] = {"dateTime": f"{new_date}T{new_time}:00", "timeZone": "America/Argentina/Buenos_Aires"}
+                        if "dateTime" in target_event.get("end", {}):
+                            dur = datetime.strptime(target_event["end"]["dateTime"][:16], "%Y-%m-%dT%H:%M") - datetime.strptime(old_dt, "%Y-%m-%dT%H:%M")
                             new_end = datetime.strptime(f"{new_date}T{new_time}", "%Y-%m-%dT%H:%M") + dur
-                            event["end"] = {"dateTime": new_end.strftime("%Y-%m-%dT%H:%M:00"), "timeZone": "America/Argentina/Buenos_Aires"}
+                            patch_body["end"] = {"dateTime": new_end.strftime("%Y-%m-%dT%H:%M:00"), "timeZone": "America/Argentina/Buenos_Aires"}
                     elif t_input.get("new_date"):
-                        event["start"] = {"date": t_input["new_date"]}
-                        event["end"] = {"date": t_input["new_date"]}
-                access_token = await get_gcal_access_token()
-                async with httpx.AsyncClient() as http:
-                    update_r = await http.put(
-                        f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}",
-                        headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
-                        json=event
-                    )
-                if update_r.status_code in [200, 201]:
-                    last_event_touched[phone] = {"event_id": event_id, "summary": event.get("summary", event_name)}
-                    t_result = "Evento '" + event_name + "' actualizado correctamente."
+                        patch_body["start"] = {"date": t_input["new_date"]}
+                        patch_body["end"] = {"date": t_input["new_date"]}
+                if not patch_body:
+                    t_result = "No entendi que campo cambiar del evento."
                 else:
-                    t_result = "Error actualizando el evento."
-
+                    access_token = await get_gcal_access_token()
+                    async with httpx.AsyncClient() as http:
+                        update_r = await http.patch(
+                            f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}",
+                            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+                            json=patch_body
+                        )
+                    if update_r.status_code == 200:
+                        new_summary = patch_body.get("summary", event_name)
+                        last_event_touched[phone] = {"event_id": event_id, "summary": new_summary}
+                        t_result = "Evento '" + event_name + "' actualizado correctamente."
+                    else:
+                        t_result = "Error actualizando: " + update_r.text[:100]
         elif t_name == "eliminar_evento":
             search_term = t_input.get("search_term", "")
             target_date = t_input.get("target_date")
@@ -3502,8 +3505,20 @@ async def create_factura_task(provider: str, amount: float, due_date: str, perio
     existing = await get_pending_factura_tasks()
     for t in existing:
         prov_low = t["provider"].lower()
-        if prov_low and (prov_low in provider.lower() or provider.lower() in prov_low):
-            if not period or not t["period"] or period.lower() in t["period"].lower():
+        # Match por substring en cualquier direccion
+        prov_match = prov_low and (prov_low in provider.lower() or provider.lower() in prov_low)
+        # Match por palabras en comun (ej: "CALFIBRA" y "CALFIBRA Internet")
+        if not prov_match and prov_low:
+            prov_words = set(w for w in prov_low.split() if len(w) > 3)
+            new_words = set(w for w in provider.lower().split() if len(w) > 3)
+            prov_match = bool(prov_words & new_words)
+        if prov_match:
+            # Match periodo: ignorar idioma, comparar solo digitos (ej: "2026" y mes)
+            import re
+            existing_digits = set(re.findall(r'\d+', t.get("period", "")))
+            new_digits = set(re.findall(r'\d+', period or ""))
+            period_match = not period or not t.get("period") or bool(existing_digits & new_digits)
+            if period_match:
                 return False, "duplicate"
     now = now_argentina()
     meta = json.dumps({"provider": provider, "amount": amount, "period": period}, ensure_ascii=False)
