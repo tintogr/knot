@@ -1712,8 +1712,9 @@ async def handle_chat(phone: str, text: str) -> str:
     system = f"""Sos Matrics, asistente personal en WhatsApp. Respondes conciso y natural en espanol rioplatense.
 Hoy: {hoy_str(now)}.
 Calendario de referencia: {semana_str(now)}.
-REGLA CRITICA: cuando el usuario menciona un dia de la semana, usa EXACTAMENTE la fecha de la tabla de arriba. NO calcules fechas mentalmente.
-REGLA CRITICA 2: para calculos de fechas, dias de la semana, "que dia cae", "dentro de X dias", NO uses web_search. Calculalo directamente con la tabla de referencia o con aritmetica simple.
+REGLA CRITICA: cuando el usuario menciona un dia de la semana, usa EXACTAMENTE la fecha de la tabla de arriba. NO calcules fechas mentalmente. NUNCA.
+REGLA CRITICA 2: para calculos de fechas, dias de la semana, "que dia cae", "dentro de X dias", NO uses web_search. Usa SOLO la tabla de referencia.
+REGLA CRITICA 3: antes de nombrar un dia de la semana, verificalo en la tabla. Ejemplo: si vas a decir "sabado 12/04", buscá 12/04 en la tabla. Si la tabla dice "domingo 12/04", corregite. NUNCA asumas el nombre del dia sin verificar.
 {user_context}
 Si el usuario pregunta algo que ya sabes por su configuracion, responde directamente sin usar herramientas.
 
@@ -2104,7 +2105,9 @@ async def handle_evento_agent(phone: str, text: str, image_b64=None, image_type=
     system = f"""Sos Matrics, asistente personal en WhatsApp. Hablas en espanol rioplatense, natural y conciso.
 Hoy: {hoy_str(now)}.
 Calendario de referencia: {semana_str(now)}.{last_ev_ctx}
-REGLA CRITICA: cuando el usuario menciona un dia de la semana, usa EXACTAMENTE la fecha de esta tabla. NO calcules fechas mentalmente.
+REGLA CRITICA: cuando el usuario menciona un dia de la semana, usa EXACTAMENTE la fecha de la tabla de arriba. NO calcules fechas mentalmente. NUNCA.
+REGLA CRITICA 2: para calculos de fechas, dias de la semana, "que dia cae", "dentro de X dias", NO uses web_search. Usa SOLO la tabla de referencia.
+REGLA CRITICA 3: antes de nombrar un dia de la semana, verificalo en la tabla. Ejemplo: si vas a decir "sabado 12/04", buscá 12/04 en la tabla. Si la tabla dice "domingo 12/04", corregite. NUNCA asumas el nombre del dia sin verificar.
 
 Tu tarea: gestionar eventos del calendario del usuario.
 - Si el mensaje tiene titulo Y fecha claros -> usa crear_evento.
