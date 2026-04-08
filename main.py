@@ -1757,6 +1757,20 @@ async def handle_chat(phone: str, text: str) -> str:
             }
         },
         {
+            "name": "editar_geo_reminder",
+            "description": "Edita un geo-reminder existente: cambia el radio, la recurrencia, o lo desactiva. Usar cuando el usuario quiere modificar o eliminar un geo-reminder.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "search_term": {"type": "string", "description": "Palabra clave para identificar el geo-reminder. Ej: 'ferreteria', 'anonima'"},
+                    "new_radius": {"type": ["integer", "null"], "description": "Nuevo radio en metros, o null para no cambiar"},
+                    "new_recurrent": {"type": ["boolean", "null"], "description": "True para recurrente, False para una sola vez, null para no cambiar"},
+                    "deactivate": {"type": "boolean", "description": "True para desactivar el reminder completamente"}
+                },
+                "required": ["search_term"]
+            }
+        },
+        {
             "name": "buscar_comercios_cercanos",
             "description": "Busca comercios, negocios o locales cerca de la ubicacion actual del usuario usando Google Places. Usar cuando el usuario pregunta si hay algun negocio cerca, si tiene alguna tienda a mano, donde queda tal comercio, etc.",
             "input_schema": {
@@ -1942,6 +1956,48 @@ Si algo no esta en tus tools directas pero es una capacidad de Matrics, decile q
                         t_result = "No encontre ningun gasto llamado '" + search_term + "' en " + mes + "."
             except Exception as e:
                 t_result = "Error: " + str(e)[:100]
+        elif t_name == "editar_geo_reminder":
+            search_term = t_input.get("search_term", "").lower()
+            new_radius = t_input.get("new_radius")
+            new_recurrent = t_input.get("new_recurrent")
+            deactivate = t_input.get("deactivate", False)
+            matched = [r for r in geo_reminders_cache if search_term in r["name"].lower() or search_term in r.get("shop_name", "").lower()]
+            if not matched:
+                t_result = f"No encontre ningun geo-reminder relacionado con '{search_term}'."
+            else:
+                reminder = matched[0]
+                page_id = reminder["page_id"]
+                props = {}
+                if deactivate:
+                    props["Active"] = {"checkbox": False}
+                if new_radius is not None:
+                    props["Radius"] = {"number": new_radius}
+                    reminder["radius"] = new_radius
+                if new_recurrent is not None:
+                    props["Recurrent"] = {"checkbox": new_recurrent}
+                    reminder["recurrent"] = new_recurrent
+                try:
+                    async with httpx.AsyncClient() as http:
+                        r = await http.patch(
+                            f"https://api.notion.com/v1/pages/{page_id}",
+                            headers=notion_headers(),
+                            json={"properties": props}
+                        )
+                    if r.status_code == 200:
+                        if deactivate:
+                            geo_reminders_cache.remove(reminder)
+                            t_result = f"Geo-reminder '{reminder['name']}' desactivado."
+                        else:
+                            changes = []
+                            if new_radius is not None:
+                                changes.append(f"radio -> {new_radius}m")
+                            if new_recurrent is not None:
+                                changes.append("recurrente" if new_recurrent else "solo una vez")
+                            t_result = f"'{reminder['name']}' actualizado: {', '.join(changes)}."
+                    else:
+                        t_result = f"Error actualizando en Notion: {r.text[:100]}"
+                except Exception as e:
+                    t_result = f"Error: {str(e)[:100]}"
         elif t_name == "consultar_geo_reminders":
             if geo_reminders_cache:
                 lines = []
