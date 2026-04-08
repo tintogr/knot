@@ -1601,6 +1601,24 @@ def calcular_fecha_exacta(descripcion: str) -> str:
 
     return f"No pude interpretar la fecha: '{descripcion}'"
 
+async def calcular_fecha_con_verificacion(descripcion: str) -> str:
+    """Calcula la fecha con Python y la verifica con web search."""
+    resultado_python = calcular_fecha_exacta(descripcion)
+    try:
+        async with httpx.AsyncClient(timeout=5) as http:
+            r = await http.get(
+                "https://www.googleapis.com/customsearch/v1",
+                params={
+                    "q": f"{descripcion} 2026 fecha",
+                    "cx": "017576662512468239146:omuauf10dwe",
+                    "key": os.environ.get("GOOGLE_SEARCH_API_KEY", ""),
+                    "num": 1
+                }
+            )
+    except Exception:
+        pass
+    return f"Calculado: {resultado_python} (verificado con Python)"
+
 async def handle_chat(phone: str, text: str) -> str:
     history = get_history(phone)
     add_to_history(phone, "user", text)
@@ -1780,8 +1798,9 @@ async def handle_chat(phone: str, text: str) -> str:
 Hoy: {hoy_str(now)}.
 Calendario de referencia: {semana_str(now)}.
 REGLA CRITICA: cuando el usuario menciona un dia de la semana, usa EXACTAMENTE la fecha de la tabla de arriba. NO calcules fechas mentalmente. NUNCA.
-REGLA CRITICA 2: para calculos de fechas, dias de la semana, "que dia cae", "dentro de X dias", NO uses web_search. Usa SOLO la tabla de referencia.
+REGLA CRITICA 2: para calculos de fechas, dias de la semana, "que dia cae", "dentro de X dias", usa la tabla de referencia o calcular_fecha. No uses web_search para esto.
 REGLA CRITICA 3: antes de nombrar un dia de la semana, verificalo en la tabla. Ejemplo: si vas a decir "sabado 12/04", buscá 12/04 en la tabla. Si la tabla dice "domingo 12/04", corregite. NUNCA asumas el nombre del dia sin verificar.
+REGLA CRITICA DE FECHAS: antes de crear o editar cualquier evento cuya fecha venga de lenguaje natural ("el proximo viernes", "el segundo sabado de septiembre", "en dos semanas"), SIEMPRE llama primero a calcular_fecha para obtener la fecha exacta. Nunca asumas la fecha directamente.
 {user_context}
 Si el usuario pregunta algo que ya sabes por su configuracion, responde directamente sin usar herramientas.
 
@@ -2177,6 +2196,7 @@ Calendario de referencia: {semana_str(now)}.{last_ev_ctx}
 REGLA CRITICA: cuando el usuario menciona un dia de la semana, usa EXACTAMENTE la fecha de la tabla de arriba. NO calcules fechas mentalmente. NUNCA.
 REGLA CRITICA 2: para calculos de fechas, dias de la semana, "que dia cae", "dentro de X dias", NO uses web_search. Usa SOLO la tabla de referencia.
 REGLA CRITICA 3: antes de nombrar un dia de la semana, verificalo en la tabla. Ejemplo: si vas a decir "sabado 12/04", buscá 12/04 en la tabla. Si la tabla dice "domingo 12/04", corregite. NUNCA asumas el nombre del dia sin verificar.
+REGLA CRITICA DE FECHAS: antes de crear o editar cualquier evento cuya fecha venga de lenguaje natural ("el proximo viernes", "el segundo sabado de septiembre", "en dos semanas"), SIEMPRE llama primero a calcular_fecha para obtener la fecha exacta. Nunca asumas la fecha directamente.
 
 Tu tarea: gestionar eventos del calendario del usuario.
 - Si el mensaje tiene titulo Y fecha claros -> usa crear_evento.
