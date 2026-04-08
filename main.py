@@ -4320,8 +4320,9 @@ async def check_geo_reminders(lat: float, lon: float) -> list[dict]:
         elif reminder["type"] == "shop":
             shop_name = reminder.get("shop_name", "")
             if shop_name:
-                shops = await search_nearby_shops(lat, lon, radius=500, name_filter=shop_name)
-                if shops:
+                reminder_radius = reminder.get("radius", 300)
+                shops = await search_nearby_shops(lat, lon, radius=reminder_radius, name_filter=shop_name)
+                if shops and shops[0]["distance_m"] <= reminder_radius:
                     reminder["_matched_shop"] = shops[0]
                     triggered.append(reminder)
     return triggered
@@ -4332,6 +4333,7 @@ _last_proximity_store: dict[str, str] = {}
 _last_location_save: datetime | None = None
 _geo_reminder_cooldowns: dict[str, datetime] = {}
 GEO_REMINDER_COOLDOWN_SECONDS = 600
+_geo_reminders_in_range: set[str] = set()
 
 async def save_location_to_notion(lat: float, lon: float, loc_name: str = None):
     """Persiste la ubicacion en Notion Config para sobrevivir reinicios."""
@@ -4390,13 +4392,21 @@ async def receive_location(request: Request):
         # Chequear geo-reminders
         if not is_in_transit() and 9 <= now.hour <= 22:
             triggered = await check_geo_reminders(float(lat), float(lon))
-            for reminder in triggered:
-                r_id = reminder["page_id"]
-                last_fire = _geo_reminder_cooldowns.get(r_id)
-                if last_fire and (now - last_fire).total_seconds() < GEO_REMINDER_COOLDOWN_SECONDS:
-                    continue
-                _geo_reminder_cooldowns[r_id] = now
-                shop = reminder.get("_matched_shop")
+        triggered_ids = {r["page_id"] for r in triggered}
+
+        # Detectar cuales salieron del radio y resetearlos
+        for r_id in list(_geo_reminders_in_range):
+            if r_id not in triggered_ids:
+                _geo_reminders_in_range.discard(r_id)
+
+        for reminder in triggered:
+            r_id = reminder["page_id"]
+            # Solo avisar si acaba de entrar al radio (no estaba antes)
+            if r_id in _geo_reminders_in_range:
+                continue
+            _geo_reminders_in_range.add(r_id)
+            _geo_reminder_cooldowns[r_id] = now
+            shop = reminder.get("_matched_shop")
                 if shop:
                     shop_info = f"*{shop['name']}* a {shop['distance_m']}m"
                     if shop.get("address"):
