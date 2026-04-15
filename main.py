@@ -43,6 +43,23 @@ TASKS_DB_ID         = os.environ.get("NOTION_TASKS_DB_ID", "90b44158-7916-4837-9
 GEO_REMINDERS_DB_ID = os.environ.get("NOTION_GEO_REMINDERS_DB_ID", "5fe7a531722843a5af93de1c54a14e02")
 CONFIG_DB_ID   = os.environ.get("NOTION_CONFIG_DB_ID", "2f81017d-a20c-426a-aada-88fcf0743338")
 PROJECTS_DB_ID = os.environ.get("NOTION_PROJECTS_DB_ID", "0924aff739194c5b8438d03ed82e9e21")
+# ── DataStore (Fase 1 refactor) ───────────────────────────────────────────────
+from notion_datastore import NotionDataStore
+
+_ds = NotionDataStore(
+    token=NOTION_TOKEN,
+    db_ids={
+        "finances":      NOTION_DB_ID,
+        "shopping":      SHOPPING_DB_ID,
+        "recipes":       RECIPES_DB_ID,
+        "plants":        PLANTS_DB_ID,
+        "meetings":      MEETINGS_DB_ID,
+        "tasks":         TASKS_DB_ID,
+        "config":        CONFIG_DB_ID,
+        "geo_reminders": GEO_REMINDERS_DB_ID,
+        "projects":      PROJECTS_DB_ID,
+    },
+)
 WA_TOKEN       = os.environ["WHATSAPP_TOKEN"]
 WA_PHONE_ID    = os.environ["WHATSAPP_PHONE_ID"]
 WA_API         = f"https://graph.facebook.com/v22.0/{WA_PHONE_ID}/messages"
