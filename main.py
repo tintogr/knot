@@ -1891,7 +1891,7 @@ async def handle_chat(phone: str, text: str) -> str:
         },
         {
             "name": "consultar_lugares_conocidos",
-            "description": "Lista los lugares conocidos guardados del usuario (casa, trabajo, gimnasio, etc).
+            "description": "Lista los lugares conocidos guardados del usuario (casa, trabajo, gimnasio, etc).",
             "input_schema": {
                 "type": "object",
                 "properties": {},
