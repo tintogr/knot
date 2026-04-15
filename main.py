@@ -230,6 +230,8 @@ async def search_nearby_shops(lat: float, lon: float, radius: int = 500, shop_ty
                 })
 
             shops.sort(key=lambda x: x["distance_m"])
+            # Excluir resultados claramente fuera del area (mas de 50km)
+            shops = [s for s in shops if s["distance_m"] <= 50000]
             return shops
 
     except Exception as e:
@@ -598,40 +600,49 @@ Emoji: elegi el mas especifico segun el contexto real."""
         add_to_history(phone, "assistant", reply)
         return reply
 
-    tool_block = next((b for b in response.content if b.type == "tool_use"), None)
-    if not tool_block:
+    tool_blocks = [b for b in response.content if b.type == "tool_use"]
+    if not tool_blocks:
         reply = next((b.text for b in response.content if hasattr(b, "text") and b.text), "Error procesando").strip()
         add_to_history(phone, "user", text)
         add_to_history(phone, "assistant", reply)
         return reply
 
-    data = dict(tool_block.input)
-    final_cats, cat_note = await check_and_apply_category(data.get("name", ""), data.get("categoria", []))
-    data["categoria"] = final_cats
+    all_tool_results = []
+    created_entries = []
+    for tool_block in tool_blocks:
+        data = dict(tool_block.input)
+        final_cats, cat_note = await check_and_apply_category(data.get("name", ""), data.get("categoria", []))
+        data["categoria"] = final_cats
 
-    success, result = await create_notion_entry(data, exchange_rate)
+        success_i, result_i = await create_notion_entry(data, exchange_rate)
 
-    if success:
-        page_id = result
-        usd = data["value_ars"] / exchange_rate
-        tool_result = (
-            f"Registrado exitosamente en Notion. "
-            f"Nombre: {data['name']}, "
-            f"Monto: ${data['value_ars']:,.0f} ARS (USD {usd:.2f}), "
-            f"Categoria: {', '.join(data['categoria'])}, "
-            f"Fecha: {data['date']}, "
-            f"Cambio usado: ${exchange_rate:,.0f}/USD."
-        )
-        if cat_note:
-            tool_result += f" {cat_note}"
-    else:
-        page_id = None
-        tool_result = f"Error al guardar en Notion: {result[:200]}"
+        if success_i:
+            usd = data["value_ars"] / exchange_rate
+            tr = (
+                f"Registrado exitosamente en Notion. "
+                f"Nombre: {data['name']}, "
+                f"Monto: ${data['value_ars']:,.0f} ARS (USD {usd:.2f}), "
+                f"Categoria: {', '.join(data['categoria'])}, "
+                f"Fecha: {data['date']}, "
+                f"Cambio usado: ${exchange_rate:,.0f}/USD."
+            )
+            if cat_note:
+                tr += f" {cat_note}"
+            created_entries.append((result_i, data, True))
+        else:
+            tr = f"Error al guardar en Notion: {result_i[:200]}"
+            created_entries.append((None, data, False))
+
+        all_tool_results.append({
+            "type": "tool_result",
+            "tool_use_id": tool_block.id,
+            "content": tr
+        })
 
     messages = [
         {"role": "user", "content": content},
         {"role": "assistant", "content": response.content},
-        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_block.id, "content": tool_result}]}
+        {"role": "user", "content": all_tool_results}
     ]
     final_response = claude_create(
         model="claude-sonnet-4-20250514", max_tokens=400,
@@ -641,31 +652,34 @@ Emoji: elegi el mas especifico segun el contexto real."""
     )
     reply = next((b.text for b in final_response.content if hasattr(b, "text") and b.text), "").strip()
 
-    if success and page_id:
-        name_lower = data.get("name", "").lower()
-        is_fuel = data.get("emoji") == "⛽" or any(k in name_lower for k in FUEL_KEYWORDS)
-        if is_fuel and not data.get("litros"):
-            pending_state[phone] = {"type": "litros_followup", "page_id": page_id, "name": data["name"]}
-            reply += "\n\n⛽ Cuantos litros cargaste?"
-        elif data.get("value_ars", 0) > 1000:
-            pending_tasks = await get_pending_factura_tasks()
-            if pending_tasks:
-                amount = data.get("value_ars", 0)
-                matched = None
-                for task in pending_tasks:
-                    prov = task["provider"].lower()
-                    if prov and (prov in name_lower or any(w in name_lower for w in prov.split() if len(w) > 3)):
-                        task_amount = task.get("amount", 0)
-                        if not task_amount or abs(amount - task_amount) / max(task_amount, 1) <= 0.10:
-                            matched = task
-                            break
-                if matched:
-                    pending_state[phone] = {
-                        "type": "confirm_factura_paid",
-                        "task_page_id": matched["page_id"],
-                        "task_name": matched["name"],
-                    }
-                    reply += f"\n\n¿Este pago corresponde a *{matched['name']}*?"
+    # Pending state solo cuando hay un unico gasto en el mensaje
+    if len(created_entries) == 1:
+        page_id, data, success = created_entries[0]
+        if success and page_id:
+            name_lower = data.get("name", "").lower()
+            is_fuel = data.get("emoji") == "⛽" or any(k in name_lower for k in FUEL_KEYWORDS)
+            if is_fuel and not data.get("litros"):
+                pending_state[phone] = {"type": "litros_followup", "page_id": page_id, "name": data["name"]}
+                reply += "\n\n⛽ Cuantos litros cargaste?"
+            elif data.get("value_ars", 0) > 1000:
+                pending_tasks = await get_pending_factura_tasks()
+                if pending_tasks:
+                    amount = data.get("value_ars", 0)
+                    matched = None
+                    for task in pending_tasks:
+                        prov = task["provider"].lower()
+                        if prov and (prov in name_lower or any(w in name_lower for w in prov.split() if len(w) > 3)):
+                            task_amount = task.get("amount", 0)
+                            if not task_amount or abs(amount - task_amount) / max(task_amount, 1) <= 0.10:
+                                matched = task
+                                break
+                    if matched:
+                        pending_state[phone] = {
+                            "type": "confirm_factura_paid",
+                            "task_page_id": matched["page_id"],
+                            "task_name": matched["name"],
+                        }
+                        reply += f"\n\n¿Este pago corresponde a *{matched['name']}*?"
 
     add_to_history(phone, "user", text)
     add_to_history(phone, "assistant", reply)
@@ -1709,20 +1723,22 @@ async def handle_chat(phone: str, text: str) -> str:
     noc_h = user_prefs.get("resumen_nocturno_hour") or 22
     noc_en = user_prefs.get("resumen_nocturno_enabled", True)
     user_context_parts.append(f"Resumen nocturno: {'activado' if noc_en else 'desactivado'} a las {int(noc_h):02d}:00.")
+    _ulat = float(current_location.get("lat") or USER_LAT)
+    _ulon = float(current_location.get("lon") or USER_LON)
+    _uloc = current_location.get("location_name")
     if current_location.get("source") == "owntracks":
         place = is_at_known_place()
         if place:
-            user_context_parts.append(f"Ubicacion GPS actual (OwnTracks): {place['name']}.")
+            user_context_parts.append(f"Ubicacion GPS actual (OwnTracks): {place['name']} ({_ulat:.5f}, {_ulon:.5f}).")
+        elif _uloc:
+            user_context_parts.append(f"Ubicacion GPS actual (OwnTracks): {_uloc} ({_ulat:.5f}, {_ulon:.5f}).")
         else:
-            loc_name = current_location.get("location_name")
-            if loc_name:
-                user_context_parts.append(f"Ubicacion GPS actual (OwnTracks): {loc_name}.")
-            else:
-                lat_c = float(current_location.get("lat") or USER_LAT)
-                lon_c = float(current_location.get("lon") or USER_LON)
-                user_context_parts.append(f"Ubicacion GPS actual (OwnTracks): coordenadas {lat_c:.5f}, {lon_c:.5f}. El nombre del lugar no se pudo resolver automaticamente — usa las coordenadas para responder preguntas sobre ubicacion, no las interpolees con ciudades que no esten confirmadas.")
+            user_context_parts.append(f"Ubicacion GPS actual (OwnTracks): coordenadas {_ulat:.5f}, {_ulon:.5f}. Nombre no resuelto.")
     else:
-        user_context_parts.append("Ubicacion aproximada: Neuquen (sin GPS activo).")
+        if _uloc:
+            user_context_parts.append(f"Ubicacion aproximada: {_uloc} ({_ulat:.5f}, {_ulon:.5f}) — sin GPS activo.")
+        else:
+            user_context_parts.append(f"Ubicacion aproximada: Neuquen ({_ulat:.5f}, {_ulon:.5f}) — sin GPS activo, puede ser impreciso.")
     user_context = "\n".join(user_context_parts)
 
     tools = [
@@ -3247,9 +3263,23 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
     if state_type == "geo_reminder_awaiting_location":
         description = state.get("description", "Recordatorio")
         recurrent = state.get("recurrent", False)
-        # El usuario puede responder con texto (direccion) o con ubicacion de WA
-        # La ubicacion de WA se maneja en process_message antes de llegar aca
         del pending_state[phone]
+        # Intentar extraer coordenadas del texto antes de geocodificar
+        import re
+        _coord = re.search(r'(-\d{2,3}\.\d{4,})[,\s]+(-\d{2,3}\.\d{4,})', text)
+        if _coord:
+            _lat = float(_coord.group(1))
+            _lon = float(_coord.group(2))
+            ok, _ = await create_geo_reminder(
+                description=description, rtype="place",
+                lat=_lat, lon=_lon, recurrent=recurrent,
+            )
+            if ok:
+                freq = "Cada vez que" if recurrent else "La proxima vez que"
+                await send_message(phone, f"Geo-reminder guardado\n_{description}_\nCoordenadas: {_lat:.5f}, {_lon:.5f}\n{freq} estes cerca, te aviso.")
+            else:
+                await send_message(phone, "No pude guardar el geo-reminder.")
+            return True
         # Intentar geocodificar lo que escribio
         try:
             async with httpx.AsyncClient(timeout=5) as http:
@@ -3375,6 +3405,21 @@ Responde SOLO JSON valido sin markdown:
     needs_location = data.get("needs_location", False)
     address = data.get("address")
     radius = int(data.get("radius") or 300)
+
+    # Detectar coordenadas directamente en el texto original
+    import re
+    _coord = re.search(r'(-\d{2,3}\.\d{4,})[,\s]+(-\d{2,3}\.\d{4,})', text)
+    if _coord and not (rtype == "shop" and shop_name):
+        _lat = float(_coord.group(1))
+        _lon = float(_coord.group(2))
+        ok, _ = await create_geo_reminder(
+            description=description, rtype="place",
+            lat=_lat, lon=_lon, radius=radius, recurrent=recurrent,
+        )
+        if ok:
+            freq = "Cada vez que" if recurrent else "La proxima vez que"
+            return f"Geo-reminder guardado\n_{description}_\nCoordenadas: {_lat:.5f}, {_lon:.5f} (radio: {radius}m)\n{freq} estes cerca, te aviso."
+        return "No pude guardar el geo-reminder."
 
     # Si es tipo shop, crear directamente
     if rtype == "shop" and shop_name:
@@ -3744,8 +3789,12 @@ async def cron_job():
             async with httpx.AsyncClient() as http_summary:
                 await send_daily_summary(http_summary, access_token_summary, now)
             fired.append("DAILY_SUMMARY")
-        except Exception:
-            pass
+        except Exception as e:
+            fired.append(f"DAILY_SUMMARY_ERROR: {str(e)[:60]}")
+            try:
+                await send_message(MY_NUMBER, f"Error en resumen diario: {type(e).__name__}: {str(e)[:120]}")
+            except Exception:
+                pass
 
     nocturno_enabled = user_prefs.get("resumen_nocturno_enabled", True)
     nocturno_hour    = user_prefs.get("resumen_nocturno_hour", 22)
@@ -3960,18 +4009,21 @@ async def mark_factura_task_paid(page_id: str) -> bool:
         return False
 
 async def send_daily_summary(http, access_token: str, now: datetime):
-    r = await http.get(
-        "https://www.googleapis.com/calendar/v3/calendars/primary/events",
-        headers={"Authorization": f"Bearer {access_token}"},
-        params={
-            "timeMin": now.replace(hour=0, minute=0, second=0).strftime("%Y-%m-%dT00:00:00-03:00"),
-            "timeMax": now.replace(hour=23, minute=59, second=59).strftime("%Y-%m-%dT23:59:59-03:00"),
-            "singleEvents": "true", "orderBy": "startTime", "maxResults": "10"
-        }
-    )
-    if r.status_code != 200:
-        return
-    events = [e for e in r.json().get("items", []) if "[TEMP]" not in (e.get("description") or "")]
+    events = []
+    try:
+        r = await http.get(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={
+                "timeMin": now.replace(hour=0, minute=0, second=0).strftime("%Y-%m-%dT00:00:00-03:00"),
+                "timeMax": now.replace(hour=23, minute=59, second=59).strftime("%Y-%m-%dT23:59:59-03:00"),
+                "singleEvents": "true", "orderBy": "startTime", "maxResults": "10"
+            }
+        )
+        if r.status_code == 200:
+            events = [e for e in r.json().get("items", []) if "[TEMP]" not in (e.get("description") or "")]
+    except Exception:
+        pass
     w = await get_weather()
     await load_user_config(MY_NUMBER)
     greeting = user_prefs.get("greeting_name") or "Buenos dias"
@@ -4045,6 +4097,19 @@ async def send_daily_summary(http, access_token: str, now: datetime):
         svc_actual = await query_servicios_mes(mes_actual)
         svc_anterior = await query_servicios_mes(mes_anterior)
         finances_context = f"{svc_actual}\n\n{svc_anterior}"
+        # Buscar tambien por nombre de proveedor para matchear aunque no sea categoria Servicios
+        _provs = user_prefs.get("service_providers", {})
+        if _provs:
+            _extra = []
+            for _p in list(_provs.values())[:6]:
+                _kw = _p.split()[0] if _p else ""
+                if len(_kw) >= 3:
+                    for _m in [mes_actual, mes_anterior]:
+                        _h = await buscar_gastos(_kw, _m)
+                        if "No encontre" not in _h and _h not in finances_context:
+                            _extra.append(_h)
+            if _extra:
+                finances_context += "\n\nPor proveedor:\n" + "\n".join(_extra)
         filtered_gmail = gmail_summary
         try:
             filter_resp = claude_create(
