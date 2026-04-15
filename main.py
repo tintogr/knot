@@ -963,30 +963,22 @@ Responde:
     return json.loads(raw)
 
 async def create_planta(data: dict) -> tuple[bool, str]:
-    props = {"Name": {"title": [{"text": {"content": data.get("name", "Planta")}}]}}
-    if data.get("especie"):
-        props["Species"] = {"rich_text": [{"text": {"content": data["especie"]}}]}
-    if data.get("fecha_compra"):
-        props["Purchase Date"] = {"date": {"start": data["fecha_compra"]}}
-    if data.get("precio"):
-        props["Price"] = {"number": float(data["precio"])}
-    if data.get("luz"):
-        props["Light"] = {"select": {"name": data["luz"]}}
-    if data.get("riego"):
-        props["Watering"] = {"select": {"name": data["riego"]}}
-    if data.get("ubicacion"):
-        props["Location"] = {"select": {"name": data["ubicacion"]}}
-    if data.get("estado"):
-        props["Status"] = {"select": {"name": data["estado"]}}
-    if data.get("notas"):
-        props["Notes"] = {"rich_text": [{"text": {"content": data["notas"]}}]}
-    emoji = data.get("emoji", "\U0001f33f")
-    async with httpx.AsyncClient() as http:
-        r = await http.post("https://api.notion.com/v1/pages",
-            headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
-            json={"parent": {"database_id": PLANTS_DB_ID}, "icon": {"type": "emoji", "emoji": emoji}, "properties": props}
-        )
-        return (True, "") if r.status_code == 200 else (False, r.text)
+    try:
+        await _ds.create_plant({
+            "name":          data.get("name"),
+            "species":       data.get("especie"),
+            "purchase_date": data.get("fecha_compra"),
+            "price":         data.get("precio"),
+            "light":         data.get("luz"),
+            "watering":      data.get("riego"),
+            "location":      data.get("ubicacion"),
+            "status":        data.get("estado"),
+            "notes":         data.get("notas"),
+            "emoji":         data.get("emoji"),
+        })
+        return True, ""
+    except Exception as e:
+        return False, str(e)
 
 def format_planta(data: dict) -> str:
     emoji = data.get("emoji", "\U0001f33f")
