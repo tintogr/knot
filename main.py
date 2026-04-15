@@ -1862,8 +1862,19 @@ async def handle_chat(phone: str, text: str) -> str:
             }
         },
         {
+            "name": "marcar_factura_pagada",
+            "description": "Marca una tarea de factura pendiente como pagada en Notion. Usar cuando el usuario confirma que ya pago un servicio o factura especifica, ya sea en respuesta a una pregunta o espontaneamente.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "provider": {"type": "string", "description": "Nombre del proveedor o servicio. Ej: 'Camuzzi', 'CALF', 'Movistar'"}
+                },
+                "required": ["provider"]
+            }
+        },
+        {
             "name": "consultar_lugares_conocidos",
-            "description": "Lista los lugares conocidos guardados del usuario (casa, trabajo, gimnasio, etc). Usar cuando el usuario pregunta que lugares tiene guardados, donde queda su trabajo o casa, o si quiere verificar si un lugar esta guardado.",
+            "description": "Lista los lugares conocidos guardados del usuario (casa, trabajo, gimnasio, etc).
             "input_schema": {
                 "type": "object",
                 "properties": {},
@@ -1996,6 +2007,9 @@ RAZONAMIENTO IMPORTANTE para preguntas sobre pagos de servicios:
 4. Si el monto registrado difiere del de la factura, mencionalo y ofrece corregirlo
 5. Si no encontras ningun pago relacionado, deci que no aparece registrado
 6. Si mencionaste facturas pendientes y el usuario dice que ya las pago, busca en Notion para verificar antes de pedir montos
+7. CRITICO: las fechas de vencimiento solo mencionarlas si aparecen textualmente en el mail. Nunca inferir ni inventar fechas.
+8. CRITICO: si en esta conversacion ya se confirmo que una factura esta pagada, NO la vuelvas a mencionar como pendiente aunque Gmail la muestre.
+9. CRITICO: cada vez que el usuario confirme que pago un servicio (ya sea respondiendo a tu pregunta o diciendotelo directamente), SIEMPRE llama a marcar_factura_pagada con el nombre del proveedor. Esto persiste la informacion en Notion para que no vuelva a aparecer como pendiente en futuros resumenes.
 
 Podes usar varias herramientas en el mismo turno. No respondas hasta tener la informacion necesaria.
 IMPORTANTE: No inventes datos. Si no encontras info en ninguna fuente, decilo claramente.
@@ -2167,6 +2181,34 @@ CRITICO: si guardar_lugar_conocido devuelve error o dice "NO fue guardado", info
                         t_result = f"Error actualizando en Notion: {r.text[:100]}"
                 except Exception as e:
                     t_result = f"Error: {str(e)[:100]}"
+        elif t_name == "marcar_factura_pagada":
+            provider = t_input.get("provider", "")
+            tasks = await get_pending_factura_tasks()
+            prov_lower = provider.lower()
+            matched_tasks = []
+            for task in tasks:
+                tp = task.get("provider", "").lower()
+                if not tp:
+                    continue
+                if tp in prov_lower or prov_lower in tp:
+                    matched_tasks.append(task)
+                    continue
+                tp_words = set(w for w in tp.split() if len(w) > 3)
+                prov_words = set(w for w in prov_lower.split() if len(w) > 3)
+                if tp_words & prov_words:
+                    matched_tasks.append(task)
+            if not matched_tasks:
+                t_result = f"No encontre ninguna tarea de factura pendiente para '{provider}'. Si ya esta registrado el pago en Notion, no hay nada que hacer."
+            else:
+                marked = []
+                for task in matched_tasks:
+                    ok = await mark_factura_task_paid(task["page_id"])
+                    if ok:
+                        marked.append(task["name"])
+                if marked:
+                    t_result = f"Marcado como pagado en Notion: {', '.join(marked)}. No va a volver a aparecer como pendiente."
+                else:
+                    t_result = f"No pude actualizar las tasks en Notion."
         elif t_name == "consultar_lugares_conocidos":
             places = user_prefs.get("known_places", [])
             if places:
@@ -4210,16 +4252,28 @@ Reglas de matching:
 - Si encontras un pago del mes anterior que podria corresponder a la factura actual, aclaralo
 - Si hay dudas reales sobre si un pago corresponde, mencionalo brevemente
 
-Mostrar SOLO las facturas sin pago registrado claro. Si todas estan pagas, decilo en una linea. Espanol rioplatense, conciso.""",
+CRITICO - fechas de vencimiento: usa SOLO fechas que aparezcan textualmente en el mail. Si el mail no dice explicitamente la fecha de vencimiento, NO la incluyas. NUNCA inventes ni inferiras fechas de vencimiento.
+CRITICO - no menciones facturas que ya esten claramente pagas. Si una factura tiene un pago registrado que cumple las reglas de matching, no la menciones en absoluto.
+
+Mostrar SOLO las facturas sin pago registrado claro. Si todas estan pagas, responde exactamente: "Todas las facturas están al día." Sin más detalle. Espanol rioplatense, conciso.""",
                 messages=[{"role": "user", "content": f"Facturas en Gmail:\n{gmail_summary}\n\nPagos registrados en Notion:\n{finances_context}"}]
             )
             filtered_gmail = filter_resp.content[0].text.strip()
         except Exception:
             pass
-        lines.append("")
-        lines.append(f"*Facturas:*\n{filtered_gmail}")
+        _todo_pago = any(phrase in filtered_gmail.lower() for phrase in [
+            "todas", "todo", "al día", "al dia", "pagadas", "pagados", "sin pendientes", "no hay facturas"
+        ]) and not any(phrase in filtered_gmail.lower() for phrase in [
+            "pendiente", "vence", "vencida", "sin pago", "no registr"
+        ])
+        if _todo_pago:
+            lines.append("")
+            lines.append("✅ Facturas al día")
+        else:
+            lines.append("")
+            lines.append(f"*Facturas:*\n{filtered_gmail}")
         # Auto-crear tasks en Notion para facturas pendientes
-        if filtered_gmail and "pagadas" not in filtered_gmail.lower():
+        if filtered_gmail and not _todo_pago:
             try:
                 tasks_resp = claude_create(
                     model="claude-sonnet-4-20250514", max_tokens=400,
