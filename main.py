@@ -1720,6 +1720,19 @@ async def handle_chat(phone: str, text: str) -> str:
     add_to_history(phone, "user", text)
     now = now_argentina()
 
+    # Detectar pedido explicito de resumen diario
+    _resumen_kw = ["resumen diario", "resumen de hoy", "dame el resumen", "manda el resumen",
+                   "manda resumen", "resumen matutino", "mandame el resumen"]
+    if any(k in text.lower() for k in _resumen_kw):
+        try:
+            _at = await get_gcal_access_token()
+            async with httpx.AsyncClient() as _http:
+                await send_daily_summary(_http, _at, now)
+            add_to_history(phone, "assistant", "[Resumen diario enviado]")
+            return None
+        except Exception as _e:
+            pass  # si falla, cae al chat normal
+
     # Armar contexto del usuario desde su config en Notion
     user_context_parts = []
     providers = user_prefs.get("service_providers", {})
@@ -2548,6 +2561,9 @@ Tu tarea: gestionar eventos del calendario del usuario.
 - Podes consultar el calendario primero si necesitas verificar algo.
 - Si el usuario manda una imagen (flyer, screenshot de turno, invitacion), extrae la info y crea el evento.
 IMPORTANTE: No inventes datos. Usa zona horaria Argentina (UTC-3).
+VERIFICACION OBLIGATORIA: despues de cada crear_evento o editar_evento, llama a consultar_calendario para verificar que el cambio se refleja correctamente. Si el resultado no coincide con lo que se pidio, intentalo de nuevo. NUNCA confirmes un cambio sin verificarlo primero.
+EVENTOS RECURRENTES - instancias especificas: cuando el usuario dice "el de hoy", "el de mañana", "el del jueves", siempre usa target_date con la fecha exacta correspondiente de la tabla de referencia. Sin target_date, la API devuelve la proxima instancia futura que puede ser incorrecta.
+MULTIPLES CAMBIOS EN UN MENSAJE: si el usuario pide cambiar dos eventos distintos (ej: "el de hoy a las X y el de mañana a las Y"), hace UNA tool call por evento, en orden, verificando cada una antes de pasar a la siguiente.
 
 EVENTOS RECURRENTES:
 - Si el usuario dice "todos los lunes", "cada martes", etc., usa el campo recurrence con un RRULE valido.
@@ -3781,7 +3797,8 @@ async def process_message(message: dict):
 
         elif tipo == "CHAT":
             respuesta = await handle_chat(from_number, text)
-            await send_message(from_number, respuesta)
+            if respuesta:
+                await send_message(from_number, respuesta)
             if "Ingredientes:" in respuesta and "Preparacion:" in respuesta:
                 try:
                     ext_response = claude_create(
