@@ -3800,11 +3800,11 @@ async def process_message(message: dict):
             if respuesta:
                 await send_message(from_number, respuesta)
                 if "Ingredientes:" in respuesta and "Preparacion:" in respuesta:
-                try:
-                    ext_response = claude_create(
-                        model="claude-sonnet-4-20250514", max_tokens=400,
-                        system="Responde SOLO JSON valido sin markdown.",
-                        messages=[{"role": "user", "content": f"""Del siguiente texto de receta, extrae el nombre y TODOS los ingredientes.
+                    try:
+                        ext_response = claude_create(
+                            model="claude-sonnet-4-20250514", max_tokens=400,
+                            system="Responde SOLO JSON valido sin markdown.",
+                            messages=[{"role": "user", "content": f"""Del siguiente texto de receta, extrae el nombre y TODOS los ingredientes.
 Texto: {respuesta[:2000]}
 Responde:
 {{"name": "nombre de la receta",
