@@ -2824,12 +2824,12 @@ EVENTOS RECURRENTES:
         {"role": "user", "content": tool_results}
     ]
 
-    # ── Loop para rondas adicionales de tools (max 4 rondas extra) ────────
+    # ── Loop para rondas adicionales de tools (max 8 rondas extra) ────────
     reply = ""
-    for _round in range(4):
+    for _round in range(8):
         try:
             next_response = await claude_create(
-                model="claude-sonnet-4-20250514", max_tokens=600,
+                model="claude-sonnet-4-20250514", max_tokens=1500,
                 system=system, messages=messages, tools=tools
             )
         except Exception:
