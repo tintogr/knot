@@ -348,6 +348,7 @@ user_prefs: dict = {
     "daily_summary_hour": None,
     "daily_summary_minute": None,
     "greeting_name": None,
+    "activities": {},  # {"funcional": {"days": ["lunes","martes"], "time": "17:00"}}
     "resumen_extras": [],
     "resumen_nocturno_hour": 22,
     "resumen_nocturno_enabled": True,
@@ -1419,6 +1420,20 @@ async def query_calendar(days_ahead: int = 2, days_back: int = 0) -> str | None:
                 else:
                     lines.append(f"- {date_str} -- {e.get('summary', 'Evento')} (todo el dia){loc_str}")
         return "\n".join(lines)
+
+def get_activities_context() -> str:
+    """Retorna descripcion de las actividades recurrentes del usuario para el context de los agentes."""
+    acts = user_prefs.get("activities", {})
+    if not acts:
+        return ""
+    lines = []
+    for name, info in acts.items():
+        days = ", ".join(info.get("days", []))
+        time = info.get("time", "")
+        line = f"- {name.capitalize()}: {days}" + (f" a las {time}" if time else "")
+        lines.append(line)
+    return "Actividades recurrentes del usuario:\n" + "\n".join(lines)
+
 
 async def query_calendar_date(fecha: str) -> str | None:
     """Consulta eventos de un dia especifico (YYYY-MM-DD)."""
@@ -2622,9 +2637,12 @@ async def handle_evento_agent(phone: str, text: str, image_b64=None, image_type=
         }
     ]
 
+    activities_ctx = get_activities_context()
+    activities_section = f"\n\n{activities_ctx}" if activities_ctx else ""
+
     system = f"""Sos Matrics, asistente personal en WhatsApp. Hablas en espanol rioplatense, natural y conciso.
 Hoy: {hoy_str(now)}.
-Calendario de referencia: {semana_str(now)}.{last_ev_ctx}
+Calendario de referencia: {semana_str(now)}.{last_ev_ctx}{activities_section}
 REGLA CRITICA: cuando el usuario menciona un dia de la semana, usa EXACTAMENTE la fecha de la tabla de arriba. NO calcules fechas mentalmente. NUNCA.
 REGLA CRITICA 2: para calculos de fechas, dias de la semana, "que dia cae", "dentro de X dias", NO uses web_search. Usa SOLO la tabla de referencia.
 REGLA CRITICA 3: antes de nombrar un dia de la semana, verificalo en la tabla. Ejemplo: si vas a decir "sabado 12/04", buscá 12/04 en la tabla. Si la tabla dice "domingo 12/04", corregite. NUNCA asumas el nombre del dia sin verificar.
@@ -2680,9 +2698,10 @@ EVENTOS RECURRENTES:
     evento_creado = None
     eventos_creados_count = 0
     eventos_tocados = []  # todos los creados/editados con hora, para ofrecer recordatorios
+    high_impact_pending = None  # accion de alto impacto que requiere confirmacion
 
     async def _execute_evento_tool(t_name, t_input):
-        nonlocal evento_creado, eventos_creados_count
+        nonlocal evento_creado, eventos_creados_count, high_impact_pending
         t_result = ""
         if t_name == "crear_evento":
             data = dict(t_input)
@@ -2697,6 +2716,21 @@ EVENTOS RECURRENTES:
                 eventos_creados_count += 1
                 if data.get("time"):
                     eventos_tocados.append({"summary": data.get("summary", "Evento"), "date": data["date"], "time": data["time"]})
+                # Auto-guardar en perfil si es recurrente
+                if data.get("recurrence") and data.get("time"):
+                    name_key = data.get("summary", "").lower().strip()
+                    if name_key and name_key not in user_prefs.get("activities", {}):
+                        from_rrule = data["recurrence"]
+                        day_codes = []
+                        for part in from_rrule.split(";"):
+                            if "BYDAY=" in part:
+                                day_codes = part.split("BYDAY=")[1].strip().split(",")
+                        rrule_to_dia = {"MO":"lunes","TU":"martes","WE":"miercoles","TH":"jueves","FR":"viernes","SA":"sabado","SU":"domingo"}
+                        days_list = [rrule_to_dia.get(d.strip(), d) for d in day_codes]
+                        if not user_prefs.get("activities"):
+                            user_prefs["activities"] = {}
+                        user_prefs["activities"][name_key] = {"days": days_list, "time": data["time"]}
+                        await save_user_config(phone)
                 hora = f" a las {data['time']}" if data.get("time") else ""
                 try:
                     fecha = datetime.strptime(data["date"], "%Y-%m-%d").strftime("%d/%m/%Y")
@@ -2710,12 +2744,14 @@ EVENTOS RECURRENTES:
 
         elif t_name == "editar_evento":
             search_term = t_input.get("search_term")
-            target_event, err = await _find_calendar_event(search_term, phone, target_date=t_input.get("target_date"))
+            target_date_param = t_input.get("target_date")
+            target_event, err = await _find_calendar_event(search_term, phone, target_date=target_date_param)
             if not target_event:
                 t_result = err
             else:
                 event_id = target_event["id"]
                 event_name = target_event.get("summary", "Evento")
+                is_recurring = bool(target_event.get("recurrence") or target_event.get("recurringEventId"))
                 patch_body = {}
                 if t_input.get("new_title"):
                     patch_body["summary"] = t_input["new_title"]
@@ -2738,6 +2774,15 @@ EVENTOS RECURRENTES:
                         patch_body["end"] = {"date": t_input["new_date"]}
                 if not patch_body:
                     t_result = "No entendi que campo cambiar del evento."
+                elif is_recurring and not target_date_param:
+                    # Alto impacto: editar evento recurrente sin fecha especifica = afecta TODAS las instancias
+                    old_time = target_event.get("start", {}).get("dateTime", "")[:16][11:] if "dateTime" in target_event.get("start", {}) else ""
+                    new_time_val = t_input.get("new_time", "")
+                    descripcion = f"Cambiar *todos* los _{event_name}_ (evento recurrente)"
+                    if new_time_val and old_time:
+                        descripcion += f" de {old_time} a {new_time_val}"
+                    high_impact_pending = {"action": "edit_recurring", "event_id": event_id, "event_name": event_name, "patch_body": patch_body, "descripcion": descripcion}
+                    t_result = f"CONFIRMACION_REQUERIDA: {descripcion}"
                 else:
                     access_token = await get_gcal_access_token()
                     async with httpx.AsyncClient() as http:
@@ -2785,18 +2830,26 @@ EVENTOS RECURRENTES:
                     else:
                         events = [e for e in r.json()["items"] if "[TEMP]" not in (e.get("description") or "")]
                         to_delete = events if delete_all else events[:1]
-                        deleted = []
-                        for ev in to_delete:
-                            del_r = await http.delete(
-                                f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{ev['id']}",
-                                headers=headers
-                            )
-                            if del_r.status_code == 204:
-                                deleted.append(ev.get("summary", "Evento"))
-                        if deleted:
-                            t_result = "Eliminados: " + ", ".join(deleted) + "."
+                        # Chequeo de alto impacto: evento recurrente sin fecha especifica
+                        has_recurring = any(e.get("recurrence") or e.get("recurringEventId") for e in to_delete)
+                        if has_recurring and not target_date:
+                            ev_names = ", ".join(set(e.get("summary","Evento") for e in to_delete))
+                            descripcion = f"Eliminar *todas* las instancias de _{ev_names}_ (evento recurrente)"
+                            high_impact_pending = {"action": "delete_recurring", "events": [{"id": e["id"], "summary": e.get("summary","Evento")} for e in to_delete], "descripcion": descripcion}
+                            t_result = f"CONFIRMACION_REQUERIDA: {descripcion}"
                         else:
-                            t_result = "No pude eliminar los eventos."
+                            deleted = []
+                            for ev in to_delete:
+                                del_r = await http.delete(
+                                    f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{ev['id']}",
+                                    headers=headers
+                                )
+                                if del_r.status_code == 204:
+                                    deleted.append(ev.get("summary", "Evento"))
+                            if deleted:
+                                t_result = "Eliminados: " + ", ".join(deleted) + "."
+                            else:
+                                t_result = "No pude eliminar los eventos."
 
         elif t_name == "calcular_fecha":
             t_result = calcular_fecha_exacta(t_input.get("descripcion", ""))
@@ -2866,6 +2919,22 @@ EVENTOS RECURRENTES:
 
     if not reply:
         reply = "Listo, revise tu calendario. Necesitas algo mas?"
+
+    # Interceptar accion de alto impacto — pedir confirmacion antes de ejecutar
+    if high_impact_pending:
+        descripcion = high_impact_pending["descripcion"]
+        pending_state[phone] = {"type": "confirm_high_impact", **high_impact_pending}
+        await send_interactive_buttons(
+            phone,
+            f"⚠️ Esto va a {descripcion.lower()}.\n¿Confirmas?",
+            [
+                {"id": "high_impact_yes", "title": "Si, hacer"},
+                {"id": "high_impact_no",  "title": "No, cancelar"},
+            ]
+        )
+        add_to_history(phone, "user", text)
+        add_to_history(phone, "assistant", reply)
+        return None
 
     # Ofrecer recordatorio si hay eventos con hora (creados o editados)
     if eventos_tocados:
@@ -2959,6 +3028,12 @@ async def load_user_config(wa_number: str):
                     user_prefs["known_places"] = json.loads(known)
                 except Exception:
                     user_prefs["known_places"] = []
+            activities = get_txt("Activities")
+            if activities:
+                try:
+                    user_prefs["activities"] = json.loads(activities)
+                except Exception:
+                    user_prefs["activities"] = {}
             user_prefs["_config_page_id"] = page["id"]
 
             # Restaurar ubicacion si hay coordenadas guardadas y OwnTracks no mando nada aun
@@ -2990,6 +3065,7 @@ async def save_user_config(wa_number: str):
             "News Topics":       {"rich_text": [{"text": {"content": topics_str}}]},
             "Service Providers": {"rich_text": [{"text": {"content": json.dumps(user_prefs.get("service_providers", {}), ensure_ascii=False)}}]},
             "Known Places":      {"rich_text": [{"text": {"content": json.dumps(user_prefs.get("known_places", []), ensure_ascii=False)}}]},
+            "Activities":        {"rich_text": [{"text": {"content": json.dumps(user_prefs.get("activities", {}), ensure_ascii=False)}}]},
         }
         if user_prefs.get("daily_summary_hour") is not None:
             props["Resumen Hour"]   = {"number": user_prefs["daily_summary_hour"]}
@@ -3548,6 +3624,48 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
         except Exception:
             pass
         await send_message(phone, "No pude encontrar esa direccion. Intentá compartir la ubicacion directamente desde WhatsApp (📎 → Ubicacion).")
+        return True
+
+    if state_type == "confirm_high_impact":
+        action = state.get("action")
+        t = text.strip().lower()
+        confirmed = text.strip() == "high_impact_yes" or t in ["si", "dale", "ok", "yes", "confirmo", "hacelo"]
+        del pending_state[phone]
+        if not confirmed:
+            await send_message(phone, "Cancelado, no se hizo nada.")
+            return True
+        # Ejecutar la accion confirmada
+        if action == "edit_recurring":
+            event_id = state["event_id"]
+            patch_body = state["patch_body"]
+            event_name = state.get("event_name", "Evento")
+            access_token = await get_gcal_access_token()
+            async with httpx.AsyncClient() as http:
+                r = await http.patch(
+                    f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}",
+                    headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+                    params={"sendUpdates": "none"},
+                    json=patch_body
+                )
+            if r.status_code == 200:
+                await send_message(phone, f"Listo, actualice todos los _{event_name}_.")
+            else:
+                await send_message(phone, f"Error actualizando: {r.text[:100]}")
+        elif action == "delete_recurring":
+            access_token = await get_gcal_access_token()
+            deleted = []
+            async with httpx.AsyncClient() as http:
+                for ev in state.get("events", []):
+                    r = await http.delete(
+                        f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{ev['id']}",
+                        headers={"Authorization": f"Bearer {access_token}"}
+                    )
+                    if r.status_code == 204:
+                        deleted.append(ev.get("summary", "Evento"))
+            if deleted:
+                await send_message(phone, "Eliminados: " + ", ".join(set(deleted)) + ".")
+            else:
+                await send_message(phone, "No pude eliminar los eventos.")
         return True
 
     if state_type == "confirm_factura_paid":
