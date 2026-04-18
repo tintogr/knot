@@ -1420,6 +1420,44 @@ async def query_calendar(days_ahead: int = 2, days_back: int = 0) -> str | None:
                     lines.append(f"- {date_str} -- {e.get('summary', 'Evento')} (todo el dia){loc_str}")
         return "\n".join(lines)
 
+async def query_calendar_date(fecha: str) -> str | None:
+    """Consulta eventos de un dia especifico (YYYY-MM-DD)."""
+    access_token = await get_gcal_access_token()
+    if not access_token:
+        return None
+    time_min = f"{fecha}T00:00:00-03:00"
+    time_max = f"{fecha}T23:59:59-03:00"
+    async with httpx.AsyncClient() as http:
+        r = await http.get(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"timeMin": time_min, "timeMax": time_max, "singleEvents": "true",
+                    "orderBy": "startTime", "maxResults": "20"}
+        )
+        if r.status_code != 200:
+            return None
+        events = [e for e in r.json().get("items", []) if "[TEMP]" not in (e.get("description") or "")]
+        if not events:
+            return "No hay eventos ese dia."
+        lines = []
+        for e in events:
+            start = e.get("start", {})
+            loc_str = f" -- 📍{e.get('location', '')}" if e.get("location") else ""
+            if "dateTime" in start:
+                dt_str = start["dateTime"]
+                if dt_str.endswith("Z"):
+                    dt = datetime.strptime(dt_str[:16], "%Y-%m-%dT%H:%M") - timedelta(hours=3)
+                else:
+                    dt = datetime.strptime(dt_str[:16], "%Y-%m-%dT%H:%M")
+                dia = DIAS_SEMANA[dt.weekday()]
+                lines.append(f"- {dia} {dt.strftime('%d/%m')} {dt.strftime('%H:%M')} -- {e.get('summary', 'Evento')}{loc_str}")
+            else:
+                d = datetime.strptime(start.get("date", fecha), "%Y-%m-%d")
+                dia = DIAS_SEMANA[d.weekday()]
+                lines.append(f"- {dia} {d.strftime('%d/%m')} -- {e.get('summary', 'Evento')} (todo el dia){loc_str}")
+        return "\n".join(lines)
+
+
 async def infer_service_providers() -> dict:
     access_token = await get_gcal_access_token()
     if not access_token:
@@ -2559,13 +2597,25 @@ async def handle_evento_agent(phone: str, text: str, image_b64=None, image_type=
             }
         },
         {
+            "name": "calcular_fecha",
+            "description": "Calcula la fecha exacta YYYY-MM-DD a partir de descripciones como 'el proximo viernes', 'el segundo sabado de mayo', 'dentro de 10 dias'. Usar cuando la fecha no esta en la tabla de referencia del sistema.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "descripcion": {"type": "string", "description": "La descripcion de la fecha tal como la dijo el usuario."}
+                },
+                "required": ["descripcion"]
+            }
+        },
+        {
             "name": "consultar_calendario",
-            "description": "Consulta eventos del calendario para verificar antes de actuar.",
+            "description": "Consulta eventos del calendario. Usa 'fecha' para consultar un dia especifico (chequeo de duplicados). Usa dias_adelante para ver una ventana mas amplia.",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "dias_adelante": {"type": "integer", "description": "Default 7"},
-                    "dias_atras": {"type": "integer", "description": "Default 0"}
+                    "dias_atras": {"type": "integer", "description": "Default 0"},
+                    "fecha": {"type": ["string", "null"], "description": "YYYY-MM-DD para consultar solo ese dia. Preferir esto al chequear si ya existe un evento en una fecha especifica."}
                 },
                 "required": []
             }
@@ -2589,8 +2639,7 @@ Tu tarea: gestionar eventos del calendario del usuario.
 - Si el usuario manda una imagen (flyer, screenshot de turno, invitacion), extrae la info y crea el evento.
 IMPORTANTE: No inventes datos. Usa zona horaria Argentina (UTC-3).
 VERIFICACION OBLIGATORIA: despues de cada crear_evento o editar_evento, llama a consultar_calendario para verificar que el cambio quedo bien. Si no coincide con lo pedido, intentalo de nuevo. NUNCA confirmes un cambio sin verificarlo.
-ANTI-DUPLICADOS CRITICO: antes de crear cualquier evento, llama primero a consultar_calendario para ese dia. Si ya existe un evento con nombre similar en esa fecha (ej: "Funcional", "Entrenamiento Funcional"), usa editar_evento en lugar de crear_evento. NUNCA crees un evento si ya existe uno similar en la misma fecha.
-CUANDO EL USUARIO DICE "tengo X a las Y" O "movi X a las Y": NO asumas que es una correccion automaticamente. Primero llama a consultar_calendario para ese dia especifico. Si ya existe un evento con nombre similar en esa fecha → editar_evento con el nuevo horario. Si no existe → crear_evento. Nunca edites un evento de otro dia distinto al que menciono el usuario.
+ANTES DE CREAR O EDITAR: llama a consultar_calendario con el parametro "fecha" igual a la fecha exacta mencionada. Si ya existe un evento similar en ESE DIA especifico → editar_evento. Si no existe en ese dia → crear_evento. NUNCA edites un evento de un dia distinto al que menciono el usuario.
 MULTIPLES EVENTOS EN UN MENSAJE O IMAGEN: procesa uno a la vez. Para cada fecha: 1) consultar_calendario, 2) si existe evento similar → editar_evento, si no existe → crear_evento, 3) verificar. Luego el siguiente.
 VERIFICACION OBLIGATORIA: despues de cada crear_evento o editar_evento, llama a consultar_calendario para verificar que el cambio se refleja correctamente. Si el resultado no coincide con lo que se pidio, intentalo de nuevo. NUNCA confirmes un cambio sin verificarlo primero.
 EVENTOS RECURRENTES - instancias especificas: cuando el usuario dice "el de hoy", "el de mañana", "el del jueves", siempre usa target_date con la fecha exacta correspondiente de la tabla de referencia. Sin target_date, la API devuelve la proxima instancia futura que puede ser incorrecta.
@@ -2740,10 +2789,17 @@ EVENTOS RECURRENTES:
                         else:
                             t_result = "No pude eliminar los eventos."
 
+        elif t_name == "calcular_fecha":
+            t_result = calcular_fecha_exacta(t_input.get("descripcion", ""))
+
         elif t_name == "consultar_calendario":
-            dias = t_input.get("dias_adelante", 7)
-            dias_atras = t_input.get("dias_atras", 0)
-            t_result = await query_calendar(days_ahead=dias, days_back=dias_atras) or "No hay eventos."
+            fecha = t_input.get("fecha")
+            if fecha:
+                t_result = await query_calendar_date(fecha) or "No hay eventos ese dia."
+            else:
+                dias = t_input.get("dias_adelante", 7)
+                dias_atras = t_input.get("dias_atras", 0)
+                t_result = await query_calendar(days_ahead=dias, days_back=dias_atras) or "No hay eventos."
 
         return t_result
 
