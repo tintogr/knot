@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 import base64
 import time
 import httpx
@@ -17,9 +18,13 @@ async def startup_event():
     await load_user_config(MY_NUMBER)
     await load_geo_reminders()
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    await _ds.aclose()
+
 anthropic = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-def claude_create(**kwargs):
+async def claude_create(**kwargs):
     """Wrapper con reintentos automaticos para errores 529 (API sobrecargada)."""
     last_err = None
     for attempt in range(3):
@@ -28,7 +33,7 @@ def claude_create(**kwargs):
         except Exception as e:
             last_err = e
             if "529" in str(e) or "overloaded" in str(e).lower():
-                time.sleep(2 ** attempt)
+                await asyncio.sleep(2 ** attempt)
                 continue
             raise
     raise last_err
@@ -378,6 +383,12 @@ pending_state: dict[str, dict] = {}
 processed_message_ids: set[str] = set()
 MAX_PROCESSED_IDS = 500
 
+# ── Buffer de mensajes (agrupa mensajes relacionados en ventana de tiempo) ────
+message_buffer: dict[str, list] = {}
+buffer_timers: dict[str, asyncio.Task] = {}
+BUFFER_WINDOW_SECS = 6.0
+PROCESSING_INDICATOR_DELAY = 1.5
+
 # ── WhatsApp helpers ───────────────────────────────────────────────────────────
 async def send_message(to: str, text: str):
     async with httpx.AsyncClient() as http:
@@ -578,7 +589,7 @@ async def get_exchange_rate() -> float:
 
 # ── MODULO GASTOS ──────────────────────────────────────────────────────────────
 
-async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=None, exchange_rate=1000.0) -> str:
+async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=None, exchange_rate=1000.0, extra_images=None) -> str:
     now = now_argentina()
     tools = [{
         "name": "registrar_gasto",
@@ -604,8 +615,11 @@ async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=N
 
     content = []
     if image_b64:
-        content.append({"type": "image", "source": {"type": "base64", "media_type": image_type, "data": image_b64}})
-    content.append({"type": "text", "text": text or "(ver imagen adjunta)"})
+        content.append({"type": "image", "source": {"type": "base64", "media_type": image_type or "image/jpeg", "data": image_b64}})
+    for b64, itype in (extra_images or []):
+        content.append({"type": "image", "source": {"type": "base64", "media_type": itype or "image/jpeg", "data": b64}})
+    n_imgs = 1 + len(extra_images or []) if image_b64 else len(extra_images or [])
+    content.append({"type": "text", "text": text or (f"(ver {n_imgs} imágenes adjuntas)" if n_imgs > 1 else "(ver imagen adjunta)")})
 
     history = get_history(phone)
 
@@ -626,7 +640,7 @@ Si in_out es INGRESO -> categoria solo puede ser Sueldo o Venta.
 Clientes posibles: LBL, OPERA, ALPATACO, Juan Martin, Depto, Work, Santi Vales, Jorge, Barbara, Vanguardia, Alejo, Dinamo, Paula Diaz, Labti, PlanA, JGA, ATE.
 Emoji: elegi el mas especifico segun el contexto real."""
 
-    response = claude_create(
+    response = await claude_create(
         model="claude-sonnet-4-20250514", max_tokens=1000,
         system=system,
         messages=history + [{"role": "user", "content": content}],
@@ -683,7 +697,7 @@ Emoji: elegi el mas especifico segun el contexto real."""
         {"role": "assistant", "content": response.content},
         {"role": "user", "content": all_tool_results}
     ]
-    final_response = claude_create(
+    final_response = await claude_create(
         model="claude-sonnet-4-20250514", max_tokens=400,
         system=system,
         messages=messages,
@@ -780,7 +794,7 @@ async def check_and_apply_category(name: str, predicted_cats: list[str]) -> tupl
 
 async def corregir_gasto(text: str, phone: str = None) -> tuple[bool, str]:
     now = now_argentina()
-    response = claude_create(
+    response = await claude_create(
         model="claude-sonnet-4-20250514", max_tokens=200,
         system="Extrae que gasto corregir y que cambiar. Si el mensaje no menciona un nombre concreto, usa null en search_term. Responde SOLO JSON.",
         messages=[{"role": "user", "content": f"""Hoy: {now.strftime("%Y-%m-%d")}
@@ -860,7 +874,7 @@ Responde:
         return True, f"*{old_name}* corregido\n" + "\n".join(changes) + "\n\nActualizado en Notion"
 
 async def eliminar_gasto(text: str) -> tuple[bool, str]:
-    response = claude_create(
+    response = await claude_create(
         model="claude-sonnet-4-20250514", max_tokens=100,
         system="Extrae el nombre de la entrada de Notion a eliminar. Responde SOLO JSON.",
         messages=[{"role": "user", "content": f'Mensaje: {text}\nResponde: {{"search_term": "nombre de la entrada a eliminar"}}'}]
@@ -898,7 +912,7 @@ async def eliminar_gasto(text: str) -> tuple[bool, str]:
             return True, f"*{old_name}* eliminado de Notion"
 
 async def eliminar_shopping(text: str) -> tuple[bool, str]:
-    response = claude_create(
+    response = await claude_create(
         model="claude-sonnet-4-20250514", max_tokens=100,
         system="Extrae el nombre del item de la lista de compras a eliminar. Responde SOLO JSON.",
         messages=[{"role": "user", "content": f"Mensaje: {text}\nResponde: {{\"search_term\": \"nombre del item\"}}"}]
@@ -933,7 +947,7 @@ Valores para "ubicacion": Interior, Exterior, Balcon, Terraza
 Valores para "estado": Excelente, Bien, Regular, Necesita atencion"""
 
 async def parse_planta(text: str, exchange_rate: float) -> dict:
-    response = claude_create(
+    response = await claude_create(
         model="claude-sonnet-4-20250514", max_tokens=600,
         system=PLANTA_SYSTEM,
         messages=[{"role": "user", "content": f"""Hoy: {now_argentina().strftime("%Y-%m-%d")}. Dolar: ${exchange_rate:,.0f}
@@ -1009,7 +1023,7 @@ Mensaje: {text or "(ver imagen adjunta)"}
 Extrae la info del evento de la imagen si la hay, o del texto.
 Responde:
 {{"summary":"titulo","date":"YYYY-MM-DD","time":"HH:MM o null","duration_minutes":60,"location":"lugar o null","description":"desc o null","emoji":"emoji"}}"""})
-    response = claude_create(
+    response = await claude_create(
         model="claude-sonnet-4-20250514", max_tokens=300,
         system="Extrae info de un evento. Responde SOLO JSON valido sin markdown. Usa zona horaria Argentina (UTC-3).",
         messages=[{"role": "user", "content": user_content}]
@@ -1245,7 +1259,7 @@ def add_to_history(phone: str, role: str, content: str):
 # ── Inteligencia conversacional ────────────────────────────────────────────────
 async def needs_clarification(phone: str, text: str, context: str) -> str | None:
     try:
-        resp = claude_create(
+        resp = await claude_create(
             model="claude-sonnet-4-20250514", max_tokens=100,
             system=f"""Sos Matrics. Evalua si el mensaje del usuario es suficientemente claro para ejecutar la accion indicada.
 Contexto: {context}
@@ -1261,12 +1275,14 @@ Si hay ambiguedad -> responde solo la pregunta de aclaracion mas concisa y natur
         return None
 
 # ── CLASIFICADOR ───────────────────────────────────────────────────────────────
-async def classify(text: str, has_image: bool, image_b64: str = None, image_type: str = None, history: list = None) -> str:
+async def classify(text: str, has_image: bool, image_b64: str = None, image_type: str = None, history: list = None, extra_images: list = None) -> str:
     if has_image and not text.strip() and not image_b64:
         return "GASTO"
     content = []
     if image_b64:
         content.append({"type": "image", "source": {"type": "base64", "media_type": image_type or "image/jpeg", "data": image_b64}})
+    for b64, itype in (extra_images or []):
+        content.append({"type": "image", "source": {"type": "base64", "media_type": itype or "image/jpeg", "data": b64}})
     prompt_text = text if text.strip() else "(ver imagen adjunta)"
     history_ctx = ""
     if history and len(text.strip()) < 80:
@@ -1276,7 +1292,7 @@ async def classify(text: str, has_image: bool, image_b64: str = None, image_type
             for m in recent
         ) + "\n\nTeniendo en cuenta ese contexto, clasifica el siguiente mensaje:"
     content.append({"type": "text", "text": history_ctx + "\n" + prompt_text if history_ctx else prompt_text})
-    response = claude_create(
+    response = await claude_create(
         model="claude-sonnet-4-20250514", max_tokens=10,
         system="""Responde SOLO una palabra: GASTO, CORREGIR_GASTO, PLANTA, EVENTO, EDITAR_EVENTO, ELIMINAR_EVENTO, RECORDATORIO, SHOPPING, REUNION, CONFIGURAR o CHAT.
 
@@ -1423,7 +1439,7 @@ async def infer_service_providers() -> dict:
                     mail_summaries.append(f"De: {hdrs.get('From','')}\nAsunto: {hdrs.get('Subject','')}\nPreview: {snippet}")
             if not mail_summaries:
                 return {}
-            resp = claude_create(
+            resp = await claude_create(
                 model="claude-sonnet-4-20250514", max_tokens=300,
                 system="""Analiza estos mails de facturas/servicios e identifica que empresa provee que servicio.
 Responde SOLO JSON con este formato:
@@ -1540,7 +1556,7 @@ Mails:
                         })
                     except Exception:
                         pass
-            resp = claude_create(
+            resp = await claude_create(
                 model="claude-sonnet-4-20250514", max_tokens=400,
                 messages=[{"role": "user", "content": content}]
             )
@@ -2038,7 +2054,7 @@ CRITICO: si guardar_lugar_conocido devuelve error o dice "NO fue guardado", info
     messages = history + [{"role": "user", "content": text}]
 
     try:
-        response = claude_create(
+        response = await claude_create(
             model="claude-sonnet-4-20250514", max_tokens=1000,
             system=system,
             messages=messages,
@@ -2440,7 +2456,7 @@ CRITICO: si guardar_lugar_conocido devuelve error o dice "NO fue guardado", info
     reply = ""
     for _round in range(4):
         try:
-            next_response = claude_create(
+            next_response = await claude_create(
                 model="claude-sonnet-4-20250514", max_tokens=800,
                 system=system,
                 messages=messages,
@@ -2587,7 +2603,7 @@ EVENTOS RECURRENTES:
     messages = get_history(phone) + [{"role": "user", "content": content}]
 
     try:
-        response = claude_create(
+        response = await claude_create(
             model="claude-sonnet-4-20250514", max_tokens=1000,
             system=system, messages=messages, tools=tools
         )
@@ -2743,7 +2759,7 @@ EVENTOS RECURRENTES:
     reply = ""
     for _round in range(4):
         try:
-            next_response = claude_create(
+            next_response = await claude_create(
                 model="claude-sonnet-4-20250514", max_tokens=600,
                 system=system, messages=messages, tools=tools
             )
@@ -2907,7 +2923,7 @@ async def save_user_config(wa_number: str):
 
 # ── MODULO CONFIGURACION ──────────────────────────────────────────────────────
 async def handle_configurar(text: str) -> str:
-    response = claude_create(
+    response = await claude_create(
         model="claude-sonnet-4-20250514", max_tokens=200,
         system="Extrae que configuracion cambiar. Responde SOLO JSON.",
         messages=[{"role": "user", "content": f"""Mensaje: {text}
@@ -2998,7 +3014,7 @@ async def handle_reunion(text: str, image_b64: str = None, image_type: str = Non
     )
     content_parts.append({"type": "text", "text": prompt_reunion})
 
-    response = claude_create(
+    response = await claude_create(
         model="claude-sonnet-4-20250514", max_tokens=600,
         system="Extrae info de notas de reunion. Responde SOLO JSON valido sin markdown.",
         messages=[{"role": "user", "content": content_parts}]
@@ -3157,7 +3173,7 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
             await send_message(phone, "Dale, sin recordatorio.")
             return True
         try:
-            resp = claude_create(
+            resp = await claude_create(
                 model="claude-sonnet-4-20250514", max_tokens=100,
                 system="Extrae los recordatorios que pide el usuario. Convierte a minutos. Max 2. Responde SOLO JSON sin markdown: {\"minutes\": [30, 60]} o {\"minutes\": [15]}. Si dice 'la noche anterior' usa 720 (12hs). Si dice '1 dia antes' usa 1440. Si dice '2 horas' usa 120.",
                 messages=[{"role": "user", "content": text}]
@@ -3261,7 +3277,7 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
         del pending_state[phone]
         try:
             ing_names = [i.get("name", "") for i in ingredients]
-            corr_resp = claude_create(
+            corr_resp = await claude_create(
                 model="claude-sonnet-4-20250514", max_tokens=600,
                 system="Responde SOLO JSON valido sin markdown.",
                 messages=[{"role": "user", "content": f"""Receta: "{recipe_name}"
@@ -3460,7 +3476,7 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
         proposed = state.get("proposed", {})
         del pending_state[phone]
         try:
-            resp = claude_create(
+            resp = await claude_create(
                 model="claude-sonnet-4-20250514", max_tokens=200,
                 system="Aplica las correcciones del usuario al JSON de proveedores. Responde SOLO JSON.",
                 messages=[{"role": "user", "content": f"Proveedores actuales: {json.dumps(proposed, ensure_ascii=False)}\nCorrecciones: {text}\nResponde el JSON corregido."}]
@@ -3485,13 +3501,206 @@ async def verify_webhook(request: Request):
         return int(params.get("hub.challenge", 0))
     return {"error": "Verification failed"}
 
+async def _delayed_indicator(phone: str):
+    await asyncio.sleep(PROCESSING_INDICATOR_DELAY)
+    await send_message(phone, "⏳ Procesando...")
+
+
+async def _classify_group(items: list) -> list[list]:
+    """Decide si una lista de mensajes agrupados son sobre lo mismo o cosas distintas."""
+    descriptions = []
+    for i, item in enumerate(items):
+        if item["image_b64"] and not item["text"]:
+            desc = f"{i}: [imagen]"
+        elif item["image_b64"]:
+            desc = f'{i}: [imagen + "{item["text"]}"]'
+        else:
+            desc = f'{i}: "{item["text"]}"'
+        descriptions.append(desc)
+
+    try:
+        resp = await claude_create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=100,
+            system="Responde SOLO JSON valido sin markdown.",
+            messages=[{"role": "user", "content": f"""El usuario mando estos mensajes en rapida sucesion:
+
+{chr(10).join(descriptions)}
+
+Son sobre lo mismo o son cosas distintas? Indices base 0.
+- Si claramente relacionados: {{"r":"related"}}
+- Si claramente no relacionados: {{"r":"unrelated","groups":[[0,1],[2]]}}
+- Si hay duda: {{"r":"related"}}"""}]
+        )
+        raw = resp.content[0].text.strip()
+        if raw.startswith("```"):
+            raw = raw.strip("`").lstrip("json").strip()
+        result = json.loads(raw)
+        if result["r"] == "unrelated" and "groups" in result:
+            groups = []
+            for g in result["groups"]:
+                group = [items[i] for i in g if i < len(items)]
+                if group:
+                    groups.append(group)
+            return groups if groups else [items]
+    except Exception:
+        pass
+    return [items]
+
+
+def _merge_items(items: list) -> dict:
+    """Combina múltiples mensajes en uno solo para procesar como unidad."""
+    texts = [i["text"] for i in items if i["text"]]
+    images = [(i["image_b64"], i["image_type"]) for i in items if i["image_b64"]]
+    return {
+        "text": "\n".join(texts),
+        "image_b64": images[0][0] if images else None,
+        "image_type": images[0][1] if images else None,
+        "extra_images": images[1:] if len(images) > 1 else [],
+    }
+
+
+async def _flush_buffer(phone: str):
+    await asyncio.sleep(BUFFER_WINDOW_SECS)
+    items = message_buffer.pop(phone, [])
+    buffer_timers.pop(phone, None)
+    if not items:
+        return
+    if len(items) == 1:
+        await process_single_item(phone, items[0])
+        return
+    groups = await _classify_group(items)
+    for group in groups:
+        await process_single_item(phone, _merge_items(group))
+
+
+async def enqueue_message(message: dict):
+    phone = "54298154894334"
+    try:
+        msg_id = message.get("id", "")
+        if msg_id and msg_id in processed_message_ids:
+            return
+        if msg_id:
+            processed_message_ids.add(msg_id)
+            if len(processed_message_ids) > MAX_PROCESSED_IDS:
+                processed_message_ids.clear()
+
+        msg_type = message["type"]
+        text = ""
+        image_b64 = image_type = None
+
+        if msg_type == "text":
+            text = message["text"]["body"]
+        elif msg_type == "interactive":
+            btn = message.get("interactive", {}).get("button_reply", {})
+            text = btn.get("id", "")
+            if not text:
+                return
+            # Botones interactivos van directo, sin buffer
+            await process_single_item(phone, {"text": text, "image_b64": None, "image_type": None, "extra_images": []})
+            return
+        elif msg_type == "image":
+            media_id = message["image"]["id"]
+            text = message["image"].get("caption", "")
+            image_b64, image_type = await get_media_base64(media_id)
+        elif msg_type == "document":
+            media_id = message["document"]["id"]
+            text = message["document"].get("caption", "")
+            image_b64, image_type = await get_media_base64(media_id)
+        elif msg_type == "audio":
+            media_id = message["audio"]["id"]
+            await send_message(phone, "🎙️ Transcribiendo audio...")
+            transcripcion = await transcribe_audio(media_id)
+            if transcripcion:
+                text = transcripcion
+                await send_message(phone, f"_{transcripcion}_")
+            else:
+                await send_message(phone, "No pude transcribir el audio. Mandalo como texto.")
+                return
+        elif msg_type == "location":
+            loc = message.get("location", {})
+            lat = loc.get("latitude")
+            lon = loc.get("longitude")
+            if lat and lon:
+                current_location["lat"] = float(lat)
+                current_location["lon"] = float(lon)
+                current_location["updated_at"] = now_argentina()
+                current_location["source"] = "whatsapp"
+                current_location["velocity"] = 0
+                loc_name = await reverse_geocode(float(lat), float(lon))
+                if loc_name:
+                    current_location["location_name"] = loc_name
+                if phone in pending_state and pending_state[phone].get("type") == "geo_reminder_awaiting_location":
+                    state = pending_state.pop(phone)
+                    description = state.get("description", "Recordatorio")
+                    recurrent = state.get("recurrent", False)
+                    ok, _ = await create_geo_reminder(
+                        description=description,
+                        rtype="place",
+                        lat=float(lat),
+                        lon=float(lon),
+                        recurrent=recurrent,
+                    )
+                    place_label = loc_name or f"{lat:.4f}, {lon:.4f}"
+                    if ok:
+                        freq = "Cada vez que" if recurrent else "La proxima vez que"
+                        await send_message(phone, f"📍 *Geo-reminder guardado*\n_{description}_\nUbicacion: *{place_label}*\n{freq} estes cerca, te aviso.")
+                    else:
+                        await send_message(phone, "No pude guardar el geo-reminder.")
+                    return
+                place = is_at_known_place()
+                if place:
+                    await send_message(phone, f"📍 Ubicacion actualizada: *{place['name']}*")
+                else:
+                    await send_message(phone, "📍 Ubicacion actualizada. No reconozco este lugar, queres que lo guarde?")
+            return
+        else:
+            return
+
+        if msg_type == "text" and is_bot_message(text):
+            return
+
+        if text.strip().lower() in ["/start", "hola", "help", "ayuda"]:
+            await send_message(phone,
+                "*Hola! Soy Matrics*\n\n"
+                "*Gastos:* _\"Verduleria 3500\"_\n"
+                "*Plantas:* _\"Me compre un potus\"_\n"
+                "*Eventos:* _\"Manana a las 10 turno medico\"_\n"
+                "*Fotos:* manda cualquier factura\n"
+                "*Audios:* habla directo, te entiendo\n\n"
+                "Todo se guarda automaticamente"
+            )
+            return
+
+        item = {"text": text, "image_b64": image_b64, "image_type": image_type, "extra_images": []}
+
+        # pending_state activo: respuesta inmediata sin buffer
+        if phone in pending_state:
+            await process_single_item(phone, item)
+            return
+
+        if phone not in message_buffer:
+            message_buffer[phone] = []
+        message_buffer[phone].append(item)
+
+        if phone in buffer_timers and not buffer_timers[phone].done():
+            buffer_timers[phone].cancel()
+        buffer_timers[phone] = asyncio.create_task(_flush_buffer(phone))
+
+    except Exception as e:
+        try:
+            await send_message("54298154894334", f"Error: {str(e)[:200]}")
+        except Exception:
+            pass
+
+
 @app.post("/webhook")
 async def webhook(request: Request, background_tasks: BackgroundTasks):
     body = await request.json()
     try:
         messages = body["entry"][0]["changes"][0]["value"].get("messages")
         if messages:
-            background_tasks.add_task(process_message, messages[0])
+            background_tasks.add_task(enqueue_message, messages[0])
     except Exception:
         pass
     return {"ok": True}
@@ -3500,7 +3709,7 @@ async def handle_geo_reminder(phone: str, text: str) -> str:
     """Crea un geo-reminder a partir de lenguaje natural."""
     now = now_argentina()
     lat, lon = get_current_location()
-    response = claude_create(
+    response = await claude_create(
         model="claude-sonnet-4-20250514", max_tokens=300,
         system=f"""Extrae info de un recordatorio geolocalizacion. Hoy: {now.strftime("%Y-%m-%d")}.
 Responde SOLO JSON valido sin markdown:
@@ -3620,161 +3829,71 @@ def is_bot_message(text: str) -> bool:
     clean = text.lstrip(" *_~")
     return clean.startswith(BOT_PREFIXES)
 
-async def process_message(message: dict):
-    from_number = "54298154894334"
+async def process_single_item(phone: str, item: dict):
+    text = item.get("text", "")
+    image_b64 = item.get("image_b64")
+    image_type = item.get("image_type")
+    extra_images = item.get("extra_images", [])
+
+    indicator_task = asyncio.create_task(_delayed_indicator(phone))
     try:
-        msg_id = message.get("id", "")
-        if msg_id and msg_id in processed_message_ids:
-            return
-        if msg_id:
-            processed_message_ids.add(msg_id)
-            if len(processed_message_ids) > MAX_PROCESSED_IDS:
-                processed_message_ids.clear()
-
-        msg_type = message["type"]
-        text = ""
-        image_b64 = image_type = None
-
-        if msg_type == "text":
-            text = message["text"]["body"]
-        elif msg_type == "interactive":
-            btn = message.get("interactive", {}).get("button_reply", {})
-            text = btn.get("id", "")
-            if not text:
-                return
-        elif msg_type == "image":
-            media_id = message["image"]["id"]
-            text = message["image"].get("caption", "")
-            image_b64, image_type = await get_media_base64(media_id)
-        elif msg_type == "document":
-            media_id = message["document"]["id"]
-            text = message["document"].get("caption", "")
-            image_b64, image_type = await get_media_base64(media_id)
-        elif msg_type == "audio":
-            media_id = message["audio"]["id"]
-            await send_message(from_number, "🎙️ Transcribiendo audio...")
-            transcripcion = await transcribe_audio(media_id)
-            if transcripcion:
-                text = transcripcion
-                await send_message(from_number, f"_{transcripcion}_")
-            else:
-                await send_message(from_number, "No pude transcribir el audio. Mandalo como texto.")
-                return
-        elif msg_type == "location":
-            loc = message.get("location", {})
-            lat = loc.get("latitude")
-            lon = loc.get("longitude")
-            if lat and lon:
-                current_location["lat"] = float(lat)
-                current_location["lon"] = float(lon)
-                current_location["updated_at"] = now_argentina()
-                current_location["source"] = "whatsapp"
-                current_location["velocity"] = 0
-                loc_name = await reverse_geocode(float(lat), float(lon))
-                if loc_name:
-                    current_location["location_name"] = loc_name
-                # Si habia un geo_reminder esperando ubicacion, procesarlo
-                if from_number in pending_state and pending_state[from_number].get("type") == "geo_reminder_awaiting_location":
-                    state = pending_state.pop(from_number)
-                    description = state.get("description", "Recordatorio")
-                    recurrent = state.get("recurrent", False)
-                    ok, _ = await create_geo_reminder(
-                        description=description,
-                        rtype="place",
-                        lat=float(lat),
-                        lon=float(lon),
-                        recurrent=recurrent,
-                    )
-                    place_label = loc_name or f"{lat:.4f}, {lon:.4f}"
-                    if ok:
-                        freq = "Cada vez que" if recurrent else "La proxima vez que"
-                        await send_message(from_number, f"📍 *Geo-reminder guardado*\n_{description}_\nUbicacion: *{place_label}*\n{freq} estes cerca, te aviso.")
-                    else:
-                        await send_message(from_number, "No pude guardar el geo-reminder.")
-                    return
-                place = is_at_known_place()
-                if place:
-                    await send_message(from_number, f"📍 Ubicacion actualizada: *{place['name']}*")
-                else:
-                    await send_message(from_number, "📍 Ubicacion actualizada. No reconozco este lugar, queres que lo guarde?")
-            return
-        else:
-            return
-
-        if msg_type == "text" and is_bot_message(text):
-            return
-
-        if text.strip().lower() in ["/start", "hola", "help", "ayuda"]:
-            await send_message(from_number,
-                "*Hola! Soy Matrics*\n\n"
-                "*Gastos:* _\"Verduleria 3500\"_\n"
-                "*Plantas:* _\"Me compre un potus\"_\n"
-                "*Eventos:* _\"Manana a las 10 turno medico\"_\n"
-                "*Fotos:* manda cualquier factura\n"
-                "*Audios:* habla directo, te entiendo\n\n"
-                "Todo se guarda automaticamente"
-            )
-            return
-
-        await send_message(from_number, "Procesando...")
-
-        if from_number in pending_state:
-            handled = await handle_pending_state(from_number, text, pending_state.get(from_number, {}))
+        if phone in pending_state:
+            handled = await handle_pending_state(phone, text, pending_state.get(phone, {}))
             if handled:
                 return
 
         if user_prefs.get("_config_page_id") is None:
-            await load_user_config(from_number)
+            await load_user_config(phone)
 
-        tipo = await classify(text, image_b64 is not None, image_b64, image_type, history=get_history(from_number))
+        tipo = await classify(text, image_b64 is not None, image_b64, image_type, history=get_history(phone), extra_images=extra_images)
         exchange_rate = await get_exchange_rate()
 
         if tipo == "GASTO":
-            reply = await handle_gasto_agent(from_number, text, image_b64, image_type, exchange_rate)
-            await send_message(from_number, reply)
+            reply = await handle_gasto_agent(phone, text, image_b64, image_type, exchange_rate, extra_images=extra_images)
+            await send_message(phone, reply)
 
         elif tipo == "ELIMINAR_SHOPPING":
             success, msg = await eliminar_shopping(text)
-            await send_message(from_number, msg if success else msg)
+            await send_message(phone, msg if success else msg)
 
         elif tipo == "ELIMINAR_GASTO":
             success, msg = await eliminar_gasto(text)
-            await send_message(from_number, msg if success else msg)
+            await send_message(phone, msg if success else msg)
 
         elif tipo == "CORREGIR_GASTO":
-            success, msg = await corregir_gasto(text, phone=from_number)
-            await send_message(from_number, msg if success else msg)
+            success, msg = await corregir_gasto(text, phone=phone)
+            await send_message(phone, msg if success else msg)
 
         elif tipo == "PLANTA":
             parsed = await parse_planta(text, exchange_rate)
             success, error = await create_planta(parsed)
             if success:
-                await send_message(from_number, format_planta(parsed))
+                await send_message(phone, format_planta(parsed))
             else:
-                await send_message(from_number, f"Error guardando planta: {error[:200]}")
+                await send_message(phone, f"Error guardando planta: {error[:200]}")
 
         elif tipo in ("EVENTO", "EDITAR_EVENTO", "ELIMINAR_EVENTO"):
-            reply = await handle_evento_agent(from_number, text, image_b64, image_type)
+            reply = await handle_evento_agent(phone, text, image_b64, image_type)
             if reply:
-                await send_message(from_number, reply)
+                await send_message(phone, reply)
 
         elif tipo == "GEO_REMINDER":
-            respuesta = await handle_geo_reminder(from_number, text)
-            await send_message(from_number, respuesta)
+            respuesta = await handle_geo_reminder(phone, text)
+            await send_message(phone, respuesta)
 
         elif tipo == "RECORDATORIO":
             parsed = await parse_recordatorio(text)
             success, error = await create_recordatorio(parsed)
             if success:
-                await send_message(from_number, format_recordatorio(parsed))
+                await send_message(phone, format_recordatorio(parsed))
             else:
-                await send_message(from_number, f"No pude crear el recordatorio: {error[:100]}")
+                await send_message(phone, f"No pude crear el recordatorio: {error[:100]}")
 
         elif tipo == "SHOPPING":
             shopping_text = text
             if not shopping_text.strip() and image_b64:
                 try:
-                    extr = claude_create(
+                    extr = await claude_create(
                         model="claude-sonnet-4-20250514", max_tokens=1200,
                         system="Transcribi TODO el contenido de la imagen exactamente como esta escrito. Si es una receta: copia el titulo, luego todas las secciones tal como aparecen. No omitas nada.",
                         messages=[{"role": "user", "content": [
@@ -3785,27 +3904,27 @@ async def process_message(message: dict):
                     shopping_text = extr.content[0].text.strip()
                 except Exception:
                     shopping_text = ""
-            respuesta = await handle_shopping(shopping_text, phone=from_number)
+            respuesta = await handle_shopping(shopping_text, phone=phone)
             if respuesta is not None:
-                await send_message(from_number, respuesta)
-                add_to_history(from_number, "user", text)
-                add_to_history(from_number, "assistant", respuesta)
+                await send_message(phone, respuesta)
+                add_to_history(phone, "user", text)
+                add_to_history(phone, "assistant", respuesta)
 
         elif tipo == "CONFIGURAR":
-            respuesta = await handle_chat(from_number, text)
-            await send_message(from_number, respuesta)
+            respuesta = await handle_chat(phone, text)
+            await send_message(phone, respuesta)
 
         elif tipo == "REUNION":
             respuesta = await handle_reunion(text, image_b64, image_type)
-            await send_message(from_number, respuesta)
+            await send_message(phone, respuesta)
 
         elif tipo == "CHAT":
-            respuesta = await handle_chat(from_number, text)
+            respuesta = await handle_chat(phone, text)
             if respuesta:
-                await send_message(from_number, respuesta)
+                await send_message(phone, respuesta)
                 if "Ingredientes:" in respuesta and "Preparacion:" in respuesta:
                     try:
-                        ext_response = claude_create(
+                        ext_response = await claude_create(
                             model="claude-sonnet-4-20250514", max_tokens=400,
                             system="Responde SOLO JSON valido sin markdown.",
                             messages=[{"role": "user", "content": f"""Del siguiente texto de receta, extrae el nombre y TODOS los ingredientes.
@@ -3824,14 +3943,14 @@ Responde:
                     except Exception:
                         recipe_name_chat = "Receta"
                         enriched_chat = []
-                pending_state[from_number] = {
+                pending_state[phone] = {
                     "type": "recipe_save_confirm",
                     "recipe_name": recipe_name_chat,
                     "recipe_text": respuesta,
                     "ingredients": enriched_chat,
                 }
                 await send_interactive_buttons(
-                    from_number,
+                    phone,
                     f"Guardamos *{recipe_name_chat.capitalize()}* en tus Recetas de Notion?",
                     [
                         {"id": "recipe_save_yes", "title": "Si, guardar"},
@@ -3844,9 +3963,11 @@ Responde:
     except Exception as e:
         try:
             err_msg = f"{type(e).__name__}: {str(e)}"
-            await send_message(from_number, f"Error: {err_msg[:200]}")
+            await send_message(phone, f"Error: {err_msg[:200]}")
         except Exception:
             pass
+    finally:
+        indicator_task.cancel()
 
 @app.api_route("/", methods=["GET", "HEAD"])
 async def health():
@@ -3855,7 +3976,7 @@ async def health():
 # ── MODULO RECORDATORIOS ───────────────────────────────────────────────────────
 async def parse_recordatorio(text: str) -> dict:
     now = now_argentina()
-    response = claude_create(
+    response = await claude_create(
         model="claude-sonnet-4-20250514", max_tokens=300,
         system="Extrae info del recordatorio. Responde SOLO JSON valido sin markdown.",
         messages=[{"role": "user", "content": f"""Ahora son las {now.strftime("%Y-%m-%d %H:%M")} en Argentina.
@@ -4189,7 +4310,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
         # Narrativa del dia generada por Claude
         try:
             clima_ctx = f"Temp actual: {w['temp']}C (sensacion {w['sensacion']}C). Max: {w['hoy_max']}C, min: {w['hoy_min']}C. Condicion: {w['desc']}. Viento: {w['viento']}km/h. Lluvia esperada: {w['hoy_lluvia']}mm."
-            narrativa_resp = claude_create(
+            narrativa_resp = await claude_create(
                 model="claude-sonnet-4-20250514", max_tokens=60,
                 system="Genera UNA sola linea (max 15 palabras) describiendo como va a estar el dia para alguien en Neuquen. Tono casual rioplatense. Sin emoji. Sin repetir datos numericos. Ejemplos: 'Arrancas fresco pero al mediodia pega fuerte. Sin lluvia.' o 'Dia gris y ventoso, lleva campera.' o 'Lindo dia para estar afuera, fresco pero agradable.'",
                 messages=[{"role": "user", "content": clima_ctx}]
@@ -4261,7 +4382,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                 finances_context += "\n\nPor proveedor:\n" + "\n".join(_extra)
         filtered_gmail = gmail_summary
         try:
-            filter_resp = claude_create(
+            filter_resp = await claude_create(
                 model="claude-sonnet-4-20250514", max_tokens=400,
                 system="""Sos Matrics. Tenes facturas detectadas en Gmail y pagos de Servicios registrados en Notion (este mes y el anterior).
 
@@ -4298,7 +4419,7 @@ Mostrar SOLO las facturas sin pago registrado claro. Si todas estan pagas, respo
         # Auto-crear tasks en Notion para facturas pendientes
         if filtered_gmail and not _todo_pago:
             try:
-                tasks_resp = claude_create(
+                tasks_resp = await claude_create(
                     model="claude-sonnet-4-20250514", max_tokens=400,
                     system="Extraé SOLO las facturas que NO tienen pago registrado confirmado. Ignora cualquier factura que el texto marque como pagada, pagada exacta, o con pago registrado. Responde SOLO array JSON sin markdown. Si no hay facturas pendientes reales, responde array vacio [].",
                 messages=[{"role": "user", "content": f"""Texto de facturas:
@@ -4330,7 +4451,7 @@ Responde SOLO:
     if extras:
         try:
             extras_prompt = "\n".join(f"- {e}" for e in extras)
-            extra_resp = claude_create(
+            extra_resp = await claude_create(
                 model="claude-sonnet-4-20250514", max_tokens=300,
                 system=f"Sos Matrics. Hoy es {now.strftime('%A %d/%m/%Y')}. Genera contenido breve (max 3 lineas por item) para los siguientes extras del Resumen Diario. Usas espanol rioplatense, tono natural y calido.",
                 messages=[{"role": "user", "content": f"Genera estos extras para el resumen matutino:\n{extras_prompt}"}]
@@ -4391,7 +4512,7 @@ async def send_resumen_nocturno_regular(http, access_token: str, now: datetime):
         context += f"\nManana: {w['manana_min']}-{w['manana_max']}°C, {w['manana_desc']}."
 
     try:
-        resp = claude_create(
+        resp = await claude_create(
             model="claude-sonnet-4-20250514", max_tokens=300,
             system=f"""Sos Matrics. {context}
 Genera un resumen nocturno breve y natural en espanol rioplatense. Inclui:
@@ -4505,7 +4626,7 @@ async def send_resumen_nocturno_dominical(http, access_token: str, now: datetime
                 f"- {fd['date']}: {fd['min']}-{fd['max']}°C, {fd['desc']}, lluvia {fd['lluvia']}mm"
                 for fd in w["forecast_days"][1:7]
             )
-            clima_resp = claude_create(
+            clima_resp = await claude_create(
                 model="claude-sonnet-4-20250514", max_tokens=80,
                 system="Resume el pronostico semanal en 2 lineas maximas, lenguaje natural rioplatense, destacando lo mas relevante (frio, lluvia, calor).",
                 messages=[{"role": "user", "content": forecast_txt}]
@@ -4800,7 +4921,7 @@ async def receive_location(request: Request):
                         shop_detail += f"\n🕐 {shop['opening_hours']}"
                     shop_detail += f"\n🗺️ {shop['maps_link']}"
                     try:
-                        msg_resp = claude_create(
+                        msg_resp = await claude_create(
                             model="claude-sonnet-4-20250514", max_tokens=150,
                             system="Sos Matrics. Genera un mensaje breve y natural en espanol rioplatense avisando que el usuario esta cerca de una tienda donde puede comprar cosas que necesita. No seas pesado, se casual y util. Max 2 lineas de texto, sin repetir la info del comercio que ya se muestra aparte.",
                             messages=[{"role": "user", "content": f"El usuario esta cerca de {shop['name']} (a {shop['distance_m']}m). Necesita comprar: {items_str}."}]
@@ -4877,7 +4998,7 @@ async def get_ingredients_and_enrich(recipe_name: str, recipe_text: str = None) 
         context = f'Receta: "{recipe_name}"\nTexto completo de la receta:\n{recipe_text[:2000]}\n\nExtrae TODOS los ingredientes que aparecen en el texto de la receta.'
     else:
         context = f'Receta: "{recipe_name}"\n\nInferi los ingredientes tipicos/estandar completos de esta receta.'
-    response = claude_create(
+    response = await claude_create(
         model="claude-sonnet-4-20250514", max_tokens=800,
         system="Responde SOLO JSON valido sin markdown ni texto extra.",
         messages=[{"role": "user", "content": f"""{context}
@@ -4904,7 +5025,7 @@ Responde SOLO este array JSON:
 async def enrich_items_with_claude(items: list[str]) -> list[dict]:
     if not items:
         return []
-    response = claude_create(
+    response = await claude_create(
         model="claude-sonnet-4-20250514", max_tokens=1500,
         system="Enriquece una lista de items. Responde SOLO JSON valido sin markdown.",
         messages=[{"role": "user", "content": f"""Items: {json.dumps(items, ensure_ascii=False)}
@@ -4964,7 +5085,7 @@ def _parse_bold(text: str) -> list:
 async def save_recipe_to_notion(recipe_name: str, source: str = "Matrics", ingredient_names: list[str] = None, recipe_text: str = None) -> tuple[bool, str]:
     try:
         try:
-            props_response = claude_create(
+            props_response = await claude_create(
                 model="claude-sonnet-4-20250514", max_tokens=200,
                 system="Responde SOLO JSON valido sin markdown.",
                 messages=[{"role": "user", "content": f'''Receta: "{recipe_name}"
@@ -5047,7 +5168,7 @@ Responde SOLO este JSON:
 
             if recipe_text and page_id:
                 try:
-                    fmt_resp = claude_create(
+                    fmt_resp = await claude_create(
                         model="claude-sonnet-4-20250514", max_tokens=1500,
                         system="Formatea la siguiente receta para guardarla en Notion. Usa este formato:\n- Titulo de seccion como ## (Ingredientes, Procedimiento, Notas)\n- Listas con - para ingredientes y pasos numerados con 1. 2. 3.\n- **negrita** para cantidades importantes\n- Responde SOLO el texto formateado, sin comentarios adicionales.",
                         messages=[{"role": "user", "content": f"Receta: {recipe_name}\n\nTexto original:\n{recipe_text[:3000]}"}]
@@ -5097,7 +5218,7 @@ Responde SOLO este JSON:
 
 async def parse_shopping_intent(text: str) -> dict:
     safe_text = text.replace('"', "'").replace('\r', ' ').replace('\n', ' ')[:2000]
-    response = claude_create(
+    response = await claude_create(
         model="claude-sonnet-4-20250514", max_tokens=800,
         system="Analiza mensajes sobre lista de compras. Responde SOLO JSON valido sin markdown.",
         messages=[{"role": "user", "content": f"""Mensaje: {safe_text}
@@ -5223,7 +5344,7 @@ async def handle_shopping(text: str, phone: str = None) -> str:
                     )
                     if text and len(text) > 100:
                         try:
-                            proc_resp = claude_create(
+                            proc_resp = await claude_create(
                                 model="claude-sonnet-4-20250514", max_tokens=600,
                                 system="Extrae SOLO la seccion de preparacion/procedimiento de la receta. Sin titulo, sin lista de ingredientes. Solo los pasos de preparacion en texto limpio.",
                                 messages=[{"role": "user", "content": text[:2000]}]
