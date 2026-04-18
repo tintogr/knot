@@ -2633,7 +2633,7 @@ REGLA CRITICA DE FECHAS: antes de crear o editar cualquier evento cuya fecha ven
 Tu tarea: gestionar eventos del calendario del usuario.
 - Si el mensaje tiene titulo Y fecha claros -> usa crear_evento.
 - Si quiere modificar un evento -> usa editar_evento.
-- Si quiere borrar -> usa eliminar_evento.
+- Si quiere borrar -> usa eliminar_evento. SIEMPRE incluye target_date cuando el usuario menciona un dia especifico ("el lunes", "ya no voy el martes", "al final el jueves no"). Sin target_date vas a borrar el evento equivocado.
 - Si falta info esencial -> pregunta de forma natural y breve.
 - Podes consultar el calendario primero si necesitas verificar algo.
 - Si el usuario manda una imagen (flyer, screenshot de turno, invitacion), extrae la info y crea el evento.
@@ -2678,9 +2678,10 @@ EVENTOS RECURRENTES:
 
     # ── Ejecutar primera ronda de tools ───────────────────────────────────
     evento_creado = None
+    eventos_creados_count = 0
 
     async def _execute_evento_tool(t_name, t_input):
-        nonlocal evento_creado
+        nonlocal evento_creado, eventos_creados_count
         t_result = ""
         if t_name == "crear_evento":
             data = dict(t_input)
@@ -2692,6 +2693,7 @@ EVENTOS RECURRENTES:
             if guardado and event_id:
                 last_event_touched[phone] = {"event_id": event_id, "summary": data.get("summary", "Evento")}
                 evento_creado = {"data": data, "event_id": event_id}
+                eventos_creados_count += 1
                 hora = f" a las {data['time']}" if data.get("time") else ""
                 try:
                     fecha = datetime.strptime(data["date"], "%Y-%m-%d").strftime("%d/%m/%Y")
@@ -2858,7 +2860,7 @@ EVENTOS RECURRENTES:
     if not reply:
         reply = "Listo, revise tu calendario. Necesitas algo mas?"
 
-    if evento_creado and evento_creado["data"].get("time"):
+    if evento_creado and eventos_creados_count == 1 and evento_creado["data"].get("time"):
         data = evento_creado["data"]
         event_dt = f"{data['date']}T{data['time']}"
         is_recurring = bool(data.get("recurrence"))
@@ -3206,10 +3208,23 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
             "rem_15": 15, "rem_30": 30, "rem_60": 60,
             "rem_1d": 1440, "rem_no": None
         }
+        t = text.strip().lower()
         minutes = reminder_map.get(text.strip(), "unknown")
-        del pending_state[phone]
         if minutes == "unknown":
-            return False
+            # Parseo de lenguaje natural
+            if any(x in t for x in ["no ", "nah", "paso", "sin aviso", "no gracias"]) or t == "no":
+                minutes = None
+            elif "1 hora" in t or "una hora" in t or "60 min" in t:
+                minutes = 60
+            elif "30 min" in t or "media hora" in t:
+                minutes = 30
+            elif "15 min" in t or "quince" in t:
+                minutes = 15
+            elif "dia" in t or "día" in t or "noche" in t or "1440" in t:
+                minutes = 1440
+            else:
+                return False
+        del pending_state[phone]
         if minutes is None:
             await send_message(phone, "Sin recordatorio adicional")
             return True
