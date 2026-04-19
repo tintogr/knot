@@ -2390,29 +2390,12 @@ CRITICO: si guardar_lugar_conocido devuelve error o dice "NO fue guardado", info
             description = t_input.get("description", "")
             priority = t_input.get("priority")
             emoji = t_input.get("emoji", "📋")
-            proj_props = {
-                "Name": {"title": [{"text": {"content": proj_name}}]},
-                "Entry Type": {"select": {"name": entry_type}},
-                "Area": {"select": {"name": area}},
-                "Status": {"status": {"name": "Sin empezar"}},
-                "Source": {"select": {"name": "Matrics"}},
-                "Date": {"date": {"start": now.strftime("%Y-%m-%d")}},
-            }
-            if description:
-                proj_props["Description"] = {"rich_text": [{"text": {"content": description[:2000]}}]}
-            if priority in ["Alta", "Media", "Baja"]:
-                proj_props["Priority"] = {"select": {"name": priority}}
             try:
-                async with httpx.AsyncClient() as http_proj:
-                    r_proj = await http_proj.post(
-                        "https://api.notion.com/v1/pages",
-                        headers=notion_headers(),
-                        json={"parent": {"database_id": PROJECTS_DB_ID.replace("-", "")}, "icon": {"type": "emoji", "emoji": emoji}, "properties": proj_props}
-                    )
-                    if r_proj.status_code == 200:
-                        t_result = "Proyecto creado: " + emoji + " " + proj_name + " (" + entry_type + ", " + area + "). Guardado en Notion."
-                    else:
-                        t_result = "Error creando proyecto: " + r_proj.text[:100]
+                await _ds.create_project({
+                    "name": proj_name, "entry_type": entry_type, "area": area,
+                    "description": description, "priority": priority, "emoji": emoji,
+                })
+                t_result = "Proyecto creado: " + emoji + " " + proj_name + " (" + entry_type + ", " + area + "). Guardado en Notion."
             except Exception as e_proj:
                 t_result = "Error: " + str(e_proj)[:100]
         elif t_name == "editar_evento":
@@ -3609,17 +3592,13 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
             del pending_state[phone]
             return False
 
-        async with httpx.AsyncClient() as http:
-            r = await http.patch(
-                f"https://api.notion.com/v1/pages/{page_id}",
-                headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
-                json={"properties": {"Liters": {"number": litros}}}
-            )
-        del pending_state[phone]
-        if r.status_code == 200:
+        try:
+            await _ds.update_expense(page_id, {"liters": litros})
+            del pending_state[phone]
             await send_message(phone, f"*{name}* -- {litros}L registrados")
-        else:
-            await send_message(phone, f"No pude actualizar los litros: {r.text[:80]}")
+        except Exception as e:
+            del pending_state[phone]
+            await send_message(phone, f"No pude actualizar los litros: {str(e)[:80]}")
         return True
 
     if state_type == "snooze":
@@ -3885,16 +3864,11 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
         del pending_state[phone]
         if text.strip().lower() in ["si", "dale", "ok", "yes", "corregilo", "corrigelo"]:
             if page_id and new_value:
-                async with httpx.AsyncClient() as http:
-                    r = await http.patch(
-                        f"https://api.notion.com/v1/pages/{page_id}",
-                        headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
-                        json={"properties": {"Value (ars)": {"number": float(new_value)}}}
-                    )
-                if r.status_code == 200:
+                try:
+                    await _ds.update_expense(page_id, {"value_ars": float(new_value)})
                     await send_message(phone, f"*{name}* corregido: ${old_value:,.0f} -> *${new_value:,.0f} ARS*")
-                else:
-                    await send_message(phone, f"No pude corregir: {r.text[:100]}")
+                except Exception as e:
+                    await send_message(phone, f"No pude corregir: {str(e)[:100]}")
             else:
                 await send_message(phone, "No tengo suficiente info para hacer la correccion.")
         else:
@@ -4710,39 +4684,16 @@ async def cron_job():
 
 async def query_servicios_mes(month: str = None) -> str:
     """Devuelve entradas individuales de categoria Servicios del mes para cruzar con facturas."""
-    now = now_argentina()
     if not month:
-        month = now.strftime("%Y-%m")
-    year, mon = map(int, month.split("-"))
-    last_day = monthrange(year, mon)[1]
+        month = now_argentina().strftime("%Y-%m")
     try:
-        async with httpx.AsyncClient() as http:
-            r = await http.post(
-                f"https://api.notion.com/v1/databases/{NOTION_DB_ID.replace('-','')}/query",
-                headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
-                json={
-                    "filter": {"and": [
-                        {"property": "Date", "date": {"on_or_after": f"{month}-01"}},
-                        {"property": "Date", "date": {"on_or_before": f"{month}-{last_day:02d}"}},
-                        {"property": "Category", "multi_select": {"contains": "Servicios"}}
-                    ]},
-                    "sorts": [{"property": "Date", "direction": "descending"}],
-                    "page_size": 30
-                }
-            )
-            if r.status_code != 200:
-                return f"Error consultando Notion ({month})."
-            results = r.json().get("results", [])
-            if not results:
-                return f"Sin pagos de Servicios en {month}."
-            lines = [f"Pagos Servicios {month}:"]
-            for page in results:
-                props = page.get("properties", {})
-                name = props.get("Name", {}).get("title", [{}])[0].get("plain_text", "?") if props.get("Name", {}).get("title") else "?"
-                value = props.get("Value (ars)", {}).get("number", 0) or 0
-                date_val = (props.get("Date", {}).get("date") or {}).get("start", "")[:10]
-                lines.append(f"- {date_val} -- {name}: ${value:,.0f}")
-            return "\n".join(lines)
+        entries = await _ds.get_services_summary(month)
+        if not entries:
+            return f"Sin pagos de Servicios en {month}."
+        lines = [f"Pagos Servicios {month}:"]
+        for e in entries:
+            lines.append(f"- {str(e.date) if e.date else ''} -- {e.name}: ${e.value_ars:,.0f}")
+        return "\n".join(lines)
     except Exception as e:
         return f"Error: {str(e)[:80]}"
 
@@ -4750,102 +4701,17 @@ async def query_servicios_mes(month: str = None) -> str:
 async def get_pending_factura_tasks() -> list[dict]:
     """Retorna tasks de facturas pendientes (Finanzas + Matrics + no Listo)."""
     try:
-        async with httpx.AsyncClient() as http:
-            r = await http.post(
-                f"https://api.notion.com/v1/databases/{TASKS_DB_ID.replace('-','')}/query",
-                headers=notion_headers(),
-                json={
-                    "filter": {"and": [
-                        {"property": "Category", "select": {"equals": "Finanzas"}},
-                        {"property": "Status", "status": {"does_not_equal": "Listo"}},
-                        {"property": "Source", "select": {"equals": "Matrics"}}
-                    ]},
-                    "page_size": 20
-                }
-            )
-            if r.status_code != 200:
-                return []
-            tasks = []
-            for page in r.json().get("results", []):
-                props = page.get("properties", {})
-                name = props.get("Name", {}).get("title", [{}])[0].get("plain_text", "") if props.get("Name", {}).get("title") else ""
-                notes_rt = props.get("Notes", {}).get("rich_text", [])
-                notes = notes_rt[0]["plain_text"] if notes_rt else ""
-                due = (props.get("Due Date", {}).get("date") or {}).get("start", "")
-                meta = {}
-                try:
-                    meta = json.loads(notes)
-                except Exception:
-                    pass
-                tasks.append({
-                    "page_id": page["id"],
-                    "name": name,
-                    "due": due,
-                    "provider": meta.get("provider", ""),
-                    "amount": meta.get("amount", 0),
-                    "period": meta.get("period", ""),
-                })
-            return tasks
+        return await _ds.get_pending_factura_tasks()
     except Exception:
         return []
 
 async def create_factura_task(provider: str, amount: float, due_date: str, period: str) -> tuple[bool, str]:
     """Crea una task de factura pendiente. Evita duplicados por proveedor + periodo."""
-    existing = await get_pending_factura_tasks()
-    for t in existing:
-        prov_low = t["provider"].lower()
-        # Match por substring en cualquier direccion
-        prov_match = prov_low and (prov_low in provider.lower() or provider.lower() in prov_low)
-        # Match por palabras en comun (ej: "CALFIBRA" y "CALFIBRA Internet")
-        if not prov_match and prov_low:
-            prov_words = set(w for w in prov_low.split() if len(w) > 3)
-            new_words = set(w for w in provider.lower().split() if len(w) > 3)
-            prov_match = bool(prov_words & new_words)
-        if prov_match:
-            # Match periodo: ignorar idioma, comparar solo digitos (ej: "2026" y mes)
-            import re
-            existing_digits = set(re.findall(r'\d+', t.get("period", "")))
-            new_digits = set(re.findall(r'\d+', period or ""))
-            period_match = not period or not t.get("period") or bool(existing_digits & new_digits)
-            if period_match:
-                return False, "duplicate"
-    now = now_argentina()
-    meta = json.dumps({"provider": provider, "amount": amount, "period": period}, ensure_ascii=False)
-    props = {
-        "Name":     {"title": [{"text": {"content": f"💰 Pagar {provider} — {period}"}}]},
-        "Category": {"select": {"name": "Finanzas"}},
-        "Status":   {"status": {"name": "Sin empezar"}},
-        "Source":   {"select": {"name": "Matrics"}},
-        "Notes":    {"rich_text": [{"text": {"content": meta}}]},
-    }
-    if due_date:
-        try:
-            due_dt = datetime.strptime(due_date, "%Y-%m-%d")
-            props["Due Date"] = {"date": {"start": due_date}}
-            days_left = (due_dt.date() - now.date()).days
-            props["Priority"] = {"select": {"name": "Alta" if days_left <= 3 else "Media"}}
-        except Exception:
-            pass
-    async with httpx.AsyncClient() as http:
-        r = await http.post(
-            "https://api.notion.com/v1/pages",
-            headers=notion_headers(),
-            json={"parent": {"database_id": TASKS_DB_ID.replace("-", "")}, "properties": props}
-        )
-        return (True, r.json().get("id", "")) if r.status_code == 200 else (False, r.text[:100])
+    return await _ds.create_factura_task(provider, amount, due_date, period)
 
 async def mark_factura_task_paid(page_id: str) -> bool:
     """Marca una task de factura como Listo."""
-    try:
-        async with httpx.AsyncClient() as http:
-            r = await http.patch(
-                f"https://api.notion.com/v1/pages/{page_id}",
-                headers=notion_headers(),
-                json={"properties": {"Status": {"status": {"name": "Listo"}}}}
-            )
-            return r.status_code == 200
-    except Exception:
-        return False
+    return await _ds.mark_factura_task_paid(page_id)
 
 async def send_daily_summary(http, access_token: str, now: datetime):
     _hora = now.hour
@@ -5160,39 +5026,26 @@ async def send_resumen_nocturno_dominical(http, access_token: str, now: datetime
 
     # Finanzas de la semana (egresos)
     try:
-        lunes = (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
-        hoy = now.strftime("%Y-%m-%d")
-        async with httpx.AsyncClient() as http_fin:
-            r_fin = await http_fin.post(
-                f"https://api.notion.com/v1/databases/{NOTION_DB_ID.replace('-','')}/query",
-                headers=notion_headers(),
-                json={
-                    "filter": {"and": [
-                        {"property": "Date", "date": {"on_or_after": lunes}},
-                        {"property": "Date", "date": {"on_or_before": hoy}},
-                    ]},
-                    "page_size": 50
-                }
-            )
-            if r_fin.status_code == 200:
-                results = r_fin.json().get("results", [])
-                egresos = 0
-                por_cat = {}
-                for page in results:
-                    props = page.get("properties", {})
-                    in_out = (props.get("In - Out", {}).get("select") or {}).get("name", "")
-                    value = props.get("Value (ars)", {}).get("number", 0) or 0
-                    if "INGRESO" not in in_out:
-                        egresos += value
-                        for cat in [c["name"] for c in props.get("Category", {}).get("multi_select", [])]:
-                            por_cat[cat] = por_cat.get(cat, 0) + value
-                if egresos > 0:
-                    top = sorted(por_cat.items(), key=lambda x: x[1], reverse=True)[:3]
-                    top_str = " · ".join(f"{c} ${v:,.0f}" for c, v in top)
-                    lines.append(f"💰 *Esta semana gastaste:* ${egresos:,.0f}")
-                    if top_str:
-                        lines.append(f"_{top_str}_")
-                    lines.append("")
+        lunes_date = (now - timedelta(days=now.weekday())).date()
+        hoy_date = now.date()
+        week_entries = await _ds.query_expenses(QueryFilter(
+            date_range=DateRange(start=lunes_date, end=hoy_date),
+            limit=50,
+        ))
+        egresos = 0
+        por_cat: dict = {}
+        for e in week_entries:
+            if e.in_out != "INGRESO":
+                egresos += e.value_ars
+                for cat in (e.categories or []):
+                    por_cat[cat] = por_cat.get(cat, 0) + e.value_ars
+        if egresos > 0:
+            top = sorted(por_cat.items(), key=lambda x: x[1], reverse=True)[:3]
+            top_str = " · ".join(f"{c} ${v:,.0f}" for c, v in top)
+            lines.append(f"💰 *Esta semana gastaste:* ${egresos:,.0f}")
+            if top_str:
+                lines.append(f"_{top_str}_")
+            lines.append("")
     except Exception:
         pass
 
@@ -5253,85 +5106,41 @@ async def load_geo_reminders():
     """Carga geo-reminders activos de Notion a memoria."""
     global geo_reminders_cache
     try:
-        async with httpx.AsyncClient() as http:
-            r = await http.post(
-                f"https://api.notion.com/v1/databases/{GEO_REMINDERS_DB_ID.replace('-','')}/query",
-                headers=notion_headers(),
-                json={"filter": {"property": "Active", "checkbox": {"equals": True}}, "page_size": 50}
-            )
-            if r.status_code != 200:
-                return
-            reminders = []
-            for page in r.json().get("results", []):
-                props = page.get("properties", {})
-                name = props.get("Name", {}).get("title", [{}])[0].get("plain_text", "") if props.get("Name", {}).get("title") else ""
-                rtype = (props.get("Type", {}).get("select") or {}).get("name", "place")
-                shop_name_rt = props.get("Shop Name", {}).get("rich_text", [])
-                shop_name = shop_name_rt[0]["plain_text"] if shop_name_rt else ""
-                lat = props.get("Latitude", {}).get("number")
-                lon = props.get("Longitude", {}).get("number")
-                radius = props.get("Radius", {}).get("number") or 300
-                recurrent = props.get("Recurrent", {}).get("checkbox", False)
-                reminders.append({
-                    "page_id": page["id"],
-                    "name": name,
-                    "type": rtype,
-                    "shop_name": shop_name,
-                    "lat": lat,
-                    "lon": lon,
-                    "radius": radius,
-                    "recurrent": recurrent,
-                })
-            geo_reminders_cache = reminders
-            print(f"[GeoReminders] Cargados {len(reminders)} reminders activos")
+        items = await _ds.get_active_geo_reminders()
+        geo_reminders_cache = [
+            {
+                "page_id": r.id, "name": r.name, "type": r.reminder_type,
+                "shop_name": r.shop_name or "", "lat": r.lat, "lon": r.lon,
+                "radius": r.radius, "recurrent": r.recurrent,
+            }
+            for r in items
+        ]
+        print(f"[GeoReminders] Cargados {len(geo_reminders_cache)} reminders activos")
     except Exception as e:
         print(f"[GeoReminders] Error cargando: {e}")
 
 async def create_geo_reminder(description: str, rtype: str, lat: float = None, lon: float = None,
                                shop_name: str = None, radius: int = 300, recurrent: bool = False) -> tuple[bool, str]:
     """Crea un geo-reminder en Notion y lo agrega al cache en memoria."""
-    props = {
-        "Name":      {"title": [{"text": {"content": description}}]},
-        "Type":      {"select": {"name": rtype}},
-        "Active":    {"checkbox": True},
-        "Recurrent": {"checkbox": recurrent},
-        "Radius":    {"number": radius},
-    }
-    if lat is not None:
-        props["Latitude"] = {"number": lat}
-    if lon is not None:
-        props["Longitude"] = {"number": lon}
-    if shop_name:
-        props["Shop Name"] = {"rich_text": [{"text": {"content": shop_name}}]}
     try:
-        async with httpx.AsyncClient() as http:
-            r = await http.post(
-                "https://api.notion.com/v1/pages",
-                headers=notion_headers(),
-                json={"parent": {"database_id": GEO_REMINDERS_DB_ID.replace("-", "")}, "properties": props}
-            )
-            if r.status_code == 200:
-                page_id = r.json().get("id", "")
-                geo_reminders_cache.append({
-                    "page_id": page_id, "name": description, "type": rtype,
-                    "shop_name": shop_name or "", "lat": lat, "lon": lon,
-                    "radius": radius, "recurrent": recurrent,
-                })
-                return True, page_id
-            return False, r.text[:100]
+        item = await _ds.create_geo_reminder({
+            "name": description, "type": rtype, "lat": lat, "lon": lon,
+            "shop_name": shop_name, "radius": radius, "recurrent": recurrent,
+        })
+        geo_reminders_cache.append({
+            "page_id": item.id, "name": description, "type": rtype,
+            "shop_name": shop_name or "", "lat": lat, "lon": lon,
+            "radius": radius, "recurrent": recurrent,
+        })
+        return True, item.id
     except Exception as e:
         return False, str(e)[:100]
 
 async def deactivate_geo_reminder(page_id: str):
     """Desactiva un geo-reminder (one-time) despues de dispararse."""
+    global geo_reminders_cache
     try:
-        async with httpx.AsyncClient() as http:
-            await http.patch(
-                f"https://api.notion.com/v1/pages/{page_id}",
-                headers=notion_headers(),
-                json={"properties": {"Active": {"checkbox": False}}}
-            )
-        global geo_reminders_cache
+        await _ds.deactivate_geo_reminder(page_id)
         geo_reminders_cache = [r for r in geo_reminders_cache if r["page_id"] != page_id]
     except Exception:
         pass
@@ -5368,23 +5177,7 @@ _geo_reminders_in_range: set[str] = set()
 async def save_location_to_notion(lat: float, lon: float, loc_name: str = None):
     """Persiste la ubicacion en Notion Config para sobrevivir reinicios."""
     page_id = user_prefs.get("_config_page_id")
-    if not page_id:
-        return
-    try:
-        props = {
-            "Latitude":  {"number": lat},
-            "Longitude": {"number": lon},
-        }
-        if loc_name:
-            props["City"] = {"rich_text": [{"text": {"content": loc_name}}]}
-        async with httpx.AsyncClient(timeout=5) as http:
-            await http.patch(
-                f"https://api.notion.com/v1/pages/{page_id}",
-                headers=notion_headers(),
-                json={"properties": props}
-            )
-    except Exception:
-        pass
+    await _ds.save_location(page_id, lat, lon, loc_name)
 
 @app.post("/location")
 async def receive_location(request: Request):
@@ -5626,17 +5419,7 @@ Responde SOLO el array JSON."""}]
 
 async def search_recipe_in_notion(recipe_name: str) -> list[str] | None:
     try:
-        async with httpx.AsyncClient() as http:
-            r = await http.post(
-                f"https://api.notion.com/v1/databases/{RECIPES_DB_ID.replace('-','')}/query",
-                headers=notion_headers(),
-                json={"filter": {"property": "Name", "title": {"contains": recipe_name[:30]}}, "page_size": 1}
-            )
-            if r.status_code != 200 or not r.json().get("results"):
-                return None
-            page = r.json()["results"][0]
-            ingredientes = [i["name"] for i in page["properties"].get("Ingredientes", {}).get("multi_select", [])]
-            return ingredientes if ingredientes else None
+        return await _ds.get_recipe_ingredients(recipe_name)
     except Exception:
         return None
 
@@ -5701,83 +5484,58 @@ Responde SOLO este JSON:
                     except Exception as e:
                         return False, f"Error creando ingrediente '{ing_name}': {str(e)[:100]}"
 
-        props = {
-            "Name": {"title": [{"text": {"content": recipe_name.capitalize()}}]},
-            "Source": {"select": {"name": source}},
-        }
-        if meta.get("difficult") in ["Easy", "Moderate", "Hard"]:
-            props["Difficult "] = {"select": {"name": meta["difficult"]}}
-        if meta.get("type") and isinstance(meta["type"], list):
-            valid_types = [t for t in meta["type"] if t in ["Postre", "Cena", "Almuerzo", "Desayuno", "Snack", "Cosmetica"]]
-            if valid_types:
-                props["Type"] = {"multi_select": [{"name": t} for t in valid_types]}
-        if meta.get("coccion") in ["Horno", "Sarten", "Pochar", "Frizzer ", "Varias prep."]:
-            props["Coccion "] = {"select": {"name": meta["coccion"]}}
-        if meta.get("healthy") in ["Healthy", "Fatty", "ni healthy ni fatty"]:
-            props["😈 / 😇"] = {"select": {"name": meta["healthy"]}}
-        if relation_ids:
-            props["Ingredients"] = {"relation": relation_ids}
+        content_blocks = None
+        if recipe_text:
+            try:
+                fmt_resp = await claude_create(
+                    model="claude-sonnet-4-20250514", max_tokens=1500,
+                    system="Formatea la siguiente receta para guardarla en Notion. Usa este formato:\n- Titulo de seccion como ## (Ingredientes, Procedimiento, Notas)\n- Listas con - para ingredientes y pasos numerados con 1. 2. 3.\n- **negrita** para cantidades importantes\n- Responde SOLO el texto formateado, sin comentarios adicionales.",
+                    messages=[{"role": "user", "content": f"Receta: {recipe_name}\n\nTexto original:\n{recipe_text[:3000]}"}]
+                )
+                formatted = fmt_resp.content[0].text.strip()
+            except Exception:
+                formatted = recipe_text
 
-        async with httpx.AsyncClient() as http:
-            r = await http.post(
-                "https://api.notion.com/v1/pages",
-                headers=notion_headers(),
-                json={
-                    "parent": {"database_id": RECIPES_DB_ID.replace("-", "")},
-                    "icon": {"type": "emoji", "emoji": "🍽️"},
-                    "properties": props
-                }
-            )
-            if r.status_code not in [200, 201]:
-                return False, f"Error creando receta en Notion (status {r.status_code}): {r.text[:200]}"
+            content_blocks = []
+            for line in formatted.split("\n"):
+                line_stripped = line.strip()
+                if not line_stripped:
+                    continue
+                if line_stripped.startswith("## "):
+                    content_blocks.append({"object": "block", "type": "heading_2",
+                        "heading_2": {"rich_text": [{"type": "text", "text": {"content": line_stripped[3:]}}]}})
+                elif line_stripped.startswith("# "):
+                    content_blocks.append({"object": "block", "type": "heading_1",
+                        "heading_1": {"rich_text": [{"type": "text", "text": {"content": line_stripped[2:]}}]}})
+                elif line_stripped.startswith("- "):
+                    content = line_stripped[2:]
+                    rich = _parse_bold(content)
+                    content_blocks.append({"object": "block", "type": "bulleted_list_item",
+                        "bulleted_list_item": {"rich_text": rich}})
+                elif line_stripped[:2] in [f"{i}." for i in range(1, 30)] or (len(line_stripped) > 2 and line_stripped[0].isdigit() and line_stripped[1] == "."):
+                    content = line_stripped.split(".", 1)[-1].strip()
+                    rich = _parse_bold(content)
+                    content_blocks.append({"object": "block", "type": "numbered_list_item",
+                        "numbered_list_item": {"rich_text": rich}})
+                else:
+                    rich = _parse_bold(line_stripped)
+                    content_blocks.append({"object": "block", "type": "paragraph",
+                        "paragraph": {"rich_text": rich}})
+            if not content_blocks:
+                content_blocks = None
 
-            page_id = r.json().get("id", "")
-
-            if recipe_text and page_id:
-                try:
-                    fmt_resp = await claude_create(
-                        model="claude-sonnet-4-20250514", max_tokens=1500,
-                        system="Formatea la siguiente receta para guardarla en Notion. Usa este formato:\n- Titulo de seccion como ## (Ingredientes, Procedimiento, Notas)\n- Listas con - para ingredientes y pasos numerados con 1. 2. 3.\n- **negrita** para cantidades importantes\n- Responde SOLO el texto formateado, sin comentarios adicionales.",
-                        messages=[{"role": "user", "content": f"Receta: {recipe_name}\n\nTexto original:\n{recipe_text[:3000]}"}]
-                    )
-                    formatted = fmt_resp.content[0].text.strip()
-                except Exception:
-                    formatted = recipe_text
-
-                blocks = []
-                for line in formatted.split("\n"):
-                    line_stripped = line.strip()
-                    if not line_stripped:
-                        continue
-                    if line_stripped.startswith("## "):
-                        blocks.append({"object": "block", "type": "heading_2",
-                            "heading_2": {"rich_text": [{"type": "text", "text": {"content": line_stripped[3:]}}]}})
-                    elif line_stripped.startswith("# "):
-                        blocks.append({"object": "block", "type": "heading_1",
-                            "heading_1": {"rich_text": [{"type": "text", "text": {"content": line_stripped[2:]}}]}})
-                    elif line_stripped.startswith("- "):
-                        content = line_stripped[2:]
-                        rich = _parse_bold(content)
-                        blocks.append({"object": "block", "type": "bulleted_list_item",
-                            "bulleted_list_item": {"rich_text": rich}})
-                    elif line_stripped[:2] in [f"{i}." for i in range(1, 30)] or (len(line_stripped) > 2 and line_stripped[0].isdigit() and line_stripped[1] == "."):
-                        content = line_stripped.split(".", 1)[-1].strip()
-                        rich = _parse_bold(content)
-                        blocks.append({"object": "block", "type": "numbered_list_item",
-                            "numbered_list_item": {"rich_text": rich}})
-                    else:
-                        rich = _parse_bold(line_stripped)
-                        blocks.append({"object": "block", "type": "paragraph",
-                            "paragraph": {"rich_text": rich}})
-
-                if blocks:
-                    await http.patch(
-                        f"https://api.notion.com/v1/blocks/{page_id}/children",
-                        headers=notion_headers(),
-                        json={"children": blocks[:100]}
-                    )
-
-            return True, ""
+        await _ds.create_recipe(
+            data={
+                "name": recipe_name, "source": source,
+                "difficulty": meta.get("difficult"),
+                "type": meta.get("type"),
+                "cooking_method": meta.get("coccion"),
+                "healthy": meta.get("healthy"),
+            },
+            ingredient_relation_ids=[r["id"] for r in relation_ids],
+            content_blocks=content_blocks[:100] if content_blocks else None,
+        )
+        return True, ""
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
@@ -5894,48 +5652,24 @@ async def handle_shopping(text: str, phone: str = None) -> str:
                 recipe_note = f"No pude inferir los ingredientes para esa receta\n"
 
     if action == "list":
-        async with httpx.AsyncClient() as http:
-            r = await http.post(
-                f"https://api.notion.com/v1/databases/{SHOPPING_DB_ID}/query",
-                headers=notion_headers(),
-                json={"filter": {"property": "Stock", "checkbox": {"equals": False}},
-                      "sorts": [{"property": "Category", "direction": "ascending"}]}
-            )
-            if r.status_code != 200:
-                return f"No pude leer la lista: {r.text[:100]}"
-            results = r.json().get("results", [])
-            if not results:
-                return "No te falta nada! La lista esta vacia."
-            lines = ["*Tu lista de compras:*\n"]
-            for item in results:
-                name = item["properties"]["Name"]["title"][0]["plain_text"] if item["properties"]["Name"]["title"] else "?"
-                cat  = (item["properties"].get("Category", {}).get("select") or {}).get("name", "")
-                notes_rt = item["properties"].get("Notes", {}).get("rich_text", [])
-                notes = notes_rt[0]["plain_text"].strip() if notes_rt else ""
-                qty_str = f" _({notes})_" if notes else ""
-                lines.append(f"- {name}{qty_str}{f' _{cat}_' if cat else ''}")
-            return "\n".join(lines)
+        try:
+            items_list = await _ds.get_shopping_list(only_missing=True)
+        except Exception as e:
+            return f"No pude leer la lista: {str(e)[:100]}"
+        if not items_list:
+            return "No te falta nada! La lista esta vacia."
+        lines = ["*Tu lista de compras:*\n"]
+        for item in items_list:
+            qty_str = f" _({item.notes})_" if item.notes else ""
+            lines.append(f"- {item.name}{qty_str}{f' _{item.category}_' if item.category else ''}")
+        return "\n".join(lines)
 
     if not items or (len(items) == 1 and items[0].lower() in ["todo", "all", "todos", "everything"]):
         if action in ("in_stock", "out_of_stock"):
-            # Marcar TODOS los items pendientes
-            async with httpx.AsyncClient() as http:
-                r = await http.post(
-                    f"https://api.notion.com/v1/databases/{SHOPPING_DB_ID}/query",
-                    headers=notion_headers(),
-                    json={"filter": {"property": "Stock", "checkbox": {"equals": False}}, "page_size": 50}
-                )
-                if r.status_code == 200:
-                    results = r.json().get("results", [])
-                    import asyncio
-                    async def _patch_item(session, page_id):
-                        await session.patch(
-                            f"https://api.notion.com/v1/pages/{page_id}",
-                            headers=notion_headers(),
-                            json={"properties": {"Stock": {"checkbox": action == "in_stock"}}}
-                        )
-                    await asyncio.gather(*[_patch_item(http, item["id"]) for item in results])
-                    return f"Listo, {len(results)} items marcados como {'en stock' if action == 'in_stock' else 'faltantes'}."
+            pending = await _ds.get_shopping_list(only_missing=True)
+            in_stock_val = action == "in_stock"
+            await asyncio.gather(*[_ds.update_shopping_item(it.id, {"in_stock": in_stock_val}) for it in pending])
+            return f"Listo, {len(pending)} items marcados como {'en stock' if in_stock_val else 'faltantes'}."
         return "No entendi que producto queres actualizar."
 
     if action == "add":
