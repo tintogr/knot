@@ -1165,6 +1165,129 @@ class NotionDataStore:
         return await self._archive_page(project_id)
 
     # ══════════════════════════════════════════════════════════════════════
+    # HEALTH RECORDS
+    # ══════════════════════════════════════════════════════════════════════
+
+    async def create_health_record(self, data: dict) -> tuple[bool, str]:
+        """Create a health record. data keys: name, type, date, specialty, doctor, summary, key_values, notes"""
+        props = {
+            "Name": {"title": [{"text": {"content": data.get("name", "Registro de salud")}}]},
+        }
+        if data.get("type"):
+            props["Type"] = {"select": {"name": data["type"]}}
+        if data.get("date"):
+            props["Date"] = {"date": {"start": data["date"]}}
+        if data.get("specialty"):
+            props["Specialty"] = {"select": {"name": data["specialty"]}}
+        if data.get("doctor"):
+            props["Doctor"] = {"rich_text": [{"text": {"content": data["doctor"][:200]}}]}
+        if data.get("summary"):
+            props["Summary"] = {"rich_text": [{"text": {"content": data["summary"][:2000]}}]}
+        if data.get("key_values"):
+            kv = data["key_values"] if isinstance(data["key_values"], str) else json.dumps(data["key_values"], ensure_ascii=False)
+            props["Key Values"] = {"rich_text": [{"text": {"content": kv[:2000]}}]}
+        if data.get("notes"):
+            props["Notes"] = {"rich_text": [{"text": {"content": data["notes"][:2000]}}]}
+        try:
+            page = await self._create_page("health_records", props)
+            return True, page["id"]
+        except Exception as e:
+            return False, str(e)[:200]
+
+    async def query_health_records(self, type_filter: str = None, specialty_filter: str = None, limit: int = 5) -> list[dict]:
+        """Query health records. Returns dicts with id, name, type, date, specialty, doctor, summary, key_values, notes."""
+        filters = []
+        if type_filter:
+            filters.append({"property": "Type", "select": {"equals": type_filter}})
+        if specialty_filter:
+            filters.append({"property": "Specialty", "select": {"equals": specialty_filter}})
+        filter_obj = {"and": filters} if len(filters) > 1 else (filters[0] if filters else None)
+        pages = await self._query_db(
+            "health_records",
+            filter_obj=filter_obj,
+            sorts=[{"property": "Date", "direction": "descending"}],
+            page_size=limit,
+        )
+        results = []
+        for page in pages:
+            p = page.get("properties", {})
+            results.append({
+                "id": page["id"],
+                "name": _get_title(p),
+                "type": _get_select(p, "Type"),
+                "date": _get_date(p, "Date"),
+                "specialty": _get_select(p, "Specialty"),
+                "doctor": _get_text(p, "Doctor"),
+                "summary": _get_text(p, "Summary"),
+                "key_values": _get_text(p, "Key Values"),
+                "notes": _get_text(p, "Notes"),
+            })
+        return results
+
+    # ══════════════════════════════════════════════════════════════════════
+    # MEDICATIONS
+    # ══════════════════════════════════════════════════════════════════════
+
+    async def create_medication(self, data: dict) -> tuple[bool, str]:
+        """Create a medication entry. data keys: name, active, dose, frequency, prescribed_by, condition, start_date, end_date, notes"""
+        props = {
+            "Name": {"title": [{"text": {"content": data.get("name", "Medicación")}}]},
+            "Active": {"checkbox": data.get("active", True)},
+        }
+        for field, key in [("Dose", "dose"), ("Frequency", "frequency"),
+                            ("Prescribed By", "prescribed_by"), ("Condition", "condition"), ("Notes", "notes")]:
+            if data.get(key):
+                props[field] = {"rich_text": [{"text": {"content": str(data[key])[:500]}}]}
+        if data.get("start_date"):
+            props["Start Date"] = {"date": {"start": data["start_date"]}}
+        if data.get("end_date"):
+            props["End Date"] = {"date": {"start": data["end_date"]}}
+        try:
+            page = await self._create_page("medications", props)
+            return True, page["id"]
+        except Exception as e:
+            return False, str(e)[:200]
+
+    async def query_medications(self, only_active: bool = False) -> list[dict]:
+        """Query medications. Returns dicts with id, name, active, dose, frequency, etc."""
+        filter_obj = {"property": "Active", "checkbox": {"equals": True}} if only_active else None
+        pages = await self._query_db("medications", filter_obj=filter_obj, page_size=50)
+        results = []
+        for page in pages:
+            p = page.get("properties", {})
+            results.append({
+                "id": page["id"],
+                "name": _get_title(p),
+                "active": _get_checkbox(p, "Active"),
+                "dose": _get_text(p, "Dose"),
+                "frequency": _get_text(p, "Frequency"),
+                "prescribed_by": _get_text(p, "Prescribed By"),
+                "condition": _get_text(p, "Condition"),
+                "start_date": _get_date(p, "Start Date"),
+                "end_date": _get_date(p, "End Date"),
+                "notes": _get_text(p, "Notes"),
+            })
+        return results
+
+    async def update_medication(self, page_id: str, updates: dict) -> bool:
+        """Update a medication. Supported keys: active, dose, frequency, notes, end_date"""
+        props = {}
+        if "active" in updates and updates["active"] is not None:
+            props["Active"] = {"checkbox": updates["active"]}
+        for field, key in [("Dose", "dose"), ("Frequency", "frequency"), ("Notes", "notes")]:
+            if updates.get(key):
+                props[field] = {"rich_text": [{"text": {"content": updates[key]}}]}
+        if updates.get("end_date"):
+            props["End Date"] = {"date": {"start": updates["end_date"]}}
+        if not props:
+            return True
+        try:
+            await self._update_page(page_id, props)
+            return True
+        except Exception:
+            return False
+
+    # ══════════════════════════════════════════════════════════════════════
     # GEO-REMINDERS
     # ══════════════════════════════════════════════════════════════════════
 

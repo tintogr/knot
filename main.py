@@ -3214,27 +3214,13 @@ async def handle_reunion(text: str, image_b64: str = None, image_type: str = Non
         except Exception:
             pass
 
-    props = {
-        "Name": {"title": [{"text": {"content": nombre}}]},
-        "Source": {"select": {"name": "Matrics"}},
-    }
-    if con_quien:
-        props["With"] = {"rich_text": [{"text": {"content": con_quien}}]}
-    if notas:
-        props["Notes"] = {"rich_text": [{"text": {"content": notas[:2000]}}]}
-    if fecha:
-        props["Date"] = {"date": {"start": fecha}}
-    if cal_link:
-        props["Calendar Link"] = {"url": cal_link}
-
-    async with httpx.AsyncClient() as http:
-        r = await http.post(
-            "https://api.notion.com/v1/pages",
-            headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
-            json={"parent": {"database_id": MEETINGS_DB_ID}, "properties": props}
-        )
-        if r.status_code != 200:
-            return f"Error guardando la reunion: {r.text[:100]}"
+    try:
+        await _ds.create_meeting({
+            "name": nombre, "with_whom": con_quien, "date": fecha,
+            "notes": notas, "calendar_link": cal_link,
+        })
+    except Exception as e:
+        return f"Error guardando la reunion: {str(e)[:100]}"
 
     try:
         fecha_fmt = datetime.strptime(fecha, "%Y-%m-%d").strftime("%d/%m/%Y")
@@ -3251,133 +3237,23 @@ async def handle_reunion(text: str, image_b64: str = None, image_type: str = Non
 # ── MODULO SALUD ──────────────────────────────────────────────────────────────
 
 async def create_health_record(data: dict) -> tuple[bool, str]:
-    props = {
-        "Name": {"title": [{"text": {"content": data.get("name", "Registro de salud")}}]},
-    }
-    if data.get("type"):
-        props["Type"] = {"select": {"name": data["type"]}}
-    if data.get("date"):
-        props["Date"] = {"date": {"start": data["date"]}}
-    if data.get("specialty"):
-        props["Specialty"] = {"select": {"name": data["specialty"]}}
-    if data.get("doctor"):
-        props["Doctor"] = {"rich_text": [{"text": {"content": data["doctor"][:200]}}]}
-    if data.get("summary"):
-        props["Summary"] = {"rich_text": [{"text": {"content": data["summary"][:2000]}}]}
-    if data.get("key_values"):
-        kv = data["key_values"] if isinstance(data["key_values"], str) else json.dumps(data["key_values"], ensure_ascii=False)
-        props["Key Values"] = {"rich_text": [{"text": {"content": kv[:2000]}}]}
-    if data.get("notes"):
-        props["Notes"] = {"rich_text": [{"text": {"content": data["notes"][:2000]}}]}
-    async with httpx.AsyncClient() as http:
-        r = await http.post(
-            "https://api.notion.com/v1/pages",
-            headers=notion_headers(),
-            json={"parent": {"database_id": HEALTH_RECORDS_DB_ID}, "properties": props}
-        )
-        return (True, r.json()["id"]) if r.status_code in (200, 201) else (False, r.text[:200])
+    return await _ds.create_health_record(data)
 
 
 async def query_health_records(type_filter: str = None, specialty_filter: str = None, limit: int = 5) -> list[dict]:
-    filters = []
-    if type_filter:
-        filters.append({"property": "Type", "select": {"equals": type_filter}})
-    if specialty_filter:
-        filters.append({"property": "Specialty", "select": {"equals": specialty_filter}})
-    body = {
-        "page_size": limit,
-        "sorts": [{"property": "Date", "direction": "descending"}],
-    }
-    if len(filters) > 1:
-        body["filter"] = {"and": filters}
-    elif filters:
-        body["filter"] = filters[0]
-    async with httpx.AsyncClient() as http:
-        r = await http.post(
-            f"https://api.notion.com/v1/databases/{HEALTH_RECORDS_DB_ID}/query",
-            headers=notion_headers(), json=body
-        )
-        if r.status_code != 200:
-            return []
-        results = []
-        for page in r.json().get("results", []):
-            p = page.get("properties", {})
-            def gtxt(k): rt = p.get(k, {}).get("rich_text", []); return rt[0]["plain_text"] if rt else ""
-            def gsel(k): s = p.get(k, {}).get("select"); return s["name"] if s else ""
-            def gdate(k): d = p.get(k, {}).get("date"); return d["start"][:10] if d and d.get("start") else ""
-            def gtitle(): t = p.get("Name", {}).get("title", []); return t[0]["plain_text"] if t else ""
-            results.append({
-                "id": page["id"], "name": gtitle(), "type": gsel("Type"),
-                "date": gdate("Date"), "specialty": gsel("Specialty"),
-                "doctor": gtxt("Doctor"), "summary": gtxt("Summary"),
-                "key_values": gtxt("Key Values"), "notes": gtxt("Notes"),
-            })
-        return results
+    return await _ds.query_health_records(type_filter, specialty_filter, limit)
 
 
 async def create_medication(data: dict) -> tuple[bool, str]:
-    props = {
-        "Name": {"title": [{"text": {"content": data.get("name", "Medicación")}}]},
-        "Active": {"checkbox": data.get("active", True)},
-    }
-    for field, key in [("Dose","dose"),("Frequency","frequency"),("Prescribed By","prescribed_by"),("Condition","condition"),("Notes","notes")]:
-        if data.get(key):
-            props[field] = {"rich_text": [{"text": {"content": str(data[key])[:500]}}]}
-    if data.get("start_date"):
-        props["Start Date"] = {"date": {"start": data["start_date"]}}
-    if data.get("end_date"):
-        props["End Date"] = {"date": {"start": data["end_date"]}}
-    async with httpx.AsyncClient() as http:
-        r = await http.post(
-            "https://api.notion.com/v1/pages",
-            headers=notion_headers(),
-            json={"parent": {"database_id": MEDICATIONS_DB_ID}, "properties": props}
-        )
-        return (True, r.json()["id"]) if r.status_code in (200, 201) else (False, r.text[:200])
+    return await _ds.create_medication(data)
 
 
 async def query_medications(only_active: bool = False) -> list[dict]:
-    body: dict = {"page_size": 50}
-    if only_active:
-        body["filter"] = {"property": "Active", "checkbox": {"equals": True}}
-    async with httpx.AsyncClient() as http:
-        r = await http.post(
-            f"https://api.notion.com/v1/databases/{MEDICATIONS_DB_ID}/query",
-            headers=notion_headers(), json=body
-        )
-        if r.status_code != 200:
-            return []
-        results = []
-        for page in r.json().get("results", []):
-            p = page.get("properties", {})
-            def gtxt(k): rt = p.get(k, {}).get("rich_text", []); return rt[0]["plain_text"] if rt else ""
-            def gdate(k): d = p.get(k, {}).get("date"); return d["start"][:10] if d and d.get("start") else ""
-            def gtitle(): t = p.get("Name", {}).get("title", []); return t[0]["plain_text"] if t else ""
-            results.append({
-                "id": page["id"], "name": gtitle(),
-                "active": p.get("Active", {}).get("checkbox", False),
-                "dose": gtxt("Dose"), "frequency": gtxt("Frequency"),
-                "prescribed_by": gtxt("Prescribed By"), "condition": gtxt("Condition"),
-                "start_date": gdate("Start Date"), "end_date": gdate("End Date"),
-                "notes": gtxt("Notes"),
-            })
-        return results
+    return await _ds.query_medications(only_active)
 
 
 async def update_medication(page_id: str, updates: dict) -> bool:
-    props = {}
-    if "active" in updates and updates["active"] is not None:
-        props["Active"] = {"checkbox": updates["active"]}
-    for field, key in [("Dose","dose"),("Frequency","frequency"),("Notes","notes")]:
-        if updates.get(key):
-            props[field] = {"rich_text": [{"text": {"content": updates[key]}}]}
-    if updates.get("end_date"):
-        props["End Date"] = {"date": {"start": updates["end_date"]}}
-    if not props:
-        return True
-    async with httpx.AsyncClient() as http:
-        r = await http.patch(f"https://api.notion.com/v1/pages/{page_id}", headers=notion_headers(), json={"properties": props})
-        return r.status_code == 200
+    return await _ds.update_medication(page_id, updates)
 
 
 async def handle_salud_agent(phone: str, text: str, image_b64: str = None, image_type: str = None) -> str:
