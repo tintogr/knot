@@ -361,6 +361,10 @@ user_prefs: dict = {
         "dieta": "",
         "supermercado": "",
         "gastos": "",
+        "salud": "",       # Finances Salud/Salud Mental + calendar citas médicas
+        "social": "",      # Meetings DB + Finances Salida/Birra
+        "hogar": "",       # Finances Depto + Plants DB
+        "productividad": "",  # Tasks + Projects DBs
     },
     "purchase_counts": {},  # {"leche con lactosa": 4, ...} — cuantas veces se compro cada item
 }
@@ -692,10 +696,15 @@ Emoji: elegi el mas especifico segun el contexto real."""
             if cat_note:
                 tr += f" {cat_note}"
             created_entries.append((result_i, data, True))
-            asyncio.create_task(update_domain_profile_bg(
-                "gastos",
-                f"Registró: {data['name']}, ${data['value_ars']:,.0f} ARS, categoría: {', '.join(data['categoria'])}, fecha: {data['date']}"
-            ))
+            cats = data.get("categoria", [])
+            event_desc = f"Registró: {data['name']}, ${data['value_ars']:,.0f} ARS, categoría: {', '.join(cats)}, fecha: {data['date']}"
+            asyncio.create_task(update_domain_profile_bg("gastos", event_desc))
+            if any(c in cats for c in ("Salud", "Salud Mental")):
+                asyncio.create_task(update_domain_profile_bg("salud", event_desc))
+            if any(c in cats for c in ("Salida", "Birra", "Ocio", "Viajes")):
+                asyncio.create_task(update_domain_profile_bg("social", event_desc))
+            if any(c in cats for c in ("Depto", "Plantas")):
+                asyncio.create_task(update_domain_profile_bg("hogar", event_desc))
         else:
             tr = f"Error al guardar en Notion: {result_i[:200]}"
             created_entries.append((None, data, False))
@@ -988,6 +997,10 @@ async def create_planta(data: dict) -> tuple[bool, str]:
             "notes":         data.get("notas"),
             "emoji":         data.get("emoji"),
         })
+        asyncio.create_task(update_domain_profile_bg(
+            "hogar",
+            f"Nueva planta: {data.get('name')}, especie: {data.get('especie') or 'desconocida'}, ubicación: {data.get('ubicacion') or '-'}"
+        ))
         return True, ""
     except Exception as e:
         return False, str(e)
@@ -1459,9 +1472,13 @@ async def save_domain_profile_direct(domain: str, text: str):
         return
     field_map = {
         "actividad_fisica": "Profile Actividad Fisica",
-        "dieta": "Profile Dieta",
-        "supermercado": "Profile Supermercado",
-        "gastos": "Profile Gastos",
+        "dieta":            "Profile Dieta",
+        "supermercado":     "Profile Supermercado",
+        "gastos":           "Profile Gastos",
+        "salud":            "Profile Salud",
+        "social":           "Profile Social",
+        "hogar":            "Profile Hogar",
+        "productividad":    "Profile Productividad",
     }
     notion_field = field_map.get(domain)
     if not notion_field:
@@ -2824,6 +2841,10 @@ EVENTOS RECURRENTES:
                             user_prefs["activities"] = {}
                         user_prefs["activities"][name_key] = {"days": days_list, "time": data["time"]}
                         await save_user_config(phone)
+                asyncio.create_task(update_domain_profile_bg(
+                    "actividad_fisica",
+                    f"Evento creado: '{data.get('summary', '')}', fecha: {data.get('date', '')}, hora: {data.get('time', '')}{', recurrente' if data.get('recurrence') else ''}"
+                ))
                 hora = f" a las {data['time']}" if data.get("time") else ""
                 try:
                     fecha = datetime.strptime(data["date"], "%Y-%m-%d").strftime("%d/%m/%Y")
@@ -3133,6 +3154,10 @@ async def load_user_config(wa_number: str):
                 ("dieta",            "Profile Dieta"),
                 ("supermercado",     "Profile Supermercado"),
                 ("gastos",           "Profile Gastos"),
+                ("salud",            "Profile Salud"),
+                ("social",           "Profile Social"),
+                ("hogar",            "Profile Hogar"),
+                ("productividad",    "Profile Productividad"),
             ]:
                 val = get_txt(field)
                 if val:
@@ -3181,6 +3206,10 @@ async def save_user_config(wa_number: str):
             "Profile Dieta":            {"rich_text": [{"text": {"content": user_prefs.get("domain_profiles", {}).get("dieta", "")[:2000]}}]},
             "Profile Supermercado":     {"rich_text": [{"text": {"content": user_prefs.get("domain_profiles", {}).get("supermercado", "")[:2000]}}]},
             "Profile Gastos":           {"rich_text": [{"text": {"content": user_prefs.get("domain_profiles", {}).get("gastos", "")[:2000]}}]},
+            "Profile Salud":            {"rich_text": [{"text": {"content": user_prefs.get("domain_profiles", {}).get("salud", "")[:2000]}}]},
+            "Profile Social":           {"rich_text": [{"text": {"content": user_prefs.get("domain_profiles", {}).get("social", "")[:2000]}}]},
+            "Profile Hogar":            {"rich_text": [{"text": {"content": user_prefs.get("domain_profiles", {}).get("hogar", "")[:2000]}}]},
+            "Profile Productividad":    {"rich_text": [{"text": {"content": user_prefs.get("domain_profiles", {}).get("productividad", "")[:2000]}}]},
             "Purchase Counts":          {"rich_text": [{"text": {"content": json.dumps(user_prefs.get("purchase_counts", {}), ensure_ascii=False)[:2000]}}]},
         }
         if user_prefs.get("daily_summary_hour") is not None:
@@ -3357,6 +3386,10 @@ async def handle_reunion(text: str, image_b64: str = None, image_type: str = Non
         fecha_fmt = fecha
     con_str = f" with {con_quien}" if con_quien else ""
     cal_str = f"\nVinculada al evento de Calendar" if cal_link else ""
+    asyncio.create_task(update_domain_profile_bg(
+        "social",
+        f"Reunión guardada: '{nombre}'{f', con {con_quien}' if con_quien else ''}, fecha: {fecha}"
+    ))
     return f"*{nombre}* guardada en Meetings{cal_str}\n{fecha_fmt}{con_str}\n\nNotas guardadas en Notion"
 
 # ── PENDING STATE HANDLER ──────────────────────────────────────────────────────
