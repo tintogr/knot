@@ -47,22 +47,26 @@ MEETINGS_DB_ID = os.environ.get("NOTION_MEETINGS_DB_ID", "4ad838f5-3c0e-4605-885
 TASKS_DB_ID         = os.environ.get("NOTION_TASKS_DB_ID", "90b44158-7916-4837-94de-129dde448fc4")
 GEO_REMINDERS_DB_ID = os.environ.get("NOTION_GEO_REMINDERS_DB_ID", "5fe7a531722843a5af93de1c54a14e02")
 CONFIG_DB_ID   = os.environ.get("NOTION_CONFIG_DB_ID", "2f81017d-a20c-426a-aada-88fcf0743338")
-PROJECTS_DB_ID = os.environ.get("NOTION_PROJECTS_DB_ID", "0924aff739194c5b8438d03ed82e9e21")
+PROJECTS_DB_ID       = os.environ.get("NOTION_PROJECTS_DB_ID",       "0924aff739194c5b8438d03ed82e9e21")
+HEALTH_RECORDS_DB_ID = os.environ.get("NOTION_HEALTH_RECORDS_DB_ID", "5f9cde7223f346e48a22f54dbc0836f6")
+MEDICATIONS_DB_ID    = os.environ.get("NOTION_MEDICATIONS_DB_ID",    "d16f6826e18d4e4c9e6768a9ebd07507")
 # ── DataStore (Fase 1 refactor) ───────────────────────────────────────────────
 from notion_datastore import NotionDataStore
 
 _ds = NotionDataStore(
     token=NOTION_TOKEN,
     db_ids={
-        "finances":      NOTION_DB_ID,
-        "shopping":      SHOPPING_DB_ID,
-        "recipes":       RECIPES_DB_ID,
-        "plants":        PLANTS_DB_ID,
-        "meetings":      MEETINGS_DB_ID,
-        "tasks":         TASKS_DB_ID,
-        "config":        CONFIG_DB_ID,
-        "geo_reminders": GEO_REMINDERS_DB_ID,
-        "projects":      PROJECTS_DB_ID,
+        "finances":       NOTION_DB_ID,
+        "shopping":       SHOPPING_DB_ID,
+        "recipes":        RECIPES_DB_ID,
+        "plants":         PLANTS_DB_ID,
+        "meetings":       MEETINGS_DB_ID,
+        "tasks":          TASKS_DB_ID,
+        "config":         CONFIG_DB_ID,
+        "geo_reminders":  GEO_REMINDERS_DB_ID,
+        "projects":       PROJECTS_DB_ID,
+        "health_records": HEALTH_RECORDS_DB_ID,
+        "medications":    MEDICATIONS_DB_ID,
     },
 )
 WA_TOKEN       = os.environ["WHATSAPP_TOKEN"]
@@ -165,7 +169,7 @@ async def reverse_geocode(lat: float, lon: float) -> str | None:
                 r = await http.get(
                     "https://nominatim.openstreetmap.org/reverse",
                     params={"lat": lat, "lon": lon, "format": "json", "zoom": zoom, "addressdetails": 1},
-                    headers={"User-Agent": "Matrics/1.0"}
+                    headers={"User-Agent": "Knot/1.0"}
                 )
                 if r.status_code != 200:
                     continue
@@ -637,7 +641,7 @@ async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=N
 
     profile_gastos = get_domain_profile("gastos")
     profile_gastos_ctx = f"\nPerfil de gastos del usuario: {profile_gastos}\n" if profile_gastos else ""
-    system = f"""Sos Matrics, asistente personal por WhatsApp. Hablas en espanol rioplatense, natural y conciso.
+    system = f"""Sos Knot, asistente personal por WhatsApp. Hablas en espanol rioplatense, natural y conciso.
 Hoy: {hoy_str(now)}. Calendario: {semana_str(now)}.
 Tasa dolar blue
 {profile_gastos_ctx}
@@ -1288,7 +1292,7 @@ async def needs_clarification(phone: str, text: str, context: str) -> str | None
     try:
         resp = await claude_create(
             model="claude-sonnet-4-20250514", max_tokens=100,
-            system=f"""Sos Matrics. Evalua si el mensaje del usuario es suficientemente claro para ejecutar la accion indicada.
+            system=f"""Sos Knot. Evalua si el mensaje del usuario es suficientemente claro para ejecutar la accion indicada.
 Contexto: {context}
 Si el mensaje es claro -> responde solo: CLEAR
 Si hay ambiguedad -> responde solo la pregunta de aclaracion mas concisa y natural posible (max 1 pregunta, tono rioplatense).""",
@@ -1334,7 +1338,7 @@ RECORDATORIO: "recordame en X tiempo", "avisame en X". NUNCA para cambios de hor
 GEO_REMINDER: recordatorios basados en ubicacion. "recordame cuando pase cerca de X", "cuando este en/cerca de X avisame que Y", "cuando vaya a La Anonima recordame Z". Cualquier recordatorio que involucre un lugar fisico, comercio, o persona con direccion.
 EVENTO: crear un evento nuevo -- turno, reunion, cumple, cita, viaje.
 SHOPPING: gestionar lista de compras o recetas. Incluye preguntas sobre el estado de la lista: "que tengo en la lista", "tengo algo pendiente", "que me falta comprar", "hay algo en la lista".REUNION: notas o fotos de una reunion/llamada.
-CONFIGURAR: cambiar configuracion de Matrics. Solo cuando el usuario quiere CAMBIAR algo. Ej: "el resumen mandamelo a las 7", "cambia el horario", "agrega una frase motivadora al resumen". Nunca cuando pregunta o se queja.
+CONFIGURAR: cambiar configuracion de Knot. Solo cuando el usuario quiere CAMBIAR algo. Ej: "el resumen mandamelo a las 7", "cambia el horario", "agrega una frase motivadora al resumen". Nunca cuando pregunta o se queja.
 CHAT: cualquier pregunta, consulta o conversacion. Si tiene "?" o pide informacion -> CHAT. Incluye preguntas sobre por que no llego el resumen, quejas, consultas sobre el estado del bot, etc.
 
 REGLA: si el mensaje PREGUNTA algo -> siempre CHAT, nunca GASTO.
@@ -2126,7 +2130,7 @@ async def handle_chat(phone: str, text: str) -> str:
         },
         {
             "name": "configurar_matrics",
-            "description": "Cambia configuracion de Matrics: horario del resumen diario, extras del resumen, saludo, resumen nocturno. Usa SOLO cuando el usuario quiere CAMBIAR algo de la config, no cuando pregunta.",
+            "description": "Cambia configuracion de Knot: horario del resumen diario, extras del resumen, saludo, resumen nocturno. Usa SOLO cuando el usuario quiere CAMBIAR algo de la config, no cuando pregunta.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -2176,7 +2180,7 @@ async def handle_chat(phone: str, text: str) -> str:
         }
     ]
 
-    system = f"""Sos Matrics, asistente personal en WhatsApp. Respondes conciso y natural en espanol rioplatense.
+    system = f"""Sos Knot, asistente personal en WhatsApp. Respondes conciso y natural en espanol rioplatense.
 Hoy: {hoy_str(now)}.
 Calendario de referencia: {semana_str(now)}.
 REGLA CRITICA: cuando el usuario menciona un dia de la semana, usa EXACTAMENTE la fecha de la tabla de arriba. NO calcules fechas mentalmente. NUNCA.
@@ -2192,7 +2196,7 @@ Tenes acceso a informacion real del usuario a traves de herramientas:
 - Su Gmail (mails recibidos, facturas, comprobantes, comunicaciones)
 - El clima actual y pronostico
 - Busqueda web para informacion externa
-- Configuracion de Matrics (cambiar horario del resumen, extras, saludo, nocturno)
+- Configuracion de Knot (cambiar horario del resumen, extras, saludo, nocturno)
 
 Antes de responder cualquier pregunta, pensa que fuentes son relevantes y consulta todas las que hagan falta.
 
@@ -2211,7 +2215,7 @@ RAZONAMIENTO IMPORTANTE para preguntas sobre pagos de servicios:
 Podes usar varias herramientas en el mismo turno. No respondas hasta tener la informacion necesaria.
 IMPORTANTE: No inventes datos. Si no encontras info en ninguna fuente, decilo claramente.
 CAPACIDADES COMPLETAS DE MATRICS (no niegues ninguna):
-- Crear, editar y eliminar eventos en Google Calendar (via otro modulo, no esta en tus tools pero Matrics SI lo hace)
+- Crear, editar y eliminar eventos en Google Calendar (via otro modulo, no esta en tus tools pero Knot SI lo hace)
 - Registrar gastos e ingresos en Notion (via otro modulo)
 - Crear y gestionar geo-reminders basados en ubicacion (via otro modulo)
 - Acceder a ubicacion GPS via OwnTracks (si esta activo, la info ya esta en tu contexto)
@@ -2219,9 +2223,9 @@ CAPACIDADES COMPLETAS DE MATRICS (no niegues ninguna):
 - Gestionar tasks y proyectos en Notion (tenes la tool crear_proyecto)
 - Consultar calendario, finanzas, clima, Gmail (tus tools directas)
 - Buscar en la web
-- Configurar Matrics (horarios, extras, saludo)
+- Configurar Knot (horarios, extras, saludo)
 
-Si el usuario dice que hiciste algo o que Matrics hizo algo, NO lo niegues. Consulta el calendario o Notion para verificarlo.
+Si el usuario dice que hiciste algo o que Knot hizo algo, NO lo niegues. Consulta el calendario o Notion para verificarlo.
 Si algo no esta en tus tools directas pero es una capacidad de Matrics, decile que SI puede hacerlo y guialo.
 CRITICO: si guardar_lugar_conocido devuelve error o dice "NO fue guardado", informale al usuario que el lugar NO quedo guardado y sugeríle compartir la ubicacion por WhatsApp. NUNCA confirmes que se guardo algo cuando la tool fallo."""
 
@@ -2750,7 +2754,7 @@ async def handle_evento_agent(phone: str, text: str, image_b64=None, image_type=
     activities_ctx = get_activities_context()
     activities_section = f"\n\n{activities_ctx}" if activities_ctx else ""
 
-    system = f"""Sos Matrics, asistente personal en WhatsApp. Hablas en espanol rioplatense, natural y conciso.
+    system = f"""Sos Knot, asistente personal en WhatsApp. Hablas en espanol rioplatense, natural y conciso.
 Hoy: {hoy_str(now)}.
 Calendario de referencia: {semana_str(now)}.{last_ev_ctx}{activities_section}
 REGLA CRITICA: cuando el usuario menciona un dia de la semana, usa EXACTAMENTE la fecha de la tabla de arriba. NO calcules fechas mentalmente. NUNCA.
@@ -3764,7 +3768,7 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
                 r = await http.get(
                     "https://nominatim.openstreetmap.org/search",
                     params={"q": text, "format": "json", "limit": 1},
-                    headers={"User-Agent": "Matrics/1.0"}
+                    headers={"User-Agent": "Knot/1.0"}
                 )
                 if r.status_code == 200 and r.json():
                     result = r.json()[0]
@@ -4045,7 +4049,7 @@ async def enqueue_message(message: dict):
 
         if text.strip().lower() in ["/start", "hola", "help", "ayuda"]:
             await send_message(phone,
-                "*Hola! Soy Matrics*\n\n"
+                "*Hola! Soy Knot*\n\n"
                 "*Gastos:* _\"Verduleria 3500\"_\n"
                 "*Plantas:* _\"Me compre un potus\"_\n"
                 "*Eventos:* _\"Manana a las 10 turno medico\"_\n"
@@ -4169,7 +4173,7 @@ Responde SOLO JSON valido sin markdown:
                 r = await http.get(
                     "https://nominatim.openstreetmap.org/search",
                     params={"q": address, "format": "json", "limit": 1},
-                    headers={"User-Agent": "Matrics/1.0"}
+                    headers={"User-Agent": "Knot/1.0"}
                 )
                 if r.status_code == 200 and r.json():
                     result = r.json()[0]
@@ -4767,7 +4771,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
         try:
             filter_resp = await claude_create(
                 model="claude-sonnet-4-20250514", max_tokens=400,
-                system="""Sos Matrics. Tenes facturas detectadas en Gmail y pagos de Servicios registrados en Notion (este mes y el anterior).
+                system="""Sos Knot. Tenes facturas detectadas en Gmail y pagos de Servicios registrados en Notion (este mes y el anterior).
 
 Tu tarea: para cada factura del Gmail, determina si ya fue pagada.
 
@@ -4836,7 +4840,7 @@ Responde SOLO:
             extras_prompt = "\n".join(f"- {e}" for e in extras)
             extra_resp = await claude_create(
                 model="claude-sonnet-4-20250514", max_tokens=300,
-                system=f"Sos Matrics. Hoy es {now.strftime('%A %d/%m/%Y')}. Genera contenido breve (max 3 lineas por item) para los siguientes extras del Resumen Diario. Usas espanol rioplatense, tono natural y calido.",
+                system=f"Sos Knot. Hoy es {now.strftime('%A %d/%m/%Y')}. Genera contenido breve (max 3 lineas por item) para los siguientes extras del Resumen Diario. Usas espanol rioplatense, tono natural y calido.",
                 messages=[{"role": "user", "content": f"Genera estos extras para el resumen matutino:\n{extras_prompt}"}]
             )
             extra_text = extra_resp.content[0].text.strip()
@@ -4897,7 +4901,7 @@ async def send_resumen_nocturno_regular(http, access_token: str, now: datetime):
     try:
         resp = await claude_create(
             model="claude-sonnet-4-20250514", max_tokens=300,
-            system=f"""Sos Matrics. {context}
+            system=f"""Sos Knot. {context}
 Genera un resumen nocturno breve y natural en espanol rioplatense. Inclui:
 1. Saludo de buenas noches con clima de esta noche y de manana.
 2. Que hay para manana (o que el dia esta libre).
@@ -5306,7 +5310,7 @@ async def receive_location(request: Request):
                     try:
                         msg_resp = await claude_create(
                             model="claude-sonnet-4-20250514", max_tokens=150,
-                            system="Sos Matrics. Genera un mensaje breve y natural en espanol rioplatense avisando que el usuario esta cerca de una tienda donde puede comprar cosas que necesita. No seas pesado, se casual y util. Max 2 lineas de texto, sin repetir la info del comercio que ya se muestra aparte.",
+                            system="Sos Knot. Genera un mensaje breve y natural en espanol rioplatense avisando que el usuario esta cerca de una tienda donde puede comprar cosas que necesita. No seas pesado, se casual y util. Max 2 lineas de texto, sin repetir la info del comercio que ya se muestra aparte.",
                             messages=[{"role": "user", "content": f"El usuario esta cerca de {shop['name']} (a {shop['distance_m']}m). Necesita comprar: {items_str}."}]
                         )
                         msg_text = msg_resp.content[0].text.strip()
