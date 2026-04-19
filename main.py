@@ -17,6 +17,7 @@ async def startup_event():
     """Carga config del usuario al arrancar para no esperar al primer mensaje."""
     await load_user_config(MY_NUMBER)
     await load_geo_reminders()
+    await _ds.ensure_db_select_field("finances", "Estado", ["Impaga", "Pagada"])
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -50,6 +51,7 @@ CONFIG_DB_ID   = os.environ.get("NOTION_CONFIG_DB_ID", "2f81017d-a20c-426a-aada-
 PROJECTS_DB_ID       = os.environ.get("NOTION_PROJECTS_DB_ID",       "0924aff739194c5b8438d03ed82e9e21")
 HEALTH_RECORDS_DB_ID = os.environ.get("NOTION_HEALTH_RECORDS_DB_ID", "5f9cde7223f346e48a22f54dbc0836f6")
 MEDICATIONS_DB_ID    = os.environ.get("NOTION_MEDICATIONS_DB_ID",    "d16f6826e18d4e4c9e6768a9ebd07507")
+FITNESS_DB_ID        = os.environ.get("NOTION_FITNESS_DB_ID",        "c6eb4ddbfe0245bdb5bfcb2b5e33a6e5")
 # ── DataStore (Fase 1 refactor) ───────────────────────────────────────────────
 from notion_datastore import NotionDataStore, QueryFilter, DateRange
 
@@ -67,6 +69,7 @@ _ds = NotionDataStore(
         "projects":       PROJECTS_DB_ID,
         "health_records": HEALTH_RECORDS_DB_ID,
         "medications":    MEDICATIONS_DB_ID,
+        "fitness":        FITNESS_DB_ID,
     },
 )
 WA_TOKEN       = os.environ["WHATSAPP_TOKEN"]
@@ -75,8 +78,8 @@ WA_API         = f"https://graph.facebook.com/v22.0/{WA_PHONE_ID}/messages"
 MY_NUMBER      = os.environ.get("MY_WA_NUMBER", "54298154894334")
 DAILY_SUMMARY_HOUR = int(os.environ.get("DAILY_SUMMARY_HOUR", "8"))
 
-USER_LAT = float(os.environ.get("USER_LAT", "-38.95"))
-USER_LON = float(os.environ.get("USER_LON", "-68.06"))
+USER_LAT = os.environ.get("USER_LAT")
+USER_LON = os.environ.get("USER_LON")
 
 def now_argentina() -> datetime:
     return datetime.now(timezone.utc) - timedelta(hours=3)
@@ -364,11 +367,11 @@ user_prefs: dict = {
 
 # ── Ubicacion en tiempo real ──────────────────────────────────────────────────
 current_location: dict = {
-    "lat": float(os.environ.get("USER_LAT", "-38.95")),
-    "lon": float(os.environ.get("USER_LON", "-68.06")),
+    "lat": float(USER_LAT) if USER_LAT else None,
+    "lon": float(USER_LON) if USER_LON else None,
     "updated_at": None,
     "velocity": 0,
-    "source": "default",
+    "source": "env" if USER_LAT else "unknown",
     "location_name": None,
 }
 
@@ -391,8 +394,8 @@ MAX_PROCESSED_IDS = 500
 # ── Buffer de mensajes (agrupa mensajes relacionados en ventana de tiempo) ────
 message_buffer: dict[str, list] = {}
 buffer_timers: dict[str, asyncio.Task] = {}
-BUFFER_WINDOW_SECS = 6.0
-PROCESSING_INDICATOR_DELAY = 1.5
+BUFFER_WINDOW_SECS = 4.0
+PROCESSING_INDICATOR_DELAY = 1.0
 
 # ── WhatsApp helpers ───────────────────────────────────────────────────────────
 async def send_message(to: str, text: str):
@@ -491,7 +494,9 @@ def wind_description(kmh: float) -> str:
 async def get_weather(days: int = 2) -> dict | None:
     try:
         lat, lon = get_current_location()
-        async with httpx.AsyncClient(timeout=5) as http:
+        if lat is None or lon is None:
+            return None
+        async with httpx.AsyncClient(timeout=10) as http:
             r = await http.get(
                 "https://api.open-meteo.com/v1/forecast",
                 params={
@@ -730,25 +735,35 @@ Emoji: elegi el mas especifico segun el contexto real."""
             if is_fuel and not data.get("litros"):
                 pending_state[phone] = {"type": "litros_followup", "page_id": page_id, "name": data["name"]}
                 reply += "\n\n⛽ Cuantos litros cargaste?"
-            elif data.get("value_ars", 0) > 1000:
-                pending_tasks = await get_pending_factura_tasks()
-                if pending_tasks:
-                    amount = data.get("value_ars", 0)
-                    matched = None
-                    for task in pending_tasks:
-                        prov = task["provider"].lower()
-                        if prov and (prov in name_lower or any(w in name_lower for w in prov.split() if len(w) > 3)):
-                            task_amount = task.get("amount", 0)
-                            if not task_amount or abs(amount - task_amount) / max(task_amount, 1) <= 0.10:
-                                matched = task
+            elif data.get("value_ars", 0) > 1000 and "EGRESO" in data.get("in_out", "").upper():
+                paid_amount = data.get("value_ars", 0)
+                provider_words = [w for w in name_lower.split() if len(w) > 3]
+                impaga = None
+                for pw in provider_words:
+                    candidatos = await _ds.get_impaga_facturas(provider=pw)
+                    if candidatos:
+                        impaga = candidatos[0]
+                        break
+                if impaga:
+                    inv_amount = impaga.value_ars
+                    diff_pct = abs(paid_amount - inv_amount) / max(inv_amount, 1) if inv_amount else 1
+                    if diff_pct <= 0.10:
+                        await _ds.mark_finance_paid(impaga.id, paid_amount)
+                        tasks = await get_pending_factura_tasks()
+                        for t in tasks:
+                            if t.get("finance_page_id") == impaga.id:
+                                await mark_factura_task_paid(t["page_id"])
                                 break
-                    if matched:
+                        reply += f"\n\n✅ Marqué *{impaga.name}* como pagada."
+                    else:
                         pending_state[phone] = {
-                            "type": "confirm_factura_paid",
-                            "task_page_id": matched["page_id"],
-                            "task_name": matched["name"],
+                            "type": "factura_note",
+                            "finance_page_id": impaga.id,
+                            "paid_amount": paid_amount,
+                            "invoice_amount": inv_amount,
+                            "provider_name": impaga.name,
                         }
-                        reply += f"\n\n¿Este pago corresponde a *{matched['name']}*?"
+                        reply += f"\n\n💡 Tenés registrado *{impaga.name}* por ${inv_amount:,.0f} pero pagaste ${paid_amount:,.0f}. ¿Querés agregar una nota?"
 
     add_to_history(phone, "user", text)
     add_to_history(phone, "assistant", reply)
@@ -906,6 +921,102 @@ async def eliminar_shopping(text: str) -> tuple[bool, str]:
         return True, f"*{item.name}* eliminado de la lista de compras"
     return False, "Error eliminando el item"
 
+async def corregir_shopping(text: str) -> tuple[bool, str]:
+    response = await claude_create(
+        model="claude-sonnet-4-20250514", max_tokens=200,
+        system="Extrae el item de la lista de compras a corregir y los campos a actualizar. Responde SOLO JSON.",
+        messages=[{"role": "user", "content": f'Mensaje: {text}\nResponde: {{"search_term": "nombre del item", "updates": {{"notes": "nueva cantidad/nota o null", "category": "nueva categoria o null"}}}}'}]
+    )
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`").lstrip("json").strip()
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return False, "No entendi qué item querés corregir"
+    search_term = parsed.get("search_term", "")
+    updates_raw = parsed.get("updates", {})
+    updates = {k: v for k, v in updates_raw.items() if v is not None}
+    if not search_term:
+        return False, "No entendi qué item querés corregir"
+    results = await _ds.search_shopping_item(search_term)
+    if not results:
+        return False, f"No encontré ningún item llamado _{search_term}_ en la lista"
+    item = results[0]
+    if not updates:
+        return False, f"No entendi qué querés cambiar de _{item.name}_"
+    ok = await _ds.update_shopping_item(item.id, updates)
+    if ok:
+        changes = ", ".join(f"{k}: {v}" for k, v in updates.items())
+        return True, f"*{item.name}* actualizado: {changes}"
+    return False, "Error actualizando el item"
+
+
+async def cancelar_recordatorio(text: str) -> tuple[bool, str]:
+    access_token = await get_gcal_access_token()
+    if not access_token:
+        return False, "Calendar no configurado"
+    now = now_argentina()
+    time_min = now.strftime("%Y-%m-%dT%H:%M:00-03:00")
+    time_max = (now + timedelta(days=7)).strftime("%Y-%m-%dT23:59:59-03:00")
+    async with httpx.AsyncClient() as http:
+        r = await http.get(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"timeMin": time_min, "timeMax": time_max, "singleEvents": "true", "maxResults": "20"},
+        )
+    if r.status_code != 200:
+        return False, "No pude acceder al calendario"
+    temp_events = [e for e in r.json().get("items", []) if "[TEMP]" in (e.get("description") or "")]
+    if not temp_events:
+        return False, "No tenés recordatorios pendientes"
+    if len(temp_events) == 1:
+        ev = temp_events[0]
+        event_id = ev["id"]
+        summary = ev.get("summary", "Recordatorio")
+        start = ev.get("start", {}).get("dateTime", "")
+        try:
+            dt = datetime.fromisoformat(start).astimezone()
+            hora = dt.strftime("%H:%M")
+        except Exception:
+            hora = ""
+        async with httpx.AsyncClient() as http:
+            dr = await http.delete(
+                f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+        if dr.status_code in (200, 204):
+            return True, f"Recordatorio *{summary}*{f' ({hora})' if hora else ''} cancelado"
+        return False, "Error cancelando el recordatorio"
+    # múltiples: identificar cuál con Claude
+    summaries = [(e["id"], e.get("summary", ""), e.get("start", {}).get("dateTime", "")) for e in temp_events]
+    options_str = "\n".join(f'{i+1}. {s} — {t}' for i, (_, s, t) in enumerate(summaries))
+    response = await claude_create(
+        model="claude-sonnet-4-20250514", max_tokens=10,
+        system="Respondé SOLO con el número de la opción más probable. Sin texto extra.",
+        messages=[{"role": "user", "content": f"Mensaje del usuario: {text}\n\nRecordatorios pendientes:\n{options_str}\n\n¿Cuál quiere cancelar? Respondé solo el número."}]
+    )
+    try:
+        idx = int(response.content[0].text.strip()) - 1
+        ev_id, ev_summary, ev_start = summaries[idx]
+    except Exception:
+        list_str = "\n".join(f"- {s}" for _, s, _ in summaries)
+        return False, f"Tenés {len(summaries)} recordatorios pendientes:\n{list_str}\n\nEspecificá cuál cancelar."
+    try:
+        dt = datetime.fromisoformat(ev_start).astimezone()
+        hora = dt.strftime("%H:%M")
+    except Exception:
+        hora = ""
+    async with httpx.AsyncClient() as http:
+        dr = await http.delete(
+            f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{ev_id}",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    if dr.status_code in (200, 204):
+        return True, f"Recordatorio *{ev_summary}*{f' ({hora})' if hora else ''} cancelado"
+    return False, "Error cancelando el recordatorio"
+
+
 # ── MODULO PLANTAS ─────────────────────────────────────────────────────────────
 PLANTA_SYSTEM = """Extrae info de una planta y genera recomendaciones de cuidado.
 Responde UNICAMENTE con JSON valido, sin markdown.
@@ -963,6 +1074,63 @@ def format_planta(data: dict) -> str:
         lines.append(f"\n{data['notas']}")
     lines.append("\nGuardada en Notion")
     return "\n".join(lines)
+
+async def editar_planta(text: str) -> tuple[bool, str]:
+    response = await claude_create(
+        model="claude-sonnet-4-20250514", max_tokens=200,
+        system="Extrae el nombre de la planta a editar y los campos a actualizar. Responde SOLO JSON.",
+        messages=[{"role": "user", "content": (
+            f"Mensaje: {text}\n"
+            'Responde: {"search_term": "nombre de la planta", "updates": {"status": "Excelente|Bien|Regular|Necesita atencion o null", '
+            '"watering": "Cada 2-3 dias|Semanal|Quincenal|Mensual o null", '
+            '"location": "Interior|Exterior|Balcon|Terraza o null", '
+            '"light": "Sombra|Indirecta|Directa parcial|Pleno sol o null", '
+            '"notes": "nuevas notas o null"}}'
+        )}]
+    )
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`").lstrip("json").strip()
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return False, "No entendi qué planta querés editar"
+    search_term = parsed.get("search_term", "")
+    updates = {k: v for k, v in parsed.get("updates", {}).items() if v is not None}
+    if not search_term:
+        return False, "No entendi qué planta querés editar"
+    results = await _ds.search_plants(search_term)
+    if not results:
+        return False, f"No encontré ninguna planta llamada _{search_term}_"
+    plant = results[0]
+    if not updates:
+        return False, f"No entendi qué querés cambiar de _{plant.name}_"
+    await _ds.update_plant(plant.id, updates)
+    changes = ", ".join(f"{k}: {v}" for k, v in updates.items())
+    return True, f"*{plant.name}* actualizada: {changes}"
+
+
+async def eliminar_planta(text: str) -> tuple[bool, str]:
+    response = await claude_create(
+        model="claude-sonnet-4-20250514", max_tokens=100,
+        system="Extrae el nombre de la planta a eliminar. Responde SOLO JSON.",
+        messages=[{"role": "user", "content": f'Mensaje: {text}\nResponde: {{"search_term": "nombre de la planta"}}'}]
+    )
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`").lstrip("json").strip()
+    search_term = json.loads(raw).get("search_term", "")
+    if not search_term:
+        return False, "No entendi qué planta querés eliminar"
+    results = await _ds.search_plants(search_term)
+    if not results:
+        return False, f"No encontré ninguna planta llamada _{search_term}_"
+    plant = results[0]
+    ok = await _ds.archive_plant(plant.id)
+    if ok:
+        return True, f"*{plant.name}* eliminada de Notion"
+    return False, "Error eliminando la planta"
+
 
 # ── MODULO EVENTOS ─────────────────────────────────────────────────────────────
 def format_evento(data: dict, guardado: bool) -> str:
@@ -1044,7 +1212,7 @@ async def create_evento_gcal(data: dict) -> tuple[bool, str]:
         "summary": data.get("summary", "Evento"),
         "start": start,
         "end": end,
-        "source": {"title": "Knot", "url": "https://web-production-6874a.up.railway.app"},
+        "source": {"title": "Knot", "url": os.environ.get("APP_URL", "https://knot.onrender.com")},
         "colorId": get_event_color(data.get("summary", "")),
         "extendedProperties": {"private": {"created_by": "matrics", "type": "evento"}},
     }
@@ -1266,25 +1434,33 @@ async def classify(text: str, has_image: bool, image_b64: str = None, image_type
     content.append({"type": "text", "text": history_ctx + "\n" + prompt_text if history_ctx else prompt_text})
     response = await claude_create(
         model="claude-sonnet-4-20250514", max_tokens=10,
-        system="""Responde SOLO una palabra: GASTO, CORREGIR_GASTO, PLANTA, EVENTO, EDITAR_EVENTO, ELIMINAR_EVENTO, RECORDATORIO, SHOPPING, REUNION, SALUD, CONFIGURAR o CHAT.
+        system="""Responde SOLO una palabra: GASTO, CORREGIR_GASTO, ELIMINAR_GASTO, PLANTA, EDITAR_PLANTA, ELIMINAR_PLANTA, EVENTO, EDITAR_EVENTO, ELIMINAR_EVENTO, RECORDATORIO, CANCELAR_RECORDATORIO, SHOPPING, CORREGIR_SHOPPING, ELIMINAR_SHOPPING, REUNION, EDITAR_REUNION, ELIMINAR_REUNION, SALUD, ACTIVIDAD_FISICA, GEO_REMINDER, CONFIGURAR o CHAT.
 
-GASTO: registrar un pago, compra o ingreso concreto con monto. Tambien cuando el mensaje menciona una compra o gasto SIN monto (ej: "compre en la verduleria", "fui al super") -- Matrics pedira el monto. EXCEPCION: si el mensaje menciona "lista de compras" o "todo lo que habia en la lista" -> SHOPPING.
-CORREGIR_GASTO: corregir un gasto ya registrado.
-ELIMINAR_GASTO: eliminar o borrar una entrada de Notion.
-ELIMINAR_SHOPPING: eliminar o borrar un item de la lista de compras.
-PLANTA: adquirir o mencionar una planta.
+GASTO: registrar un pago, compra o ingreso concreto con monto. Tambien cuando el mensaje menciona una compra o gasto SIN monto (ej: "compre en la verduleria", "fui al super") -- pedira el monto. EXCEPCION: si el mensaje menciona "lista de compras" -> SHOPPING.
+DEUDA: registrar algo que el usuario TODAVIA NO PAGO pero debe pagar. "le debo X a Y", "me deben X", "tengo que pagar X". Diferente a GASTO que es un pago ya realizado.
+CORREGIR_GASTO: corregir el monto u otro campo de un gasto ya registrado.
+ELIMINAR_GASTO: eliminar o borrar un gasto de Notion.
+PLANTA: adquirir o registrar una planta nueva.
+EDITAR_PLANTA: modificar datos de una planta existente (estado, riego, ubicacion, notas).
+ELIMINAR_PLANTA: eliminar una planta de Notion.
 EDITAR_EVENTO: modificar un evento existente en el calendario.
 ELIMINAR_EVENTO: eliminar o borrar un evento del calendario.
-RECORDATORIO: "recordame en X tiempo", "avisame en X". NUNCA para cambios de horario del resumen. NUNCA cuando menciona un lugar fisico o comercio.
-GEO_REMINDER: recordatorios basados en ubicacion. "recordame cuando pase cerca de X", "cuando este en/cerca de X avisame que Y", "cuando vaya a La Anonima recordame Z". Cualquier recordatorio que involucre un lugar fisico, comercio, o persona con direccion.
-EVENTO: crear un evento nuevo -- turno, reunion, cumple, cita, viaje.
-SHOPPING: gestionar lista de compras o recetas. Incluye preguntas sobre el estado de la lista: "que tengo en la lista", "tengo algo pendiente", "que me falta comprar", "hay algo en la lista".REUNION: notas o fotos de una reunion/llamada.
-CONFIGURAR: cambiar configuracion de Knot. Solo cuando el usuario quiere CAMBIAR algo. Ej: "el resumen mandamelo a las 7", "cambia el horario", "agrega una frase motivadora al resumen". Nunca cuando pregunta o se queja.
-CHAT: cualquier pregunta, consulta o conversacion. Si tiene "?" o pide informacion -> CHAT. Incluye preguntas sobre por que no llego el resumen, quejas, consultas sobre el estado del bot, etc.
+RECORDATORIO: "recordame en X tiempo", "avisame en X". NUNCA cuando menciona un lugar fisico o comercio.
+CANCELAR_RECORDATORIO: cancelar o borrar un recordatorio pendiente.
+GEO_REMINDER: recordatorios basados en ubicacion. "recordame cuando pase cerca de X", "cuando este en/cerca de X avisame que Y". Cualquier recordatorio que involucre un lugar fisico o comercio.
+EVENTO: crear un evento nuevo -- turno, cumple, cita, viaje.
+SHOPPING: gestionar lista de compras o recetas. Incluye preguntas sobre el estado de la lista.
+CORREGIR_SHOPPING: editar las notas, cantidad o categoria de un item de la lista de compras.
+ELIMINAR_SHOPPING: eliminar o borrar un item de la lista de compras.
+REUNION: registrar notas o foto de una reunion/llamada nueva.
+EDITAR_REUNION: editar notas o datos de una reunion ya registrada.
+ELIMINAR_REUNION: eliminar una reunion de Notion.
+SALUD: registrar o consultar informacion medica. Analisis, consultas, diagnosticos, medicaciones. También editar o eliminar registros médicos existentes.
+ACTIVIDAD_FISICA: registrar, consultar, editar o eliminar actividad física. "corri 5km", "jugue al futbol", "fui al gym", "cuantos km corri este mes", screenshot de Adidas/Strava/Nike. NUNCA para eventos de calendario relacionados al deporte — esos son EVENTO.
+CONFIGURAR: cambiar configuracion de Knot. Solo cuando el usuario quiere CAMBIAR algo. Nunca cuando pregunta o se queja.
+CHAT: cualquier pregunta, consulta o conversacion. Si tiene "?" o pide informacion -> CHAT.
 
 REGLA: si el mensaje PREGUNTA algo -> siempre CHAT, nunca GASTO.
-
-SALUD: registrar o consultar informacion medica personal. Analisis de sangre, resultados de laboratorio, resumen de consulta medica, diagnosticos, medicaciones. "me hice un analisis", "fui al medico", "me recetaron X", "empece a tomar X", "como me fue con el colesterol", "que pastillas tomo". También imágenes de documentos médicos.
 
 IMAGENES SIN TEXTO:
 - Factura, ticket, recibo -> GASTO
@@ -1296,20 +1472,28 @@ IMAGENES SIN TEXTO:
         messages=[{"role": "user", "content": content}]
     )
     r = response.content[0].text.strip().upper()
-    if "ELIMINAR_EVENTO" in r:    return "ELIMINAR_EVENTO"
-    if "EDITAR_EVENTO" in r:      return "EDITAR_EVENTO"
-    if "ELIMINAR_SHOPPING" in r:  return "ELIMINAR_SHOPPING"
-    if "ELIMINAR_GASTO" in r:     return "ELIMINAR_GASTO"
-    if "CORREGIR_GASTO" in r:     return "CORREGIR_GASTO"
-    if "GEO_REMINDER" in r:       return "GEO_REMINDER"
-    if "SALUD" in r:              return "SALUD"
-    if "SHOPPING" in r:           return "SHOPPING"
-    if "REUNION" in r:            return "REUNION"
-    if "CONFIGURAR" in r:         return "CONFIGURAR"
-    if "RECORDATORIO" in r:       return "RECORDATORIO"
-    if "PLANTA" in r:             return "PLANTA"
-    if "EVENTO" in r:             return "EVENTO"
-    if "CHAT" in r:               return "CHAT"
+    if "ELIMINAR_EVENTO" in r:         return "ELIMINAR_EVENTO"
+    if "EDITAR_EVENTO" in r:           return "EDITAR_EVENTO"
+    if "ACTIVIDAD_FISICA" in r:        return "ACTIVIDAD_FISICA"
+    if "CANCELAR_RECORDATORIO" in r:   return "CANCELAR_RECORDATORIO"
+    if "CORREGIR_SHOPPING" in r:       return "CORREGIR_SHOPPING"
+    if "ELIMINAR_SHOPPING" in r:       return "ELIMINAR_SHOPPING"
+    if "DEUDA" in r:                    return "DEUDA"
+    if "ELIMINAR_GASTO" in r:          return "ELIMINAR_GASTO"
+    if "CORREGIR_GASTO" in r:          return "CORREGIR_GASTO"
+    if "ELIMINAR_REUNION" in r:        return "ELIMINAR_REUNION"
+    if "EDITAR_REUNION" in r:          return "EDITAR_REUNION"
+    if "ELIMINAR_PLANTA" in r:         return "ELIMINAR_PLANTA"
+    if "EDITAR_PLANTA" in r:           return "EDITAR_PLANTA"
+    if "GEO_REMINDER" in r:            return "GEO_REMINDER"
+    if "SALUD" in r:                   return "SALUD"
+    if "SHOPPING" in r:                return "SHOPPING"
+    if "REUNION" in r:                 return "REUNION"
+    if "CONFIGURAR" in r:              return "CONFIGURAR"
+    if "RECORDATORIO" in r:            return "RECORDATORIO"
+    if "PLANTA" in r:                  return "PLANTA"
+    if "EVENTO" in r:                  return "EVENTO"
+    if "CHAT" in r:                    return "CHAT"
     return "GASTO"
 
 async def query_finances(month: str = None) -> str:
@@ -1824,23 +2008,26 @@ async def handle_chat(phone: str, text: str) -> str:
     noc_h = user_prefs.get("resumen_nocturno_hour") or 22
     noc_en = user_prefs.get("resumen_nocturno_enabled", True)
     user_context_parts.append(f"Resumen nocturno: {'activado' if noc_en else 'desactivado'} a las {int(noc_h):02d}:00.")
-    _ulat = float(current_location.get("lat") or USER_LAT)
-    _ulon = float(current_location.get("lon") or USER_LON)
+    _ulat = current_location.get("lat")
+    _ulon = current_location.get("lon")
     _uloc = current_location.get("location_name")
     _upd = current_location.get("updated_at")
-    _src = current_location.get("source", "default")
-    if _src == "owntracks":
+    _src = current_location.get("source", "unknown")
+    if _src == "owntracks" and _ulat is not None:
         _age = int((now - _upd).total_seconds() / 60) if _upd else None
         _age_str = f" (hace {_age} min)" if _age is not None else ""
         _place = is_at_known_place()
         _loc_label = _place["name"] if _place else (_uloc or f"{_ulat:.5f}, {_ulon:.5f}")
         user_context_parts.append(f"Ubicacion GPS (OwnTracks){_age_str}: {_loc_label} ({_ulat:.5f}, {_ulon:.5f}).")
-    elif _upd:
+    elif _ulat is not None and _upd:
         _age = int((now - _upd).total_seconds() / 60)
         _loc_label = _uloc or f"{_ulat:.5f}, {_ulon:.5f}"
         user_context_parts.append(f"Ultima ubicacion conocida: {_loc_label} ({_ulat:.5f}, {_ulon:.5f}), hace {_age} minutos — OwnTracks inactivo. Si el usuario pregunta donde esta, informale la ultima ubicacion registrada y sugeríle que abra OwnTracks para actualizar.")
+    elif _ulat is not None:
+        _loc_label = _uloc or f"{_ulat:.5f}, {_ulon:.5f}"
+        user_context_parts.append(f"Ultima ubicacion guardada en Notion: {_loc_label} — OwnTracks sin datos.")
     else:
-        user_context_parts.append(f"Ubicacion aproximada: Neuquen ({_ulat:.5f}, {_ulon:.5f}) — OwnTracks sin datos.")
+        user_context_parts.append("Ubicacion desconocida — OwnTracks sin datos y sin coordenadas guardadas.")
     user_context = "\n".join(user_context_parts)
 
     tools = [
@@ -1942,11 +2129,35 @@ async def handle_chat(phone: str, text: str) -> str:
         },
         {
             "name": "marcar_factura_pagada",
-            "description": "Marca una tarea de factura pendiente como pagada en Notion. Usar cuando el usuario confirma que ya pago un servicio o factura especifica, ya sea en respuesta a una pregunta o espontaneamente.",
+            "description": "Marca una factura pendiente como pagada. Usar cuando el usuario confirma que pago un servicio o factura.",
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "provider": {"type": "string", "description": "Nombre del proveedor o servicio. Ej: 'Camuzzi', 'CALF', 'Movistar'"}
+                    "provider": {"type": "string", "description": "Nombre del proveedor. Ej: 'Camuzzi', 'CALF', 'Movistar'"},
+                    "paid_amount": {"type": ["number", "null"], "description": "Monto pagado si lo menciona. Null si no."},
+                    "payment_method": {"type": ["string", "null"], "description": "Medio de pago si lo menciona. Ej: 'BBVA', 'Mercado Pago'. Null si no."}
+                },
+                "required": ["provider"]
+            }
+        },
+        {
+            "name": "consultar_deudas",
+            "description": "Lista facturas y deudas pendientes de pago. Usar cuando el usuario pregunta que debe, que facturas tiene impagas, cuanto le falta pagar.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "provider": {"type": ["string", "null"], "description": "Filtrar por proveedor o persona. Null para listar todo."}
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "historial_pagos",
+            "description": "Consulta el historial de pagos a un proveedor o persona. Usar cuando el usuario pregunta cuando pago algo, cuanto pago, por que pago de mas o menos.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "provider": {"type": "string", "description": "Nombre del proveedor o persona a consultar."}
                 },
                 "required": ["provider"]
             }
@@ -2241,6 +2452,8 @@ CRITICO: si guardar_lugar_conocido devuelve error o dice "NO fue guardado", info
                     t_result = f"Error: {str(e)[:100]}"
         elif t_name == "marcar_factura_pagada":
             provider = t_input.get("provider", "")
+            paid_amount = t_input.get("paid_amount")
+            payment_method = t_input.get("payment_method")
             tasks = await get_pending_factura_tasks()
             prov_lower = provider.lower()
             matched_tasks = []
@@ -2256,17 +2469,79 @@ CRITICO: si guardar_lugar_conocido devuelve error o dice "NO fue guardado", info
                 if tp_words & prov_words:
                     matched_tasks.append(task)
             if not matched_tasks:
-                t_result = f"No encontre ninguna tarea de factura pendiente para '{provider}'. Si ya esta registrado el pago en Notion, no hay nada que hacer."
+                # Try matching directly against Impaga entries in Finances
+                impagas = await _ds.get_impaga_facturas(provider=provider)
+                if impagas:
+                    for imp in impagas:
+                        inv_amount = imp.value_ars
+                        diff_pct = abs((paid_amount or inv_amount) - inv_amount) / max(inv_amount, 1) if inv_amount else 0
+                        if paid_amount and diff_pct > 0.10:
+                            pending_state[phone] = {
+                                "type": "factura_note",
+                                "finance_page_id": imp.id,
+                                "paid_amount": paid_amount,
+                                "payment_method": payment_method,
+                                "provider_name": imp.name,
+                            }
+                            t_result = f"Pagaste ${paid_amount:,.0f} pero la factura era ${inv_amount:,.0f}. ¿Querés agregar una nota antes de marcar como pagada?"
+                        else:
+                            await _ds.mark_finance_paid(imp.id, paid_amount, payment_method)
+                            t_result = f"✅ {imp.name} marcada como pagada en Finanzas."
+                else:
+                    t_result = f"No encontre ninguna factura pendiente para '{provider}'."
             else:
                 marked = []
                 for task in matched_tasks:
+                    finance_page_id = task.get("finance_page_id")
+                    inv_amount = task.get("amount", 0)
+                    if finance_page_id and paid_amount and inv_amount:
+                        diff_pct = abs(paid_amount - inv_amount) / max(inv_amount, 1)
+                        if diff_pct > 0.10:
+                            pending_state[phone] = {
+                                "type": "factura_note",
+                                "finance_page_id": finance_page_id,
+                                "task_page_id": task["page_id"],
+                                "paid_amount": paid_amount,
+                                "payment_method": payment_method,
+                                "invoice_amount": inv_amount,
+                                "provider_name": task["name"],
+                            }
+                            t_result = f"Pagaste ${paid_amount:,.0f} pero la factura era ${inv_amount:,.0f}. ¿Querés agregar una nota?"
+                            break
+                        await _ds.mark_finance_paid(finance_page_id, paid_amount, payment_method)
                     ok = await mark_factura_task_paid(task["page_id"])
                     if ok:
                         marked.append(task["name"])
                 if marked:
-                    t_result = f"Marcado como pagado en Notion: {', '.join(marked)}. No va a volver a aparecer como pendiente."
+                    t_result = f"Marcado como pagado: {', '.join(marked)}."
                 else:
                     t_result = f"No pude actualizar las tasks en Notion."
+        elif t_name == "consultar_deudas":
+            provider_filter = t_input.get("provider")
+            impagas = await _ds.get_impaga_facturas(provider=provider_filter)
+            if impagas:
+                lines = []
+                for e in impagas:
+                    monto = f"${e.value_ars:,.0f}" if e.value_ars else "monto pendiente"
+                    fecha = f" ({str(e.date)[:10]})" if e.date else ""
+                    lines.append(f"- {e.name}: {monto}{fecha}")
+                t_result = "Facturas y deudas pendientes:\n" + "\n".join(lines)
+            else:
+                t_result = "No hay facturas ni deudas pendientes."
+        elif t_name == "historial_pagos":
+            provider = t_input.get("provider", "")
+            historial = await _ds.get_finance_history_by_provider(provider, limit=5)
+            if historial:
+                lines = []
+                for e in historial:
+                    monto = f"${e.value_ars:,.0f}"
+                    fecha = str(e.date)[:10] if e.date else "fecha desconocida"
+                    metodo = f" via {e.method}" if e.method and e.method != "Payment" else ""
+                    nota = f" — {e.notes}" if e.notes else ""
+                    lines.append(f"- {fecha}: {monto}{metodo}{nota}")
+                t_result = f"Historial de pagos — {provider}:\n" + "\n".join(lines)
+            else:
+                t_result = f"No encontre historial de pagos para '{provider}'."
         elif t_name == "consultar_lugares_conocidos":
             places = user_prefs.get("known_places", [])
             if places:
@@ -3033,7 +3308,7 @@ async def load_user_config(wa_number: str):
             saved_lon = get_num("Longitude")
             saved_city = get_txt("City")
             if saved_lat is not None and saved_lon is not None:
-                if current_location.get("source") == "default":
+                if current_location.get("source") in ("default", "env", "unknown"):
                     current_location["lat"] = float(saved_lat)
                     current_location["lon"] = float(saved_lon)
                     current_location["source"] = "restored"
@@ -3041,6 +3316,8 @@ async def load_user_config(wa_number: str):
                         current_location["location_name"] = saved_city
     except Exception:
         pass
+    if "payment_methods" not in user_prefs:
+        user_prefs["payment_methods"] = ["BBVA", "Mercado Pago", "Efectivo", "Transferencia", "Débito", "Crédito", "Contado"]
 
 async def save_user_config(wa_number: str):
     try:
@@ -3234,6 +3511,60 @@ async def handle_reunion(text: str, image_b64: str = None, image_type: str = Non
     ))
     return f"*{nombre}* guardada en Meetings{cal_str}\n{fecha_fmt}{con_str}\n\nNotas guardadas en Notion"
 
+
+async def editar_reunion(text: str) -> tuple[bool, str]:
+    response = await claude_create(
+        model="claude-sonnet-4-20250514", max_tokens=250,
+        system="Extrae el nombre de la reunión a editar y los campos a actualizar. Responde SOLO JSON.",
+        messages=[{"role": "user", "content": (
+            f"Mensaje: {text}\n"
+            'Responde: {"search_term": "nombre de la reunion", "updates": {"name": "nuevo nombre o null", "notes": "nuevas notas o null", "with_whom": "nueva persona o null"}}'
+        )}]
+    )
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`").lstrip("json").strip()
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return False, "No entendi qué reunión querés editar"
+    search_term = parsed.get("search_term", "")
+    updates = {k: v for k, v in parsed.get("updates", {}).items() if v is not None}
+    if not search_term:
+        return False, "No entendi qué reunión querés editar"
+    results = await _ds.search_meetings(search_term)
+    if not results:
+        return False, f"No encontré ninguna reunión llamada _{search_term}_"
+    meeting = results[0]
+    if not updates:
+        return False, f"No entendi qué querés cambiar de _{meeting.name}_"
+    await _ds.update_meeting(meeting.id, updates)
+    changes = ", ".join(f"{k}: {v}" for k, v in updates.items())
+    return True, f"*{meeting.name}* actualizada: {changes}"
+
+
+async def eliminar_reunion(text: str) -> tuple[bool, str]:
+    response = await claude_create(
+        model="claude-sonnet-4-20250514", max_tokens=100,
+        system="Extrae el nombre de la reunión a eliminar. Responde SOLO JSON.",
+        messages=[{"role": "user", "content": f'Mensaje: {text}\nResponde: {{"search_term": "nombre de la reunion"}}'}]
+    )
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.strip("`").lstrip("json").strip()
+    search_term = json.loads(raw).get("search_term", "")
+    if not search_term:
+        return False, "No entendi qué reunión querés eliminar"
+    results = await _ds.search_meetings(search_term)
+    if not results:
+        return False, f"No encontré ninguna reunión llamada _{search_term}_"
+    meeting = results[0]
+    ok = await _ds.archive_meeting(meeting.id)
+    if ok:
+        return True, f"*{meeting.name}* eliminada de Notion"
+    return False, "Error eliminando la reunión"
+
+
 # ── MODULO SALUD ──────────────────────────────────────────────────────────────
 
 async def create_health_record(data: dict) -> tuple[bool, str]:
@@ -3336,6 +3667,32 @@ async def handle_salud_agent(phone: str, text: str, image_b64: str = None, image
                 "required": ["medication_id"]
             }
         },
+        {
+            "name": "editar_registro_salud",
+            "description": "Edita un registro médico existente: corrige el resumen, notas, valores clave o médico. Obtené el id de consultar_registros_salud.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "record_id":  {"type": "string"},
+                    "summary":    {"type": ["string", "null"]},
+                    "key_values": {"type": ["string", "null"], "description": "JSON con valores numéricos clave"},
+                    "notes":      {"type": ["string", "null"]},
+                    "doctor":     {"type": ["string", "null"]},
+                },
+                "required": ["record_id"]
+            }
+        },
+        {
+            "name": "eliminar_registro_salud",
+            "description": "Elimina (archiva) un registro médico. Obtené el id de consultar_registros_salud.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "record_id": {"type": "string"},
+                },
+                "required": ["record_id"]
+            }
+        },
     ]
 
     content = []
@@ -3428,6 +3785,16 @@ REGLAS:
             mid = inp.pop("medication_id")
             ok = await update_medication(mid, inp)
             tr = "Actualizada." if ok else "Error actualizando."
+
+        elif block.name == "editar_registro_salud":
+            rid = inp.pop("record_id")
+            ok = await _ds.update_health_record(rid, inp)
+            tr = "Registro actualizado." if ok else "Error actualizando el registro."
+
+        elif block.name == "eliminar_registro_salud":
+            rid = inp.get("record_id")
+            ok = await _ds.archive_health_record(rid)
+            tr = "Registro eliminado." if ok else "Error eliminando el registro."
 
         tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": tr})
 
@@ -3882,6 +4249,29 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
             await send_message(phone, "Ok, la task queda pendiente")
         return True
 
+    if state_type == "factura_note":
+        finance_page_id = state.get("finance_page_id")
+        task_page_id = state.get("task_page_id")
+        paid_amount = state.get("paid_amount")
+        payment_method = state.get("payment_method")
+        provider_name = state.get("provider_name", "la factura")
+        del pending_state[phone]
+        note = text.strip() if text.strip().lower() not in ["no", "nope", "dale", "ok", "si", "sí", ""] else None
+        await _ds.mark_finance_paid(finance_page_id, paid_amount, payment_method, note)
+        if task_page_id:
+            await mark_factura_task_paid(task_page_id)
+        else:
+            tasks = await get_pending_factura_tasks()
+            for t in tasks:
+                if t.get("finance_page_id") == finance_page_id:
+                    await mark_factura_task_paid(t["page_id"])
+                    break
+        msg = f"✅ *{provider_name}* marcada como pagada"
+        if note:
+            msg += " con nota guardada."
+        await send_message(phone, msg)
+        return True
+
     if state_type == "confirm_service_providers":
         proposed = state.get("proposed", {})
         del pending_state[phone]
@@ -4274,6 +4664,10 @@ async def process_single_item(phone: str, item: dict):
             reply = await handle_gasto_agent(phone, text, image_b64, image_type, exchange_rate, extra_images=extra_images)
             await send_message(phone, reply)
 
+        elif tipo == "DEUDA":
+            reply = await handle_deuda_agent(phone, text)
+            await send_message(phone, reply)
+
         elif tipo == "ELIMINAR_SHOPPING":
             success, msg = await eliminar_shopping(text)
             await send_message(phone, msg if success else msg)
@@ -4294,6 +4688,14 @@ async def process_single_item(phone: str, item: dict):
             else:
                 await send_message(phone, f"Error guardando planta: {error[:200]}")
 
+        elif tipo == "EDITAR_PLANTA":
+            success, msg = await editar_planta(text)
+            await send_message(phone, msg)
+
+        elif tipo == "ELIMINAR_PLANTA":
+            success, msg = await eliminar_planta(text)
+            await send_message(phone, msg)
+
         elif tipo in ("EVENTO", "EDITAR_EVENTO", "ELIMINAR_EVENTO"):
             reply = await handle_evento_agent(phone, text, image_b64, image_type)
             if reply:
@@ -4310,6 +4712,10 @@ async def process_single_item(phone: str, item: dict):
                 await send_message(phone, format_recordatorio(parsed))
             else:
                 await send_message(phone, f"No pude crear el recordatorio: {error[:100]}")
+
+        elif tipo == "CANCELAR_RECORDATORIO":
+            success, msg = await cancelar_recordatorio(text)
+            await send_message(phone, msg)
 
         elif tipo == "SHOPPING":
             shopping_text = text
@@ -4341,9 +4747,26 @@ async def process_single_item(phone: str, item: dict):
             if reply:
                 await send_message(phone, reply)
 
+        elif tipo == "ACTIVIDAD_FISICA":
+            reply = await handle_fitness_agent(phone, text, image_b64, image_type)
+            if reply:
+                await send_message(phone, reply)
+
         elif tipo == "REUNION":
             respuesta = await handle_reunion(text, image_b64, image_type)
             await send_message(phone, respuesta)
+
+        elif tipo == "EDITAR_REUNION":
+            success, msg = await editar_reunion(text)
+            await send_message(phone, msg)
+
+        elif tipo == "ELIMINAR_REUNION":
+            success, msg = await eliminar_reunion(text)
+            await send_message(phone, msg)
+
+        elif tipo == "CORREGIR_SHOPPING":
+            success, msg = await corregir_shopping(text)
+            await send_message(phone, msg)
 
         elif tipo == "CHAT":
             respuesta = await handle_chat(phone, text)
@@ -4455,6 +4878,174 @@ def format_recordatorio(data: dict) -> str:
     except Exception:
         tiempo_str = fire_at
     return f"{emoji} *{data['summary']}*\nTe aviso {tiempo_str}\n\nRecordatorio configurado"
+
+# ── MODULO FITNESS ────────────────────────────────────────────────────────────
+
+async def handle_fitness_agent(phone: str, text: str, image_b64: str = None, image_type: str = None) -> str:
+    now = now_argentina()
+    tools = [
+        {
+            "name": "registrar_actividad",
+            "description": "Guarda una actividad física. Si hay imagen de una app deportiva (Adidas Running, Strava, Nike Run Club, etc.), extraé todos los datos vos mismo de la imagen.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name":       {"type": "string", "description": "Descripción. Ej: 'Salida a correr — Parque Saavedra'"},
+                    "activity":   {"type": "string", "enum": ["Correr", "Fútbol", "Ciclismo", "Natación", "Gym", "Caminata", "Yoga", "Tenis", "Padel", "Otro"]},
+                    "date":       {"type": "string", "description": "YYYY-MM-DD"},
+                    "duration":   {"type": ["number", "null"], "description": "Minutos"},
+                    "distance":   {"type": ["number", "null"], "description": "Kilómetros"},
+                    "calories":   {"type": ["number", "null"]},
+                    "avg_speed":  {"type": ["number", "null"], "description": "km/h"},
+                    "elevation":  {"type": ["number", "null"], "description": "Metros de desnivel"},
+                    "notes":      {"type": ["string", "null"]},
+                    "source":     {"type": "string", "enum": ["Manual", "App"], "description": "Manual si lo dicta el usuario, App si viene de screenshot"},
+                    "source_app": {"type": ["string", "null"], "description": "Ej: 'Adidas Running', 'Strava'"},
+                },
+                "required": ["name", "activity", "date", "source"]
+            }
+        },
+        {
+            "name": "consultar_actividades",
+            "description": "Consulta el historial de actividades físicas para responder preguntas: km totales, promedio, comparaciones entre meses, etc.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "activity": {"type": ["string", "null"], "description": "Filtrar por tipo. Ej: 'Correr'"},
+                    "month":    {"type": ["string", "null"], "description": "YYYY-MM. Null para todos los registros."},
+                    "limit":    {"type": "integer", "description": "Default 30, max 100"},
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "editar_actividad",
+            "description": "Edita una actividad registrada. Obtené el id de consultar_actividades.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "entry_id":  {"type": "string"},
+                    "activity":  {"type": ["string", "null"]},
+                    "date":      {"type": ["string", "null"]},
+                    "duration":  {"type": ["number", "null"]},
+                    "distance":  {"type": ["number", "null"]},
+                    "calories":  {"type": ["number", "null"]},
+                    "avg_speed": {"type": ["number", "null"]},
+                    "elevation": {"type": ["number", "null"]},
+                    "notes":     {"type": ["string", "null"]},
+                },
+                "required": ["entry_id"]
+            }
+        },
+        {
+            "name": "eliminar_actividad",
+            "description": "Elimina una actividad registrada. Obtené el id de consultar_actividades.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "entry_id": {"type": "string"},
+                },
+                "required": ["entry_id"]
+            }
+        },
+    ]
+
+    content = []
+    if image_b64:
+        content.append({"type": "image", "source": {"type": "base64", "media_type": image_type or "image/jpeg", "data": image_b64}})
+    content.append({"type": "text", "text": text or "(ver imagen adjunta)"})
+
+    system = f"""Sos Knot, asistente personal en WhatsApp. Hablas en español rioplatense, natural y conciso.
+Hoy: {now.strftime('%d/%m/%Y')}.
+
+Tu tarea: registrar y consultar actividad física del usuario.
+
+REGLAS:
+- Si hay imagen de una app deportiva: extraé TODOS los datos que muestre (distancia, tiempo, velocidad, calorías, desnivel, etc.) sin pedirle nada al usuario.
+- Para consultas con comparaciones entre meses: hacé dos llamadas a consultar_actividades (una por mes) y calculá vos las diferencias.
+- Respondé con números concretos, no con listas genéricas."""
+
+    response = await claude_create(
+        model="claude-sonnet-4-20250514", max_tokens=1500,
+        system=system,
+        messages=get_history(phone) + [{"role": "user", "content": content}],
+        tools=tools
+    )
+
+    if response.stop_reason == "end_turn":
+        reply = next((b.text for b in response.content if hasattr(b, "text") and b.text), "").strip()
+        add_to_history(phone, "user", text or "")
+        add_to_history(phone, "assistant", reply)
+        return reply
+
+    tool_results = []
+    for block in response.content:
+        if block.type != "tool_use":
+            continue
+        inp = dict(block.input)
+        tr = ""
+
+        if block.name == "registrar_actividad":
+            ok, pid = await _ds.create_fitness(inp)
+            if ok:
+                tr = f"Actividad guardada. ID: {pid}"
+                asyncio.create_task(update_domain_profile_bg(
+                    "actividad_fisica",
+                    f"Actividad: {inp.get('activity')}, {inp.get('date')}, distancia: {inp.get('distance') or '-'}km, duración: {inp.get('duration') or '-'}min"
+                ))
+            else:
+                tr = f"Error: {pid}"
+
+        elif block.name == "consultar_actividades":
+            entries = await _ds.query_fitness(
+                activity=inp.get("activity"),
+                month=inp.get("month"),
+                limit=min(inp.get("limit", 30), 100),
+            )
+            if not entries:
+                tr = "No hay actividades registradas con esos filtros."
+            else:
+                lines = []
+                for e in entries:
+                    parts = [f"{e['date']} — {e['activity']}"]
+                    if e["distance"]: parts.append(f"{e['distance']}km")
+                    if e["duration"]: parts.append(f"{e['duration']}min")
+                    if e["calories"]: parts.append(f"{e['calories']}kcal")
+                    if e["avg_speed"]: parts.append(f"{e['avg_speed']}km/h")
+                    lines.append(f"[{e['id']}] " + " | ".join(parts))
+                tr = "\n".join(lines)
+
+        elif block.name == "editar_actividad":
+            eid = inp.pop("entry_id")
+            ok = await _ds.update_fitness(eid, inp)
+            tr = "Actualizado." if ok else "Error actualizando."
+
+        elif block.name == "eliminar_actividad":
+            ok = await _ds.archive_fitness(inp["entry_id"])
+            tr = "Eliminado." if ok else "Error eliminando."
+
+        tool_results.append({"type": "tool_result", "tool_use_id": block.id, "content": tr})
+
+    if not tool_results:
+        reply = next((b.text for b in response.content if hasattr(b, "text") and b.text), "").strip()
+        add_to_history(phone, "user", text or "")
+        add_to_history(phone, "assistant", reply)
+        return reply
+
+    final = await claude_create(
+        model="claude-sonnet-4-20250514", max_tokens=800,
+        system=system,
+        messages=get_history(phone) + [
+            {"role": "user", "content": content},
+            {"role": "assistant", "content": response.content},
+            {"role": "user", "content": tool_results},
+        ]
+    )
+    reply = next((b.text for b in final.content if hasattr(b, "text") and b.text), "").strip()
+    add_to_history(phone, "user", text or "")
+    add_to_history(phone, "assistant", reply)
+    return reply
+
 
 # ── CRON JOB ───────────────────────────────────────────────────────────────────
 @app.get("/cron")
@@ -4581,13 +5172,41 @@ async def get_pending_factura_tasks() -> list[dict]:
     except Exception:
         return []
 
-async def create_factura_task(provider: str, amount: float, due_date: str, period: str) -> tuple[bool, str]:
+async def create_factura_task(provider: str, amount: float, due_date: str, period: str, finance_page_id: str = None) -> tuple[bool, str]:
     """Crea una task de factura pendiente. Evita duplicados por proveedor + periodo."""
-    return await _ds.create_factura_task(provider, amount, due_date, period)
+    return await _ds.create_factura_task(provider, amount, due_date, period, finance_page_id=finance_page_id)
 
 async def mark_factura_task_paid(page_id: str) -> bool:
     """Marca una task de factura como Listo."""
     return await _ds.mark_factura_task_paid(page_id)
+
+async def handle_deuda_agent(phone: str, text: str) -> str:
+    """Registra una deuda pendiente: crea entrada Impaga en Finanzas + Task."""
+    now = now_argentina()
+    response = await claude_create(
+        model="claude-haiku-4-5-20251001", max_tokens=200,
+        system=f"Hoy: {now.strftime('%Y-%m-%d')}. Extrae la deuda del mensaje. Responde SOLO JSON valido: {{\"provider\": \"nombre de la persona o servicio\", \"amount\": monto numerico o null, \"categoria\": \"categoria (ej: Personal, Servicios, Depto)\", \"notes\": \"detalle si hay\"}}",
+        messages=[{"role": "user", "content": text}]
+    )
+    try:
+        data = json.loads(response.content[0].text.strip().strip("`").lstrip("json").strip())
+    except Exception:
+        return "No entendí la deuda. Decime a quién le debés y cuánto."
+    provider = data.get("provider", "")
+    amount = float(data.get("amount") or 0)
+    categoria = data.get("categoria") or "Personal"
+    notes = data.get("notes") or ""
+    period = now.strftime("%B %Y")
+    if not provider:
+        return "No entendí a quién le debés. ¿Podés aclarar?"
+    ok, page_id = await _ds.create_finance_invoice(provider, amount, period, category=categoria)
+    if ok and notes:
+        await _ds._update_page(page_id, {"Notes": {"rich_text": [{"text": {"content": notes}}]}})
+    task_ok, _ = await create_factura_task(provider, amount, "", period, finance_page_id=page_id if ok else None)
+    if ok or task_ok:
+        monto_str = f"${amount:,.0f}" if amount else "monto a confirmar"
+        return f"✅ Deuda registrada: *{provider}* — {monto_str}. Te voy a recordar hasta que la marques como pagada."
+    return "No pude registrar la deuda. Intenta de nuevo."
 
 async def send_daily_summary(http, access_token: str, now: datetime):
     _hora = now.hour
@@ -4613,12 +5232,19 @@ async def send_daily_summary(http, access_token: str, now: datetime):
             events = [e for e in r.json().get("items", []) if "[TEMP]" not in (e.get("description") or "")]
     except Exception:
         pass
-    w = await get_weather()
     await load_user_config(MY_NUMBER)
+    w = await get_weather()
     greeting = user_prefs.get("greeting_name") or _saludo_tiempo
     lines = [f"*{greeting}!*", ""]
     if w:
-        lines.append(f"🌡️ {w['temp']}C (sensacion {w['sensacion']}C) -- {w['emoji']} {w['desc']}")
+        _loc_src = current_location.get("source", "unknown")
+        _loc_name = current_location.get("location_name")
+        _loc_header = ""
+        if _loc_src == "restored" and _loc_name:
+            _loc_header = f" _(ultima ubicacion guardada: {_loc_name})_"
+        elif _loc_src not in ("owntracks", "whatsapp") and _loc_name:
+            _loc_header = f" _({_loc_name})_"
+        lines.append(f"🌡️ {w['temp']}C (sensacion {w['sensacion']}C) -- {w['emoji']} {w['desc']}{_loc_header}")
         if w["lluvia"] > 0:
             lines.append(f"🌧️ Lluvia ahora: {w['lluvia']}mm")
         lines.append(f"💨 {w['wind_desc']} ({w['viento']} km/h)")
@@ -4677,94 +5303,65 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                 else:
                     lines.append(f"- {e.get('summary', 'Evento')} (todo el dia){loc_str}")
 
-    # Facturas: cruzar Gmail con Notion (mes actual + anterior) antes de mostrar
-    gmail_summary = await get_gmail_summary()
-    if gmail_summary:
-        mes_actual = now.strftime("%Y-%m")
-        year_f, mon_f = map(int, mes_actual.split("-"))
-        mes_anterior = f"{year_f}-{mon_f-1:02d}" if mon_f > 1 else f"{year_f-1}-12"
-        svc_actual = await query_servicios_mes(mes_actual)
-        svc_anterior = await query_servicios_mes(mes_anterior)
-        finances_context = f"{svc_actual}\n\n{svc_anterior}"
-        # Buscar tambien por nombre de proveedor para matchear aunque no sea categoria Servicios
-        _provs = user_prefs.get("service_providers", {})
-        if _provs:
-            _extra = []
-            for _p in list(_provs.values())[:6]:
-                _kw = _p.split()[0] if _p else ""
-                if len(_kw) >= 3:
-                    for _m in [mes_actual, mes_anterior]:
-                        _h = await buscar_gastos(_kw, _m)
-                        if "No encontre" not in _h and _h not in finances_context:
-                            _extra.append(_h)
-            if _extra:
-                finances_context += "\n\nPor proveedor:\n" + "\n".join(_extra)
-        filtered_gmail = gmail_summary
-        try:
-            filter_resp = await claude_create(
-                model="claude-sonnet-4-20250514", max_tokens=400,
-                system="""Sos Knot. Tenes facturas detectadas en Gmail y pagos de Servicios registrados en Notion (este mes y el anterior).
+    # Facturas: usar DB de Finanzas como fuente de verdad
+    try:
+        gmail_summary = await get_gmail_summary()
+        # Procesar nuevas facturas de Gmail
+        if gmail_summary:
+            period_str = now.strftime("%B %Y")
+            try:
+                extract_resp = await claude_create(
+                    model="claude-haiku-4-5-20251001", max_tokens=400,
+                    system="Extrae facturas/servicios del resumen de Gmail. Responde SOLO JSON array. Si no hay facturas, responde []. Formato: [{\"provider\": \"nombre\", \"amount\": numero_o_null, \"due_date\": \"YYYY-MM-DD_o_null\", \"period\": \"Mes YYYY\", \"category\": \"Servicios\"}]",
+                    messages=[{"role": "user", "content": gmail_summary}]
+                )
+                raw = extract_resp.content[0].text.strip().strip("`").lstrip("json").strip()
+                invoices = json.loads(raw) if raw.startswith("[") else []
+            except Exception:
+                invoices = []
 
-Tu tarea: para cada factura del Gmail, determina si ya fue pagada.
+            for inv in invoices:
+                provider = inv.get("provider", "")
+                amount = float(inv.get("amount") or 0)
+                period = inv.get("period") or period_str
+                due_date = inv.get("due_date") or ""
+                if not provider:
+                    continue
+                # Verificar si ya existe entrada Pagada reciente con monto similar
+                historial = await _ds.get_finance_history_by_provider(provider, limit=2)
+                ya_pagada = False
+                pago_dudoso = None
+                for h in historial:
+                    if amount and h.value_ars:
+                        diff = abs(h.value_ars - amount) / max(amount, 1)
+                        if diff <= 0.10:
+                            ya_pagada = True
+                            break
+                        elif diff > 0.10:
+                            pago_dudoso = h
+                if ya_pagada:
+                    continue
+                # Crear entrada Impaga + Task si no existe
+                ok, page_id = await _ds.create_finance_invoice(provider, amount, period, due_date, inv.get("category", "Servicios"))
+                if ok:
+                    await create_factura_task(provider, amount, due_date, period, finance_page_id=page_id)
+                # Si hay pago dudoso, agregar nota al resumen
+                if pago_dudoso and amount:
+                    lines.append(f"_⚠️ {provider}: factura ${amount:,.0f} pero último pago registrado ${pago_dudoso.value_ars:,.0f} — revisá si coincide._")
 
-Reglas de matching:
-- El nombre puede diferir: "CALF", "luz", "electricidad", "CALF Energia" son el mismo proveedor
-- Los montos pueden diferir hasta un 10% (ej: factura $62.728 y pago $62.000 = pagada)
-- Fijate en el periodo de la factura: si dice "periodo 02/26" y hay un pago de febrero, coincide
-- Si el item de Notion dice el mes (ej "Luz marzo"), cruzalo con el periodo de la factura
-- Si encontras un pago del mes anterior que podria corresponder a la factura actual, aclaralo
-- Si hay dudas reales sobre si un pago corresponde, mencionalo brevemente
-
-CRITICO - fechas de vencimiento: usa SOLO fechas que aparezcan textualmente en el mail. Si el mail no dice explicitamente la fecha de vencimiento, NO la incluyas. NUNCA inventes ni inferiras fechas de vencimiento.
-CRITICO - no menciones facturas que ya esten claramente pagas. Si una factura tiene un pago registrado que cumple las reglas de matching, no la menciones en absoluto.
-
-Mostrar SOLO las facturas sin pago registrado claro. Si todas estan pagas, responde exactamente: "Todas las facturas están al día." Sin más detalle. Espanol rioplatense, conciso.""",
-                messages=[{"role": "user", "content": f"Facturas en Gmail:\n{gmail_summary}\n\nPagos registrados en Notion:\n{finances_context}"}]
-            )
-            filtered_gmail = filter_resp.content[0].text.strip()
-        except Exception:
-            pass
-        _todo_pago = any(phrase in filtered_gmail.lower() for phrase in [
-            "todas", "todo", "al día", "al dia", "pagadas", "pagados", "sin pendientes", "no hay facturas"
-        ]) and not any(phrase in filtered_gmail.lower() for phrase in [
-            "pendiente", "vence", "vencida", "sin pago", "no registr"
-        ])
-        if _todo_pago:
+        # Mostrar estado de facturas desde DB (fuente de verdad)
+        impagas = await _ds.get_impaga_facturas()
+        if impagas:
             lines.append("")
-            lines.append("✅ Facturas al día")
+            lines.append("*Facturas pendientes:*")
+            for imp in impagas:
+                monto = f"${imp.value_ars:,.0f}" if imp.value_ars else ""
+                lines.append(f"- {imp.name} {monto}".strip())
         else:
             lines.append("")
-            lines.append(f"*Facturas:*\n{filtered_gmail}")
-        # Auto-crear tasks en Notion para facturas pendientes
-        if filtered_gmail and not _todo_pago:
-            try:
-                tasks_resp = await claude_create(
-                    model="claude-sonnet-4-20250514", max_tokens=400,
-                    system="Extraé SOLO las facturas que NO tienen pago registrado confirmado. Ignora cualquier factura que el texto marque como pagada, pagada exacta, o con pago registrado. Responde SOLO array JSON sin markdown. Si no hay facturas pendientes reales, responde array vacio [].",
-                messages=[{"role": "user", "content": f"""Texto de facturas:
-{filtered_gmail}
-Extraé SOLO las facturas sin pago registrado claro. NO incluyas las que digan "pagada", "pago registrado", "pagada exacta" o similar.
-Responde SOLO:
-[{{"provider": "nombre empresa", "amount": numero o null, "due_date": "YYYY-MM-DD o null", "period": "Mes YYYY"}}]"""}]
-                )
-                raw_inv = tasks_resp.content[0].text.strip().strip("`").lstrip("json").strip()
-                invoices = json.loads(raw_inv)
-                created = []
-                for inv in invoices:
-                    if not inv.get("provider"):
-                        continue
-                    ok, _ = await create_factura_task(
-                        provider=inv.get("provider", ""),
-                        amount=float(inv.get("amount") or 0),
-                        due_date=inv.get("due_date") or "",
-                        period=inv.get("period") or now.strftime("%B %Y")
-                    )
-                    if ok:
-                        created.append(inv["provider"])
-                if created:
-                    lines.append(f"_📋 Tasks creadas: {', '.join(created)}_")
-            except Exception:
-                pass
+            lines.append("✅ Facturas al día")
+    except Exception:
+        pass
 
     extras = user_prefs.get("resumen_extras", [])
     if extras:

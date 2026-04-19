@@ -63,6 +63,7 @@ except ImportError:
         emoji: str = ""
         notes: str = None
         liters: float = None
+        estado: str = None
 
     @dataclass
     class ShoppingItem:
@@ -393,6 +394,7 @@ class NotionDataStore:
             emoji=page.get("icon", {}).get("emoji", ""),
             notes=_get_text(props, "Notes") or None,
             liters=_get_number(props, "Liters"),
+            estado=_get_select(props, "Estado") or None,
         )
 
     async def create_expense(self, data: dict) -> EntryResult:
@@ -428,6 +430,10 @@ class NotionDataStore:
             props["Consumption (kWh)"] = {"number": float(data["consumo_kwh"])}
         if data.get("notes"):
             props["Notes"] = {"rich_text": [{"text": {"content": data["notes"]}}]}
+        if data.get("estado"):
+            props["Estado"] = {"select": {"name": data["estado"]}}
+        if data.get("medio_pago"):
+            props["Method"] = {"select": {"name": data["medio_pago"]}}
 
         emoji = data.get("emoji") or "\U0001f4b8"
         page = await self._create_page("finances", props, emoji=emoji)
@@ -874,6 +880,15 @@ class NotionDataStore:
     async def archive_plant(self, plant_id: str) -> bool:
         return await self._archive_page(plant_id)
 
+    async def search_plants(self, query: str) -> list[PlantEntry]:
+        """Search plants by name (partial match)."""
+        pages = await self._query_db(
+            "plants",
+            filter_obj={"property": "Name", "title": {"contains": query[:30]}},
+            page_size=5,
+        )
+        return [self._parse_plant(p) for p in pages]
+
     # ══════════════════════════════════════════════════════════════════════
     # MEETINGS
     # ══════════════════════════════════════════════════════════════════════
@@ -934,6 +949,16 @@ class NotionDataStore:
 
     async def archive_meeting(self, meeting_id: str) -> bool:
         return await self._archive_page(meeting_id)
+
+    async def search_meetings(self, query: str, limit: int = 5) -> list[MeetingEntry]:
+        """Search meetings by name (partial match)."""
+        pages = await self._query_db(
+            "meetings",
+            filter_obj={"property": "Name", "title": {"contains": query[:50]}},
+            sorts=[{"property": "Date", "direction": "descending"}],
+            page_size=limit,
+        )
+        return [self._parse_meeting(p) for p in pages]
 
     # ══════════════════════════════════════════════════════════════════════
     # TASKS
@@ -1034,11 +1059,108 @@ class NotionDataStore:
                 "provider": meta.get("provider", ""),
                 "amount": meta.get("amount", 0),
                 "period": meta.get("period", ""),
+                "finance_page_id": meta.get("finance_page_id", ""),
             })
         return tasks
 
+    async def ensure_db_select_field(self, db_name: str, field_name: str, options: list) -> bool:
+        """Add a select field to a Notion DB if it doesn't already exist."""
+        try:
+            r = await self._http.patch(
+                f"{NOTION_API}/databases/{self._db(db_name)}",
+                headers=self._headers_cache,
+                json={"properties": {field_name: {"select": {"options": [{"name": o} for o in options]}}}},
+            )
+            return r.status_code == 200
+        except Exception:
+            return False
+
+    async def create_finance_invoice(
+        self, provider: str, amount: float, period: str, due_date: str = "", category: str = "Servicios"
+    ) -> tuple[bool, str]:
+        """Create an Impaga finance entry. Returns (success, page_id). Deduplicates by provider+period."""
+        import re
+        existing = await self.get_impaga_facturas(provider=provider)
+        new_digits = set(re.findall(r"\d+", period or ""))
+        for e in existing:
+            if new_digits and new_digits & set(re.findall(r"\d+", e.name)):
+                return False, "duplicate"
+        from datetime import timezone
+        now = datetime.now(timezone.utc) - timedelta(hours=3)
+        entry = await self.create_expense({
+            "name": f"💸 Factura {provider} — {period}",
+            "in_out": "← EGRESO →",
+            "value_ars": amount or 0,
+            "categories": [category],
+            "method": "Payment",
+            "date": now.strftime("%Y-%m-%d"),
+            "estado": "Impaga",
+            "emoji": "💸",
+        })
+        return True, entry.id
+
+    async def get_impaga_facturas(self, provider: str = None) -> list:
+        """Returns Estado=Impaga finance entries, ordered by date desc."""
+        filter_obj = {"and": [{"property": "Estado", "select": {"equals": "Impaga"}}]}
+        if provider:
+            filter_obj["and"].append({"property": "Name", "title": {"contains": provider}})
+        try:
+            pages = await self._query_db(
+                "finances",
+                filter_obj=filter_obj,
+                sorts=[{"property": "Date", "direction": "descending"}],
+                page_size=20,
+            )
+            return [self._parse_expense(p) for p in pages]
+        except Exception:
+            return []
+
+    async def get_finance_history_by_provider(self, provider: str, limit: int = 5) -> list:
+        """Returns paid finance entries for a provider (Estado=Pagada or empty)."""
+        filter_obj = {"and": [
+            {"property": "Name", "title": {"contains": provider}},
+            {"or": [
+                {"property": "Estado", "select": {"equals": "Pagada"}},
+                {"property": "Estado", "select": {"is_empty": True}},
+            ]},
+        ]}
+        try:
+            pages = await self._query_db(
+                "finances",
+                filter_obj=filter_obj,
+                sorts=[{"property": "Date", "direction": "descending"}],
+                page_size=limit,
+            )
+            return [self._parse_expense(p) for p in pages]
+        except Exception:
+            return []
+
+    async def mark_finance_paid(
+        self, page_id: str, paid_amount: float = None, payment_method: str = None, notes: str = None
+    ) -> bool:
+        """Mark a finance entry as Pagada, optionally updating amount, method, notes."""
+        try:
+            props = {"Estado": {"select": {"name": "Pagada"}}}
+            if paid_amount is not None:
+                props["Value (ars)"] = {"number": float(paid_amount)}
+            if payment_method:
+                props["Method"] = {"select": {"name": payment_method}}
+            if notes:
+                page_r = await self._http.get(
+                    f"{NOTION_API}/pages/{page_id}", headers=self._headers_cache
+                )
+                existing_notes = ""
+                if page_r.status_code == 200:
+                    existing_notes = _get_text(page_r.json().get("properties", {}), "Notes") or ""
+                new_notes = (existing_notes + "\n" + notes).strip() if existing_notes else notes
+                props["Notes"] = {"rich_text": [{"text": {"content": new_notes[:2000]}}]}
+            await self._update_page(page_id, props)
+            return True
+        except Exception:
+            return False
+
     async def create_factura_task(
-        self, provider: str, amount: float, due_date: str, period: str
+        self, provider: str, amount: float, due_date: str, period: str, finance_page_id: str = None
     ) -> tuple[bool, str]:
         """
         Create a pending bill task. Avoids duplicates by provider + period.
@@ -1062,7 +1184,10 @@ class NotionDataStore:
 
         from datetime import timezone
         now = datetime.now(timezone.utc) - timedelta(hours=3)
-        meta = json.dumps({"provider": provider, "amount": amount, "period": period}, ensure_ascii=False)
+        meta_dict = {"provider": provider, "amount": amount, "period": period}
+        if finance_page_id:
+            meta_dict["finance_page_id"] = finance_page_id
+        meta = json.dumps(meta_dict, ensure_ascii=False)
         priority = "Media"
         if due_date:
             try:
@@ -1224,6 +1349,28 @@ class NotionDataStore:
             })
         return results
 
+    async def update_health_record(self, page_id: str, updates: dict) -> bool:
+        """Update a health record. Supported keys: name, summary, key_values, notes, doctor."""
+        props = {}
+        if "name" in updates:
+            props["Name"] = {"title": [{"text": {"content": updates["name"]}}]}
+        if "summary" in updates:
+            props["Summary"] = {"rich_text": [{"text": {"content": updates["summary"][:2000]}}]}
+        if "key_values" in updates:
+            props["Key Values"] = {"rich_text": [{"text": {"content": updates["key_values"][:2000]}}]}
+        if "notes" in updates:
+            props["Notes"] = {"rich_text": [{"text": {"content": updates["notes"][:2000]}}]}
+        if "doctor" in updates:
+            props["Doctor"] = {"rich_text": [{"text": {"content": updates["doctor"]}}]}
+        try:
+            await self._update_page(page_id, props)
+            return True
+        except Exception:
+            return False
+
+    async def archive_health_record(self, page_id: str) -> bool:
+        return await self._archive_page(page_id)
+
     # ══════════════════════════════════════════════════════════════════════
     # MEDICATIONS
     # ══════════════════════════════════════════════════════════════════════
@@ -1286,6 +1433,109 @@ class NotionDataStore:
             return True
         except Exception:
             return False
+
+    # ══════════════════════════════════════════════════════════════════════
+    # FITNESS
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _parse_fitness(self, page: dict) -> dict:
+        p = page.get("properties", {})
+        return {
+            "id":         page["id"],
+            "name":       _get_title(p),
+            "activity":   _get_select(p, "Activity"),
+            "date":       _get_date(p, "Date"),
+            "duration":   _get_number(p, "Duration"),
+            "distance":   _get_number(p, "Distance"),
+            "calories":   _get_number(p, "Calories"),
+            "avg_speed":  _get_number(p, "Avg Speed"),
+            "elevation":  _get_number(p, "Elevation"),
+            "notes":      _get_text(p, "Notes"),
+            "source":     _get_select(p, "Source"),
+            "source_app": _get_text(p, "Source App"),
+        }
+
+    async def create_fitness(self, data: dict) -> tuple[bool, str]:
+        """Create a fitness entry.
+        data keys: name, activity, date, duration, distance, calories, avg_speed, elevation, notes, source, source_app
+        """
+        props = {
+            "Name": {"title": [{"text": {"content": data.get("name", "Actividad")}}]},
+        }
+        if data.get("activity"):
+            props["Activity"] = {"select": {"name": data["activity"]}}
+        if data.get("date"):
+            props["Date"] = {"date": {"start": data["date"]}}
+        for num_field, key in [("Duration", "duration"), ("Distance", "distance"),
+                                ("Calories", "calories"), ("Avg Speed", "avg_speed"),
+                                ("Elevation", "elevation")]:
+            if data.get(key) is not None:
+                props[num_field] = {"number": float(data[key])}
+        if data.get("notes"):
+            props["Notes"] = {"rich_text": [{"text": {"content": data["notes"][:2000]}}]}
+        props["Source"] = {"select": {"name": data.get("source", "Manual")}}
+        if data.get("source_app"):
+            props["Source App"] = {"rich_text": [{"text": {"content": data["source_app"]}}]}
+        try:
+            page = await self._create_page("fitness", props)
+            return True, page["id"]
+        except Exception as e:
+            return False, str(e)
+
+    async def query_fitness(self, activity: str = None, month: str = None, limit: int = 20) -> list[dict]:
+        """Query fitness entries. Optionally filter by activity type and/or month (YYYY-MM)."""
+        filters = []
+        if activity:
+            filters.append({"property": "Activity", "select": {"equals": activity}})
+        if month:
+            try:
+                from datetime import datetime as _dt
+                start = f"{month}-01"
+                import calendar as _cal
+                y, m = int(month[:4]), int(month[5:7])
+                end = f"{month}-{_cal.monthrange(y, m)[1]:02d}"
+                filters.append({"property": "Date", "date": {"on_or_after": start}})
+                filters.append({"property": "Date", "date": {"on_or_before": end}})
+            except Exception:
+                pass
+        if len(filters) > 1:
+            filter_obj = {"and": filters}
+        elif filters:
+            filter_obj = filters[0]
+        else:
+            filter_obj = None
+        pages = await self._query_db(
+            "fitness",
+            filter_obj=filter_obj,
+            sorts=[{"property": "Date", "direction": "descending"}],
+            page_size=limit,
+        )
+        return [self._parse_fitness(p) for p in pages]
+
+    async def update_fitness(self, entry_id: str, updates: dict) -> bool:
+        """Update a fitness entry. Supported keys: name, activity, date, duration, distance, calories, avg_speed, elevation, notes"""
+        props = {}
+        if "name" in updates:
+            props["Name"] = {"title": [{"text": {"content": updates["name"]}}]}
+        if "activity" in updates:
+            props["Activity"] = {"select": {"name": updates["activity"]}}
+        if "date" in updates:
+            props["Date"] = {"date": {"start": updates["date"]}}
+        for num_field, key in [("Duration", "duration"), ("Distance", "distance"),
+                                ("Calories", "calories"), ("Avg Speed", "avg_speed"),
+                                ("Elevation", "elevation")]:
+            if updates.get(key) is not None:
+                props[num_field] = {"number": float(updates[key])}
+        if "notes" in updates:
+            props["Notes"] = {"rich_text": [{"text": {"content": updates["notes"][:2000]}}]}
+        try:
+            await self._update_page(entry_id, props)
+            return True
+        except Exception:
+            return False
+
+    async def archive_fitness(self, entry_id: str) -> bool:
+        return await self._archive_page(entry_id)
 
     # ══════════════════════════════════════════════════════════════════════
     # GEO-REMINDERS
