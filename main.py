@@ -1044,7 +1044,7 @@ async def create_evento_gcal(data: dict) -> tuple[bool, str]:
         "summary": data.get("summary", "Evento"),
         "start": start,
         "end": end,
-        "source": {"title": "Matrics", "url": "https://web-production-6874a.up.railway.app"},
+        "source": {"title": "Knot", "url": "https://web-production-6874a.up.railway.app"},
         "colorId": get_event_color(data.get("summary", "")),
         "extendedProperties": {"private": {"created_by": "matrics", "type": "evento"}},
     }
@@ -3706,7 +3706,7 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
         del pending_state[phone]
         if text.strip() == "recipe_save_yes":
             await send_message(phone, "Guardando receta en Notion...")
-            ok, err = await save_recipe_to_notion(recipe_name, source="Matrics", ingredient_names=ingredients, recipe_text=recipe_text)
+            ok, err = await save_recipe_to_notion(recipe_name, source="Knot", ingredient_names=ingredients, recipe_text=recipe_text)
             if not ok:
                 await send_message(phone, f"Error guardando la receta: {err}")
                 return True
@@ -4433,7 +4433,7 @@ async def create_recordatorio(data: dict) -> tuple[bool, str]:
         "description": "[TEMP]",
         "start": {"dateTime": f"{fire_at}:00", "timeZone": "America/Argentina/Buenos_Aires"},
         "end":   {"dateTime": end_dt.strftime("%Y-%m-%dT%H:%M:00"), "timeZone": "America/Argentina/Buenos_Aires"},
-        "source":   {"title": "Matrics", "url": "https://web-production-6874a.up.railway.app"},
+        "source":   {"title": "Knot", "url": "https://web-production-6874a.up.railway.app"},
         "colorId":  "4",
         "extendedProperties": {"private": {"created_by": "matrics", "type": "recordatorio"}},
     }
@@ -5318,7 +5318,7 @@ def _parse_bold(text: str) -> list:
         parts.append({"type": "text", "text": {"content": remaining}})
     return parts if parts else [{"type": "text", "text": {"content": text}}]
 
-async def save_recipe_to_notion(recipe_name: str, source: str = "Matrics", ingredient_names: list[str] = None, recipe_text: str = None) -> tuple[bool, str]:
+async def save_recipe_to_notion(recipe_name: str, source: str = "Knot", ingredient_names: list[str] = None, recipe_text: str = None) -> tuple[bool, str]:
     try:
         try:
             props_response = await claude_create(

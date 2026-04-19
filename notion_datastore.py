@@ -775,7 +775,7 @@ class NotionDataStore:
         """
         props = {
             "Name": {"title": [{"text": {"content": data.get("name", "").capitalize()}}]},
-            "Source": {"select": {"name": data.get("source", "Matrics")}},
+            "Source": {"select": {"name": data.get("source", "Knot")}},
         }
         if data.get("difficulty") in ["Easy", "Moderate", "Hard"]:
             props["Difficult "] = {"select": {"name": data["difficulty"]}}
@@ -896,7 +896,7 @@ class NotionDataStore:
         """
         props = {
             "Name": {"title": [{"text": {"content": data.get("name", "Meeting")}}]},
-            "Source": {"select": {"name": "Matrics"}},
+            "Source": {"select": {"name": "Knot"}},
         }
         if data.get("with_whom"):
             props["With"] = {"rich_text": [{"text": {"content": data["with_whom"]}}]}
@@ -1011,7 +1011,7 @@ class NotionDataStore:
         conditions = [
             {"property": "Category", "select": {"equals": "Finanzas"}},
             {"property": "Status", "status": {"does_not_equal": "Listo"}},
-            {"property": "Source", "select": {"equals": "Matrics"}},
+            {"property": "Source", "select": {"equals": "Knot"}},
         ]
         pages = await self._query_db(
             "tasks",
@@ -1074,7 +1074,7 @@ class NotionDataStore:
         task = await self.create_task({
             "name": f"\U0001f4b0 Pagar {provider} \u2014 {period}",
             "category": "Finanzas",
-            "source": "Matrics",
+            "source": "Knot",
             "notes": meta,
             "due_date": due_date,
             "priority": priority,
@@ -1119,7 +1119,7 @@ class NotionDataStore:
             "Entry Type": {"select": {"name": data.get("entry_type", "Proyecto")}},
             "Area": {"select": {"name": data.get("area", "Personal")}},
             "Status": {"status": {"name": "Sin empezar"}},
-            "Source": {"select": {"name": "Matrics"}},
+            "Source": {"select": {"name": "Knot"}},
             "Date": {"date": {"start": now.strftime("%Y-%m-%d")}},
         }
         if data.get("description"):
