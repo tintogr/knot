@@ -276,24 +276,28 @@ class NotionDataStore:
     """
 
     def __init__(self, token: str, db_ids: dict):
-        self._token = token
-        self._db_ids = db_ids
+        self._db_ids = {k: v.replace("-", "") for k, v in db_ids.items()}
+        self._headers_cache = {
+            "Authorization": f"Bearer {token}",
+            "Notion-Version": NOTION_VERSION,
+            "Content-Type": "application/json",
+        }
+        self._http = httpx.AsyncClient(timeout=15)
+
+    async def aclose(self):
+        await self._http.aclose()
 
     # ── Internal HTTP helpers ──────────────────────────────────────────────
 
     def _headers(self) -> dict:
-        return {
-            "Authorization": f"Bearer {self._token}",
-            "Notion-Version": NOTION_VERSION,
-            "Content-Type": "application/json",
-        }
+        return self._headers_cache
 
     def _db(self, name: str) -> str:
         """Return the clean database ID. Raises an error if not configured."""
         db_id = self._db_ids.get(name)
         if not db_id:
             raise DataStoreError(f"Database '{name}' not configured in db_ids")
-        return _clean_db_id(db_id)
+        return db_id
 
     async def _query_db(
         self,
@@ -308,15 +312,14 @@ class NotionDataStore:
             body["filter"] = filter_obj
         if sorts:
             body["sorts"] = sorts
-        async with httpx.AsyncClient(timeout=15) as http:
-            r = await http.post(
-                f"{NOTION_API}/databases/{self._db(db_name)}/query",
-                headers=self._headers(),
-                json=body,
-            )
-            if r.status_code != 200:
-                raise DataStoreError(f"Query {db_name} failed ({r.status_code}): {r.text[:200]}")
-            return r.json().get("results", [])
+        r = await self._http.post(
+            f"{NOTION_API}/databases/{self._db(db_name)}/query",
+            headers=self._headers_cache,
+            json=body,
+        )
+        if r.status_code != 200:
+            raise DataStoreError(f"Query {db_name} failed ({r.status_code}): {r.text[:200]}")
+        return r.json().get("results", [])
 
     async def _create_page(
         self,
@@ -331,47 +334,43 @@ class NotionDataStore:
         }
         if emoji:
             body["icon"] = {"type": "emoji", "emoji": emoji}
-        async with httpx.AsyncClient(timeout=15) as http:
-            r = await http.post(
-                f"{NOTION_API}/pages",
-                headers=self._headers(),
-                json=body,
-            )
-            if r.status_code not in (200, 201):
-                raise DataStoreError(f"Create in {db_name} failed ({r.status_code}): {r.text[:200]}")
-            return r.json()
+        r = await self._http.post(
+            f"{NOTION_API}/pages",
+            headers=self._headers_cache,
+            json=body,
+        )
+        if r.status_code not in (200, 201):
+            raise DataStoreError(f"Create in {db_name} failed ({r.status_code}): {r.text[:200]}")
+        return r.json()
 
     async def _update_page(self, page_id: str, props: dict) -> dict:
         """Update page properties. Returns the updated page."""
-        async with httpx.AsyncClient(timeout=15) as http:
-            r = await http.patch(
-                f"{NOTION_API}/pages/{page_id}",
-                headers=self._headers(),
-                json={"properties": props},
-            )
-            if r.status_code != 200:
-                raise DataStoreError(f"Update {page_id} failed ({r.status_code}): {r.text[:200]}")
-            return r.json()
+        r = await self._http.patch(
+            f"{NOTION_API}/pages/{page_id}",
+            headers=self._headers_cache,
+            json={"properties": props},
+        )
+        if r.status_code != 200:
+            raise DataStoreError(f"Update {page_id} failed ({r.status_code}): {r.text[:200]}")
+        return r.json()
 
     async def _archive_page(self, page_id: str) -> bool:
         """Archive (soft-delete) a page."""
-        async with httpx.AsyncClient(timeout=15) as http:
-            r = await http.patch(
-                f"{NOTION_API}/pages/{page_id}",
-                headers=self._headers(),
-                json={"archived": True},
-            )
-            return r.status_code == 200
+        r = await self._http.patch(
+            f"{NOTION_API}/pages/{page_id}",
+            headers=self._headers_cache,
+            json={"archived": True},
+        )
+        return r.status_code == 200
 
     async def _append_blocks(self, page_id: str, blocks: list[dict]) -> bool:
         """Append content blocks to a page (used for recipes, etc.)."""
-        async with httpx.AsyncClient(timeout=15) as http:
-            r = await http.patch(
-                f"{NOTION_API}/blocks/{page_id}/children",
-                headers=self._headers(),
-                json={"children": blocks[:100]},
-            )
-            return r.status_code == 200
+        r = await self._http.patch(
+            f"{NOTION_API}/blocks/{page_id}/children",
+            headers=self._headers_cache,
+            json={"children": blocks[:100]},
+        )
+        return r.status_code == 200
 
     # ══════════════════════════════════════════════════════════════════════
     # FINANCES
@@ -1276,11 +1275,13 @@ class NotionDataStore:
         except Exception:
             known = []
 
+        _hour = _get_number(props, "Resumen Hour")
+        _min  = _get_number(props, "Resumen Minute")
         config = UserConfig(
             phone=phone or _get_text(props, "WA Number"),
             greeting_name=_get_text(props, "Greeting Name") or None,
-            daily_summary_hour=int(_get_number(props, "Resumen Hour")) if _get_number(props, "Resumen Hour") is not None else None,
-            daily_summary_minute=int(_get_number(props, "Resumen Minute")) if _get_number(props, "Resumen Minute") is not None else None,
+            daily_summary_hour=int(_hour) if _hour is not None else None,
+            daily_summary_minute=int(_min) if _min is not None else None,
             resumen_nocturno_enabled=_get_checkbox(props, "Resumen Nocturno Enabled"),
             resumen_nocturno_hour=int(_get_number(props, "Resumen Nocturno Hour") or 22),
             resumen_extras=extras,

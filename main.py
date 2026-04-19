@@ -51,7 +51,7 @@ PROJECTS_DB_ID       = os.environ.get("NOTION_PROJECTS_DB_ID",       "0924aff739
 HEALTH_RECORDS_DB_ID = os.environ.get("NOTION_HEALTH_RECORDS_DB_ID", "5f9cde7223f346e48a22f54dbc0836f6")
 MEDICATIONS_DB_ID    = os.environ.get("NOTION_MEDICATIONS_DB_ID",    "d16f6826e18d4e4c9e6768a9ebd07507")
 # ── DataStore (Fase 1 refactor) ───────────────────────────────────────────────
-from notion_datastore import NotionDataStore
+from notion_datastore import NotionDataStore, QueryFilter, DateRange
 
 _ds = NotionDataStore(
     token=NOTION_TOKEN,
@@ -797,24 +797,11 @@ async def check_and_apply_category(name: str, predicted_cats: list[str]) -> tupl
                 return saved_cats, f"Categoria: {', '.join(saved_cats)} (segun tu correccion anterior)"
             return saved_cats, None
     try:
-        search_key = " ".join(name.split()[:3])
-        async with httpx.AsyncClient() as http:
-            r = await http.post(
-                f"https://api.notion.com/v1/databases/{NOTION_DB_ID.replace('-','')}/query",
-                headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
-                json={
-                    "filter": {"property": "Name", "title": {"contains": search_key}},
-                    "sorts": [{"property": "Date", "direction": "descending"}],
-                    "page_size": 3
-                }
-            )
-            if r.status_code == 200:
-                results = r.json().get("results", [])
-                if results:
-                    notion_cats = [c["name"] for c in results[0]["properties"].get("Category", {}).get("multi_select", [])]
-                    if notion_cats and notion_cats != predicted_cats:
-                        category_overrides[search_key.lower()] = notion_cats
-                        return notion_cats, f"Categoria: {', '.join(notion_cats)} (como en cargas anteriores)"
+        cats, changed = await _ds.find_category_from_history(name, predicted_cats)
+        if changed:
+            search_key = " ".join(name.split()[:3]).lower()
+            category_overrides[search_key] = cats
+            return cats, f"Categoria: {', '.join(cats)} (como en cargas anteriores)"
     except Exception:
         pass
     return predicted_cats, None
@@ -847,58 +834,46 @@ Responde:
     elif not search_term:
         return False, "No entendi que gasto queres corregir"
 
-    async with httpx.AsyncClient() as http:
-        if page_id_direct:
-            page_id = page_id_direct
-            old_name = search_term
-            old_value = 0
-        else:
-            r = await http.post(
-                f"https://api.notion.com/v1/databases/{NOTION_DB_ID.replace('-','')}/query",
-                headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
-                json={
-                    "filter": {"property": "Name", "title": {"contains": search_term[:30]}},
-                    "sorts": [{"property": "Date", "direction": "descending"}],
-                    "page_size": 1
-                }
-            )
-            if r.status_code != 200 or not r.json().get("results"):
-                return False, f"No encontre ningun gasto llamado _{search_term}_"
-            page = r.json()["results"][0]
-            page_id = page["id"]
-            old_name = page["properties"]["Name"]["title"][0]["plain_text"] if page["properties"]["Name"]["title"] else "?"
-            old_value = page["properties"].get("Value (ars)", {}).get("number", 0)
+    if page_id_direct:
+        page_id = page_id_direct
+        old_name = search_term
+        old_value = 0
+    else:
+        results = await _ds.query_expenses(QueryFilter(name_contains=search_term, limit=1))
+        if not results:
+            return False, f"No encontre ningun gasto llamado _{search_term}_"
+        entry = results[0]
+        page_id = entry.id
+        old_name = entry.name
+        old_value = entry.value_ars
 
-        props = {}
-        if intent.get("new_value_ars"):
-            props["Value (ars)"] = {"number": float(intent["new_value_ars"])}
-        if intent.get("new_categoria"):
-            props["Category"] = {"multi_select": [{"name": c} for c in intent["new_categoria"]]}
-        if intent.get("new_name"):
-            props["Name"] = {"title": [{"text": {"content": intent["new_name"]}}]}
-        if not props:
-            return False, "No entendi que campo queres cambiar"
+    updates = {}
+    if intent.get("new_value_ars"):
+        updates["value_ars"] = float(intent["new_value_ars"])
+    if intent.get("new_categoria"):
+        updates["categories"] = intent["new_categoria"]
+    if intent.get("new_name"):
+        updates["name"] = intent["new_name"]
+    if not updates:
+        return False, "No entendi que campo queres cambiar"
 
-        upd = await http.patch(
-            f"https://api.notion.com/v1/pages/{page_id}",
-            headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
-            json={"properties": props}
-        )
-        if upd.status_code != 200:
-            return False, f"Error actualizando en Notion: {upd.text[:100]}"
+    try:
+        await _ds.update_expense(page_id, updates)
+    except Exception as e:
+        return False, f"Error actualizando en Notion: {str(e)[:100]}"
 
-        if phone:
-            new_name = intent.get("new_name") or old_name
-            last_touched[phone] = {"page_id": page_id, "name": new_name}
+    if phone:
+        new_name = intent.get("new_name") or old_name
+        last_touched[phone] = {"page_id": page_id, "name": new_name}
 
-        changes = []
-        if intent.get("new_value_ars"):
-            changes.append(f"${old_value:,.0f} -> *${float(intent['new_value_ars']):,.0f} ARS*")
-        if intent.get("new_categoria"):
-            changes.append(f"Categoria -> _{', '.join(intent['new_categoria'])}_")
-        if intent.get("new_name"):
-            changes.append(f"Nombre -> _{intent['new_name']}_")
-        return True, f"*{old_name}* corregido\n" + "\n".join(changes) + "\n\nActualizado en Notion"
+    changes = []
+    if intent.get("new_value_ars"):
+        changes.append(f"${old_value:,.0f} -> *${float(intent['new_value_ars']):,.0f} ARS*")
+    if intent.get("new_categoria"):
+        changes.append(f"Categoria -> _{', '.join(intent['new_categoria'])}_")
+    if intent.get("new_name"):
+        changes.append(f"Nombre -> _{intent['new_name']}_")
+    return True, f"*{old_name}* corregido\n" + "\n".join(changes) + "\n\nActualizado en Notion"
 
 async def eliminar_gasto(text: str) -> tuple[bool, str]:
     response = await claude_create(
@@ -913,30 +888,13 @@ async def eliminar_gasto(text: str) -> tuple[bool, str]:
     if not search_term:
         return False, "No entendi que entrada queres eliminar"
 
-    async with httpx.AsyncClient() as http:
-        r = await http.post(
-            f"https://api.notion.com/v1/databases/{NOTION_DB_ID.replace('-','')}/query",
-            headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
-            json={
-                "filter": {"property": "Name", "title": {"contains": search_term[:30]}},
-                "sorts": [{"property": "Date", "direction": "descending"}],
-                "page_size": 1
-            }
-        )
-        if r.status_code != 200 or not r.json().get("results"):
-            return False, f"No encontre ninguna entrada llamada _{search_term}_"
-
-        page = r.json()["results"][0]
-        page_id = page["id"]
-        old_name = page["properties"]["Name"]["title"][0]["plain_text"] if page["properties"]["Name"]["title"] else "?"
-
-        del_r = await http.patch(
-            f"https://api.notion.com/v1/pages/{page_id}",
-            headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
-            json={"archived": True}
-        )
-        if del_r.status_code == 200:
-            return True, f"*{old_name}* eliminado de Notion"
+    results = await _ds.query_expenses(QueryFilter(name_contains=search_term, limit=1))
+    if not results:
+        return False, f"No encontre ninguna entrada llamada _{search_term}_"
+    entry = results[0]
+    ok = await _ds.archive_expense(entry.id)
+    if ok:
+        return True, f"*{entry.name}* eliminado de Notion"
 
 async def eliminar_shopping(text: str) -> tuple[bool, str]:
     response = await claude_create(
@@ -1372,47 +1330,19 @@ IMAGENES SIN TEXTO:
     return "GASTO"
 
 async def query_finances(month: str = None) -> str:
-    now = now_argentina()
     if not month:
-        month = now.strftime("%Y-%m")
-    year, mon = map(int, month.split("-"))
-    last_day = monthrange(year, mon)[1]
-    async with httpx.AsyncClient() as http:
-        r = await http.post(
-            f"https://api.notion.com/v1/databases/{NOTION_DB_ID.replace('-','')}/query",
-            headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
-            json={
-                "filter": {"and": [
-                    {"property": "Date", "date": {"on_or_after": f"{month}-01"}},
-                    {"property": "Date", "date": {"on_or_before": f"{month}-{last_day:02d}"}}
-                ]},
-                "page_size": 100
-            }
-        )
-        if r.status_code != 200:
-            return None
-        results = r.json().get("results", [])
-        if not results:
-            return f"No hay registros para {month}."
-        ingresos = egresos = 0
-        por_categoria = {}
-        for page in results:
-            props = page.get("properties", {})
-            in_out_name = (props.get("In - Out", {}).get("select", {}) or {}).get("name", "")
-            value = props.get("Value (ars)", {}).get("number", 0) or 0
-            cats = [c["name"] for c in props.get("Category", {}).get("multi_select", [])]
-            if "INGRESO" in in_out_name:
-                ingresos += value
-            else:
-                egresos += value
-                for cat in cats:
-                    por_categoria[cat] = por_categoria.get(cat, 0) + value
-        balance = ingresos - egresos
-        top_cats = sorted(por_categoria.items(), key=lambda x: x[1], reverse=True)[:5]
-        summary = f"*Finanzas {month}*\n\nIngresos: ${ingresos:,.0f}\nEgresos: ${egresos:,.0f}\nBalance: ${balance:,.0f}\n"
-        if top_cats:
-            summary += "\n*Top categorias:*\n" + "".join(f"- {c}: ${v:,.0f}\n" for c, v in top_cats)
-        return summary
+        month = now_argentina().strftime("%Y-%m")
+    try:
+        data = await _ds.get_financial_summary(month)
+    except Exception:
+        return None
+    if data["entries"] == 0:
+        return f"No hay registros para {month}."
+    top_cats = sorted(data["by_category"].items(), key=lambda x: x[1], reverse=True)[:5]
+    summary = f"*Finanzas {month}*\n\nIngresos: ${data['ingresos']:,.0f}\nEgresos: ${data['egresos']:,.0f}\nBalance: ${data['balance']:,.0f}\n"
+    if top_cats:
+        summary += "\n*Top categorias:*\n" + "".join(f"- {c}: ${v:,.0f}\n" for c, v in top_cats)
+    return summary
 
 async def query_calendar(days_ahead: int = 2, days_back: int = 0) -> str | None:
     access_token = await get_gcal_access_token()
@@ -1748,42 +1678,18 @@ Mails:
         return None
 
 async def buscar_gastos(query: str, mes: str = None) -> str:
-    now = now_argentina()
     if not mes:
-        mes = now.strftime("%Y-%m")
-    year, mon = map(int, mes.split("-"))
-    from calendar import monthrange
-    last_day = monthrange(year, mon)[1]
+        mes = now_argentina().strftime("%Y-%m")
     try:
-        async with httpx.AsyncClient() as http:
-            r = await http.post(
-                f"https://api.notion.com/v1/databases/{NOTION_DB_ID.replace('-','')}/query",
-                headers={"Authorization": f"Bearer {NOTION_TOKEN}", "Notion-Version": "2022-06-28", "Content-Type": "application/json"},
-                json={
-                    "filter": {"and": [
-                        {"property": "Date", "date": {"on_or_after": f"{mes}-01"}},
-                        {"property": "Date", "date": {"on_or_before": f"{mes}-{last_day:02d}"}},
-                        {"property": "Name", "title": {"contains": query[:30]}}
-                    ]},
-                    "sorts": [{"property": "Date", "direction": "descending"}],
-                    "page_size": 10
-                }
-            )
-            if r.status_code != 200:
-                return "Error consultando Notion."
-            results = r.json().get("results", [])
-            if not results:
-                return f"No encontre gastos que contengan '{query}' en {mes}."
-            lines = []
-            for page in results:
-                props = page.get("properties", {})
-                name = props.get("Name", {}).get("title", [{}])[0].get("plain_text", "?") if props.get("Name", {}).get("title") else "?"
-                value = props.get("Value (ars)", {}).get("number", 0) or 0
-                date_val = (props.get("Date", {}).get("date") or {}).get("start", "")[:10]
-                in_out = (props.get("In - Out", {}).get("select") or {}).get("name", "")
-                direction = "INGRESO" if "INGRESO" in in_out else "EGRESO"
-                lines.append(f"- {date_val} -- {name}: ${value:,.0f} ({direction})")
-            return "\n".join(lines)
+        entries = await _ds.search_expenses(query, mes)
+        if not entries:
+            return f"No encontre gastos que contengan '{query}' en {mes}."
+        lines = []
+        for e in entries:
+            date_val = str(e.date) if e.date else ""
+            direction = "INGRESO" if e.in_out == "INGRESO" else "EGRESO"
+            lines.append(f"- {date_val} -- {e.name}: ${e.value_ars:,.0f} ({direction})")
+        return "\n".join(lines)
     except Exception as e:
         return f"Error: {str(e)[:100]}"
 
