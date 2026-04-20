@@ -437,7 +437,7 @@ async def send_interactive_buttons(to: str, body: str, buttons: list[dict], head
 async def send_reaction(to: str, message_id: str, emoji: str):
     try:
         async with httpx.AsyncClient() as http:
-            r = await http.post(WA_API, headers={
+            await http.post(WA_API, headers={
                 "Authorization": f"Bearer {WA_TOKEN}",
                 "Content-Type": "application/json"
             }, json={
@@ -447,9 +447,8 @@ async def send_reaction(to: str, message_id: str, emoji: str):
                 "type": "reaction",
                 "reaction": {"message_id": message_id, "emoji": emoji}
             })
-            await send_message(MY_NUMBER, f"[debug reaction] status={r.status_code} msg_id={message_id[:30]} body={r.text[:200]}")
-    except Exception as e:
-        await send_message(MY_NUMBER, f"[debug reaction] exception: {str(e)[:200]}")
+    except Exception:
+        pass
 
 def error_servicio(servicio: str) -> str:
     msgs = {
@@ -4595,7 +4594,7 @@ async def enqueue_message(message: dict):
         image_b64 = image_type = None
 
         if msg_type != "reaction" and msg_id:
-            await send_reaction(phone, msg_id, "✅")
+            await send_reaction(phone, msg_id, "👍")
 
         if msg_type == "text":
             text = message["text"]["body"]
