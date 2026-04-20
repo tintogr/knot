@@ -348,6 +348,8 @@ user_prefs: dict = {
     "resumen_extras": [],
     "resumen_nocturno_hour": 22,
     "resumen_nocturno_enabled": True,
+    "resumen_semanal_enabled": True,
+    "resumen_semanal_hour": 21,
     "news_topics": [],
     "service_providers": {},
     "known_places": [],
@@ -2987,9 +2989,10 @@ EVENTOS RECURRENTES:
     eventos_creados_count = 0
     eventos_tocados = []  # todos los creados/editados con hora, para ofrecer recordatorios
     high_impact_pending = None  # accion de alto impacto que requiere confirmacion
+    geocode_candidate = None  # 4a: candidato de geocodificacion para confirmar con el usuario
 
     async def _execute_evento_tool(t_name, t_input):
-        nonlocal evento_creado, eventos_creados_count, high_impact_pending
+        nonlocal evento_creado, eventos_creados_count, high_impact_pending, geocode_candidate
         t_result = ""
         if t_name == "crear_evento":
             data = dict(t_input)
@@ -3043,6 +3046,28 @@ EVENTOS RECURRENTES:
                 t_result = "Evento creado: " + data.get("emoji", "") + " " + data["summary"] + " el " + fecha + hora + "."
                 if data.get("location"):
                     t_result += " Ubicacion: " + data["location"] + "."
+                # 4a: intentar geocodificar la ubicacion del evento
+                if data.get("location") and not geocode_candidate:
+                    try:
+                        _city = user_prefs.get("city", "Neuquén")
+                        async with httpx.AsyncClient(timeout=5) as _hg:
+                            _gq = f"{data['location']}, {_city}"
+                            _gr = await _hg.get(
+                                "https://nominatim.openstreetmap.org/search",
+                                params={"q": _gq, "format": "json", "limit": 1},
+                                headers={"User-Agent": "Knot/1.0"}
+                            )
+                            if _gr.status_code == 200 and _gr.json():
+                                _gresult = _gr.json()[0]
+                                geocode_candidate = {
+                                    "event_id": event_id,
+                                    "lat": float(_gresult["lat"]),
+                                    "lon": float(_gresult["lon"]),
+                                    "place_name": _gresult.get("display_name", data["location"])[:80],
+                                    "raw_location": data["location"],
+                                }
+                    except Exception:
+                        pass
             else:
                 t_result = "Error creando el evento en Google Calendar."
 
@@ -3226,6 +3251,92 @@ EVENTOS RECURRENTES:
     if not reply:
         reply = "Listo, revise tu calendario. Necesitas algo mas?"
 
+    # 4b: Ofrecer recurrencia si hay señales y el evento no es ya recurrente
+    if evento_creado and not evento_creado["data"].get("recurrence"):
+        _ev_data = evento_creado["data"]
+        try:
+            _ev_date = datetime.strptime(_ev_data["date"], "%Y-%m-%d")
+        except Exception:
+            _ev_date = None
+        if _ev_date:
+            _text_lower = text.lower()
+            _rec_keywords = ["los lunes", "los martes", "los miercoles", "los miércoles",
+                             "los jueves", "los viernes", "los sabados", "los sábados",
+                             "los domingos", "cada semana", "todas las semanas", "todos los"]
+            _has_rec = any(kw in _text_lower for kw in _rec_keywords)
+            if not _has_rec:
+                try:
+                    _first_word = (_ev_data.get("summary", "").lower().split() or [""])[0]
+                    _at_rec = await get_gcal_access_token()
+                    if _at_rec and len(_first_word) >= 3:
+                        async with httpx.AsyncClient(timeout=5) as _hrec:
+                            _past_dt = _ev_date - timedelta(weeks=3)
+                            _rr = await _hrec.get(
+                                "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                                headers={"Authorization": f"Bearer {_at_rec}"},
+                                params={"q": _first_word,
+                                        "timeMin": _past_dt.strftime("%Y-%m-%dT00:00:00-03:00"),
+                                        "timeMax": _ev_date.strftime("%Y-%m-%dT00:00:00-03:00"),
+                                        "singleEvents": "true", "maxResults": "10"}
+                            )
+                            if _rr.status_code == 200:
+                                _prev = [e for e in _rr.json().get("items", [])
+                                         if e.get("start", {}).get("dateTime")
+                                         and datetime.strptime(e["start"]["dateTime"][:10], "%Y-%m-%d").weekday() == _ev_date.weekday()
+                                         and _first_word in e.get("summary", "").lower()]
+                                if len(_prev) >= 2:
+                                    _has_rec = True
+                except Exception:
+                    pass
+            if _has_rec:
+                _rrule_map = {0:"MO",1:"TU",2:"WE",3:"TH",4:"FR",5:"SA",6:"SU"}
+                _rrule_day = _rrule_map.get(_ev_date.weekday(), "MO")
+                _dia_nombre = DIAS_SEMANA[_ev_date.weekday()]
+                pending_state[phone] = {
+                    "type": "recurrence_offer",
+                    "event_id": evento_creado["event_id"],
+                    "summary": _ev_data.get("summary", "Evento"),
+                    "rrule_day": _rrule_day,
+                    "date": _ev_data["date"],
+                    "eventos_tocados": eventos_tocados,
+                }
+                await send_message(phone, reply)
+                await send_interactive_buttons(
+                    phone,
+                    f"¿Lo agrego como evento recurrente cada {_dia_nombre}?",
+                    [
+                        {"id": "recurrence_yes", "title": "Sí, hacerlo recurrente"},
+                        {"id": "recurrence_no",  "title": "No, solo esta vez"},
+                    ]
+                )
+                add_to_history(phone, "user", text)
+                add_to_history(phone, "assistant", reply)
+                return None
+
+    # 4a: Preguntar al usuario si el lugar geocodificado es correcto (solo si no hay otro pending flow)
+    if geocode_candidate and not pending_state.get(phone):
+        gc = geocode_candidate
+        short_addr = gc["place_name"].split(",")[0].strip()
+        pending_state[phone] = {
+            "type": "geocode_confirm",
+            "event_id": gc["event_id"],
+            "lat": gc["lat"],
+            "lon": gc["lon"],
+            "place_name": gc["place_name"],
+            "raw_location": gc["raw_location"],
+        }
+        add_to_history(phone, "user", text)
+        add_to_history(phone, "assistant", reply)
+        await send_interactive_buttons(
+            phone,
+            f"¿*{gc['raw_location']}* queda en {short_addr}?",
+            [
+                {"id": "geocode_yes", "title": "Sí, guardá esa ubicación"},
+                {"id": "geocode_no",  "title": "No, no guardes"},
+            ]
+        )
+        return reply
+
     # Interceptar accion de alto impacto — pedir confirmacion antes de ejecutar
     if high_impact_pending:
         descripcion = high_impact_pending["descripcion"]
@@ -3365,6 +3476,12 @@ async def load_user_config(wa_number: str):
                     user_prefs["purchase_counts"] = json.loads(counts_raw)
                 except Exception:
                     user_prefs["purchase_counts"] = {}
+
+            semanal_enabled = get_chk("Resumen Semanal Enabled")
+            if props.get("Resumen Semanal Enabled"):
+                user_prefs["resumen_semanal_enabled"] = semanal_enabled
+            if get_num("Resumen Semanal Hour") is not None:
+                user_prefs["resumen_semanal_hour"] = int(get_num("Resumen Semanal Hour"))
 
             user_prefs["_config_page_id"] = page["id"]
 
@@ -4014,6 +4131,120 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
         else:
             await send_message(phone, "No pude deshacer la acción.")
         return True
+
+    if state_type == "geocode_confirm":
+        event_id = state["event_id"]
+        if text.strip() == "geocode_yes":
+            del pending_state[phone]
+            try:
+                _at = await get_gcal_access_token()
+                async with httpx.AsyncClient() as _http:
+                    await _http.patch(
+                        f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}",
+                        headers={"Authorization": f"Bearer {_at}", "Content-Type": "application/json"},
+                        params={"sendUpdates": "none"},
+                        json={"extendedProperties": {"private": {
+                            "knot_lat": str(state["lat"]),
+                            "knot_lon": str(state["lon"]),
+                        }}}
+                    )
+                await send_message(phone, "📍 Ubicacion guardada. La proxima vez que te avise del evento, te cuento si hay algo de camino que puedas resolver.")
+            except Exception:
+                await send_message(phone, error_servicio("calendar"))
+            return True
+        elif text.strip() == "geocode_no":
+            del pending_state[phone]
+            return True
+        else:
+            # Intento de correccion — regeocoding con el texto dado
+            del pending_state[phone]
+            try:
+                async with httpx.AsyncClient(timeout=5) as _hg:
+                    _gr = await _hg.get(
+                        "https://nominatim.openstreetmap.org/search",
+                        params={"q": text.strip(), "format": "json", "limit": 1},
+                        headers={"User-Agent": "Knot/1.0"}
+                    )
+                    if _gr.status_code == 200 and _gr.json():
+                        _gresult = _gr.json()[0]
+                        _lat = float(_gresult["lat"])
+                        _lon = float(_gresult["lon"])
+                        _name = _gresult.get("display_name", text)[:60].split(",")[0].strip()
+                        _at = await get_gcal_access_token()
+                        async with httpx.AsyncClient() as _http:
+                            await _http.patch(
+                                f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}",
+                                headers={"Authorization": f"Bearer {_at}", "Content-Type": "application/json"},
+                                params={"sendUpdates": "none"},
+                                json={"extendedProperties": {"private": {
+                                    "knot_lat": str(_lat),
+                                    "knot_lon": str(_lon),
+                                }}}
+                            )
+                        await send_message(phone, f"📍 Ubicacion guardada: *{_name}*.")
+                    else:
+                        await send_message(phone, "No pude encontrar esa dirección. Ubicacion no guardada.")
+            except Exception:
+                pass
+            return True
+
+    if state_type == "recurrence_offer":
+        event_id = state["event_id"]
+        summary = state["summary"]
+        rrule_day = state["rrule_day"]
+        ev_tocados = state.get("eventos_tocados", [])
+        _rrule_to_weekday = {"MO":0,"TU":1,"WE":2,"TH":3,"FR":4,"SA":5,"SU":6}
+        _dia_nombre = DIAS_SEMANA[_rrule_to_weekday.get(rrule_day, 0)]
+
+        if text.strip() == "recurrence_yes":
+            del pending_state[phone]
+            try:
+                _at = await get_gcal_access_token()
+                async with httpx.AsyncClient() as _http:
+                    r = await _http.patch(
+                        f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}",
+                        headers={"Authorization": f"Bearer {_at}", "Content-Type": "application/json"},
+                        params={"sendUpdates": "none"},
+                        json={"recurrence": [f"RRULE:FREQ=WEEKLY;BYDAY={rrule_day}"]}
+                    )
+                    if r.status_code == 200:
+                        pending_state[phone] = {"type": "recurring_event_reminder", "event_id": event_id, "summary": summary}
+                        await send_message(phone, f"✅ *{summary}* es recurrente cada {_dia_nombre}.\n¿Querés que te avise antes de cada sesión? Decime con cuánta anticipación (ej: '30 min', '1 hora'). O mandá 'no' para omitir.")
+                    else:
+                        await send_message(phone, error_servicio("calendar"))
+            except Exception:
+                await send_message(phone, error_servicio("calendar"))
+            return True
+
+        elif text.strip() == "recurrence_no":
+            del pending_state[phone]
+            if ev_tocados:
+                lineas = []
+                for ev in ev_tocados:
+                    try:
+                        fecha_fmt = datetime.strptime(ev["date"], "%Y-%m-%d")
+                        dia = DIAS_SEMANA[fecha_fmt.weekday()]
+                        fecha_label = f"{dia} {fecha_fmt.strftime('%d/%m')} {ev['time']}"
+                    except Exception:
+                        fecha_label = f"{ev.get('date','')} {ev.get('time','')}"
+                    lineas.append(f"_{ev['summary']}_ — {fecha_label}")
+                pending_state[phone] = {
+                    "type": "event_reminder",
+                    "events": [{"summary": ev["summary"], "event_datetime": f"{ev['date']}T{ev['time']}"} for ev in ev_tocados],
+                }
+                await send_interactive_buttons(
+                    phone,
+                    f"¿Querés que te avise antes?\n" + "\n".join(lineas),
+                    [
+                        {"id": "rem_15", "title": "15 min antes"},
+                        {"id": "rem_60", "title": "1 hora antes"},
+                        {"id": "rem_no", "title": "No gracias"},
+                    ]
+                )
+            return True
+        else:
+            del pending_state[phone]
+            return False
 
     if state_type == "litros_followup":
         page_id = state["page_id"]
@@ -4814,6 +5045,24 @@ Responde SOLO JSON valido sin markdown:
         except Exception:
             pass
 
+    # Buscar en known_places por nombre antes de pedir ubicacion
+    desc_lower = description.lower()
+    for _kp in user_prefs.get("known_places", []):
+        _kp_name = _kp.get("name", "").lower()
+        if _kp_name and _kp_name in desc_lower:
+            _kp_lat = _kp.get("lat")
+            _kp_lon = _kp.get("lon")
+            if _kp_lat and _kp_lon:
+                ok, _ = await create_geo_reminder(
+                    description=description, rtype="place",
+                    lat=float(_kp_lat), lon=float(_kp_lon),
+                    radius=radius, recurrent=recurrent,
+                )
+                if ok:
+                    freq = "Cada vez que" if recurrent else "La proxima vez que"
+                    return f"📍 *Geo-reminder guardado*\n_{description}_\nUbicacion: *{_kp['name']}*\n{freq} estes cerca, te aviso."
+                return "No pude guardar el geo-reminder."
+
     # Si necesita ubicacion o no pudo geocodificar
     pending_state[phone] = {
         "type": "geo_reminder_awaiting_location",
@@ -5297,7 +5546,12 @@ async def cron_job():
 
     nocturno_enabled = user_prefs.get("resumen_nocturno_enabled", True)
     nocturno_hour    = user_prefs.get("resumen_nocturno_hour", 22)
-    if nocturno_enabled and now.hour == nocturno_hour and now.minute == 0:
+    semanal_enabled  = user_prefs.get("resumen_semanal_enabled", True)
+    semanal_hour     = user_prefs.get("resumen_semanal_hour", 21)
+    _is_sunday = now.weekday() == 6
+    _nocturno_check_hour = semanal_hour if _is_sunday else nocturno_hour
+    _nocturno_check_enabled = semanal_enabled if _is_sunday else nocturno_enabled
+    if _nocturno_check_enabled and now.hour == _nocturno_check_hour and now.minute == 0:
         try:
             access_token_noc = await get_gcal_access_token()
             async with httpx.AsyncClient() as http_noc:
@@ -5358,14 +5612,51 @@ async def cron_job():
                 fired.append(f"TEMP: {summary}")
             elif "[REM:60]" in desc and 59 <= diff_seconds // 60 <= 61:
                 loc_str = f"\n📍 {event.get('location')}" if event.get("location") else ""
-                await send_message(MY_NUMBER, f"*En 1 hora:* {summary}{loc_str}")
+                _ext = event.get("extendedProperties", {}).get("private", {})
+                _geo_ctx = ""
+                if _ext.get("knot_lat") and _ext.get("knot_lon"):
+                    _geo_ctx = await build_geo_context(float(_ext["knot_lat"]), float(_ext["knot_lon"]))
+                geo_ctx_str = f"\n\n{_geo_ctx}" if _geo_ctx else ""
+                await send_message(MY_NUMBER, f"*En 1 hora:* {summary}{loc_str}{geo_ctx_str}")
                 fired.append(f"REM60: {summary}")
             elif "[REM:15]" in desc and 14 <= diff_seconds // 60 <= 16:
                 loc_str = f"\n📍 {event.get('location')}" if event.get("location") else ""
-                await send_message(MY_NUMBER, f"*En 15 minutos:* {summary}{loc_str}")
+                _ext = event.get("extendedProperties", {}).get("private", {})
+                _geo_ctx = ""
+                if _ext.get("knot_lat") and _ext.get("knot_lon"):
+                    _geo_ctx = await build_geo_context(float(_ext["knot_lat"]), float(_ext["knot_lon"]))
+                geo_ctx_str = f"\n\n{_geo_ctx}" if _geo_ctx else ""
+                await send_message(MY_NUMBER, f"*En 15 minutos:* {summary}{loc_str}{geo_ctx_str}")
                 fired.append(f"REM15: {summary}")
 
     return {"ok": True, "fired": fired, "time": now.strftime("%H:%M")}
+
+
+async def build_geo_context(lat: float, lon: float) -> str:
+    """Usa Claude para sugerir items de shopping/geo-reminders que se puedan resolver de camino."""
+    try:
+        shopping = await _ds.get_shopping_list(only_missing=True)
+        shopping_names = [item.name for item in (shopping or [])[:10]]
+        geo_items = [r["name"] for r in geo_reminders_cache if r.get("name")][:10]
+        if not shopping_names and not geo_items:
+            return ""
+        context_parts = []
+        if shopping_names:
+            context_parts.append(f"Lista de compras pendiente: {', '.join(shopping_names)}")
+        if geo_items:
+            context_parts.append(f"Geo-reminders activos: {', '.join(geo_items)}")
+        resp = await claude_create(
+            model="claude-haiku-4-5-20251001", max_tokens=80,
+            system="""Sos Knot. El usuario va a un evento cercano a estas coordenadas. Tenés su lista de compras y geo-reminders.
+Decide si hay algo de la lista que pueda resolverse de camino (dietéticas, farmacias, kioscos, supermercados en esa zona general).
+Si hay algo concreto, respondé en 1 linea max, español rioplatense, natural, sin markdown.
+Si no hay nada relevante, respondé exactamente la palabra: NADA""",
+            messages=[{"role": "user", "content": f"Coordenadas destino: {lat:.4f}, {lon:.4f}\n" + "\n".join(context_parts)}]
+        )
+        result = resp.content[0].text.strip()
+        return "" if result == "NADA" or not result else result
+    except Exception:
+        return ""
 
 
 async def query_servicios_mes(month: str = None) -> str:
@@ -5581,7 +5872,15 @@ async def send_daily_summary(http, access_token: str, now: datetime):
             lines.append("*Facturas pendientes:*")
             for imp in impagas:
                 monto = f"${imp.value_ars:,.0f}" if imp.value_ars else ""
-                lines.append(f"- {imp.name} {monto}".strip())
+                if imp.date:
+                    dias = (now.date() - imp.date).days
+                    if dias > 30:
+                        dias_str = f" ⚠️ _({dias} días pendiente)_"
+                    else:
+                        dias_str = f" _({dias} días pendiente)_"
+                else:
+                    dias_str = ""
+                lines.append(f"- {imp.name} {monto}{dias_str}".strip())
         else:
             lines.append("")
             lines.append("✅ Facturas al día")
@@ -5784,6 +6083,26 @@ async def send_resumen_nocturno_dominical(http, access_token: str, now: datetime
             for nombre, fecha, dias in facturas_urgentes:
                 alerta = "mañana" if dias == 1 else f"en {dias} días" if dias > 0 else "hoy"
                 lines.append(f"- {nombre} — vence {alerta} ({fecha})")
+            lines.append("")
+    except Exception:
+        pass
+
+    # Facturas Impaga activas con antigüedad
+    try:
+        impagas_sem = await _ds.get_impaga_facturas()
+        if impagas_sem:
+            lines.append("💳 *Facturas Impaga:*")
+            for imp in impagas_sem:
+                monto = f"${imp.value_ars:,.0f}" if imp.value_ars else ""
+                if imp.date:
+                    dias = (now.date() - imp.date).days
+                    if dias > 30:
+                        dias_str = f" ⚠️ _({dias} días pendiente)_"
+                    else:
+                        dias_str = f" _({dias} días pendiente)_"
+                else:
+                    dias_str = ""
+                lines.append(f"- {imp.name} {monto}{dias_str}".strip())
             lines.append("")
     except Exception:
         pass
