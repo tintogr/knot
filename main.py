@@ -435,16 +435,22 @@ async def send_interactive_buttons(to: str, body: str, buttons: list[dict], head
         }, json=payload)
 
 async def send_reaction(to: str, message_id: str, emoji: str):
-    async with httpx.AsyncClient() as http:
-        await http.post(WA_API, headers={
-            "Authorization": f"Bearer {WA_TOKEN}",
-            "Content-Type": "application/json"
-        }, json={
-            "messaging_product": "whatsapp",
-            "to": to,
-            "type": "reaction",
-            "reaction": {"message_id": message_id, "emoji": emoji}
-        })
+    try:
+        async with httpx.AsyncClient() as http:
+            r = await http.post(WA_API, headers={
+                "Authorization": f"Bearer {WA_TOKEN}",
+                "Content-Type": "application/json"
+            }, json={
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": to,
+                "type": "reaction",
+                "reaction": {"message_id": message_id, "emoji": emoji}
+            })
+            if r.status_code not in (200, 201):
+                await send_message(MY_NUMBER, f"[debug reaction] {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        await send_message(MY_NUMBER, f"[debug reaction] exception: {str(e)[:200]}")
 
 def error_servicio(servicio: str) -> str:
     msgs = {
