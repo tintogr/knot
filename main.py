@@ -4594,7 +4594,7 @@ async def enqueue_message(message: dict):
         image_b64 = image_type = None
 
         if msg_type != "reaction" and msg_id:
-            await send_reaction(phone, msg_id, "👍")
+            await send_reaction(phone, msg_id, "✅")
 
         if msg_type == "text":
             text = message["text"]["body"]
@@ -4845,6 +4845,7 @@ async def process_single_item(phone: str, item: dict):
     indicator_task = asyncio.create_task(_delayed_indicator(phone))
     try:
         if phone in pending_state:
+            indicator_task.cancel()
             handled = await handle_pending_state(phone, text, pending_state.get(phone, {}))
             if handled:
                 return
