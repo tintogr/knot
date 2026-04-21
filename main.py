@@ -410,7 +410,8 @@ async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=N
 Hoy: {hoy_str(now)}. Calendario: {semana_str(now)}.
 Tasa dolar blue: ${exchange_rate:,.0f}/USD
 {profile_gastos_ctx}{providers_ctx}{cards_ctx}
-Tu tarea: registrar gastos e ingresos del usuario.
+Tu tarea: registrar gastos e ingresos NUEVOS del usuario.
+IMPORTANTE: Si el mensaje habla de corregir, editar, cambiar o actualizar algo ya registrado -> NO uses la tool, respondé que no podés hacer correcciones desde acá.
 - Si el mensaje tiene descripcion Y monto -> usa la tool registrar_gasto directamente.
 - Si hay una imagen (ticket, screenshot de pedido, factura) -> lee TODOS los items, suma los montos vos mismo, y registra el total. No le pidas al usuario que sume.
 - Si el ticket o recibo muestra digitos de tarjeta, deducí el payment_method comparando con los medios de pago (ultimos 4 digitos → campo Last4). Si no hay coincidencia exacta pero se ve el banco, usá el método DEFAULT de ese banco.
@@ -1096,9 +1097,9 @@ async def classify(text: str, has_image: bool, image_b64: str = None, image_type
         model="claude-sonnet-4-20250514", max_tokens=10,
         system="""Responde SOLO una palabra: GASTO, CORREGIR_GASTO, ELIMINAR_GASTO, PLANTA, EDITAR_PLANTA, ELIMINAR_PLANTA, EVENTO, EDITAR_EVENTO, ELIMINAR_EVENTO, RECORDATORIO, CANCELAR_RECORDATORIO, SHOPPING, CORREGIR_SHOPPING, ELIMINAR_SHOPPING, REUNION, EDITAR_REUNION, ELIMINAR_REUNION, SALUD, ACTIVIDAD_FISICA, GEO_REMINDER, CONFIGURAR, RESUMEN_DIARIO o CHAT.
 
-GASTO: registrar un pago, compra o ingreso concreto con monto. Tambien cuando el mensaje menciona una compra o gasto SIN monto (ej: "compre en la verduleria", "fui al super") -- pedira el monto. EXCEPCION: si el mensaje menciona "lista de compras" -> SHOPPING.
+GASTO: registrar un pago, compra o ingreso NUEVO. El usuario describe algo que acaba de pagar o comprar ahora. NUNCA cuando usa "corregir", "cambiar", "editar", "actualizar", "la descripcion", "las notas", "el nombre" de algo ya registrado.
 DEUDA: registrar algo que el usuario TODAVIA NO PAGO pero debe pagar. "le debo X a Y", "me deben X", "tengo que pagar X". Diferente a GASTO que es un pago ya realizado.
-CORREGIR_GASTO: corregir el monto u otro campo de un gasto ya registrado.
+CORREGIR_GASTO: modificar cualquier campo de un gasto ya registrado — monto, categoria, nombre, descripcion, notas. Ejemplos: "el gasto de X era Y", "cambia la categoria de X", "corrige la descripcion de los 3 de anthropic", "en realidad eran extra usage", "la nota estaba mal". Si el usuario habla de algo que YA registró y quiere cambiarlo → CORREGIR_GASTO.
 ELIMINAR_GASTO: eliminar o borrar un gasto de Notion.
 PLANTA: adquirir o registrar una planta nueva.
 EDITAR_PLANTA: modificar datos de una planta existente (estado, riego, ubicacion, notas).
