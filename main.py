@@ -3890,7 +3890,7 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
             ctype = card_data.get("type", "").strip()
             if bank:
                 label = f"{bank} {ctype}".strip()
-                pending_state[phone] = {"type": "unknown_card_owner", "last4": last4, "bank": bank, "type": ctype, "label": label}
+                pending_state[phone] = {"type": "unknown_card_owner", "last4": last4, "bank": bank, "card_type": ctype, "label": label}
                 await send_message(phone, f"✅ *{label}* (****{last4}). ¿De quién es? (ej: _\"mía\"_, _\"Sofi\"_) o «no» para omitir.")
         except Exception:
             await send_message(phone, f"No pude interpretar. Podés agregarla con: _\"agregá [banco] [débito/crédito] terminada en {last4}\"_")
@@ -3899,7 +3899,7 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
     if state_type == "unknown_card_owner":
         last4 = state.get("last4", "")
         bank = state.get("bank", "")
-        ctype = state.get("type", "")
+        ctype = state.get("card_type", "")
         label = state.get("label", "")
         del pending_state[phone]
         skip_words = {"no", "n", "nope", "omitir", "skip"}
