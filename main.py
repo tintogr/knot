@@ -425,7 +425,7 @@ Tu tarea: registrar gastos e ingresos del usuario.
 
 Categorias disponibles: Supermercado, Sueldo, Servicios, Transporte, Vianda, Salud, Salud Mental, Salida, Birra, Ocio, Compras, Depto, Plantas, Viajes, Venta.
 Servicios = pagos recurrentes (alquiler, luz, gas, internet, streaming, gimnasio). Depto = compras fisicas para el depto (muebles, materiales, herramientas).
-Metodo Suscription: gastos recurrentes mensuales. Payment: todo lo demas.
+Metodo Suscription: SOLO si es un cargo recurrente mensual real (ej: Netflix, gimnasio, alquiler). Payment: todo lo demas, incluyendo pagos puntuales, extra usage, prepaid, one-time charges aunque sean de servicios que normalmente se pagan por mes.
 Si in_out es INGRESO -> categoria solo puede ser Sueldo o Venta.
 Clientes posibles: LBL, OPERA, ALPATACO, Juan Martin, Depto, Work, Santi Vales, Jorge, Barbara, Vanguardia, Alejo, Dinamo, Paula Diaz, Labti, PlanA, JGA, ATE.
 Emoji: elegi el mas especifico segun el contexto real."""
@@ -561,9 +561,11 @@ Emoji: elegi el mas especifico segun el contexto real."""
                 reply += "\n\n_Si algo no quedó bien, avisame._"
 
     # Unknown card detection: si el payment_method tiene dígitos no registrados, preguntar
+    # undo_window no bloquea esta detección (es el estado más común post-registro)
     if len(created_entries) == 1:
         _, data_entry, success_entry = created_entries[0]
-        if success_entry and data_entry.get("payment_method") and not pending_state.get(phone):
+        _cur_state_type = pending_state.get(phone, {}).get("type")
+        if success_entry and data_entry.get("payment_method") and _cur_state_type in (None, "undo_window"):
             import re as _re
             pm = data_entry["payment_method"]
             digits = _re.findall(r'\d{4}', pm)
