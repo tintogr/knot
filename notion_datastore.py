@@ -165,6 +165,7 @@ except ImportError:
         saved_lon: float = None
         saved_city: str = None
         last_summary_date: str = None
+        cards: list = None
 
 
 # ── Domain constants ───────────────────────────────────────────────────────────
@@ -1680,6 +1681,12 @@ class NotionDataStore:
         except Exception:
             purchase_counts = {}
 
+        cards_raw = _get_text(props, "Cards")
+        try:
+            cards = json.loads(cards_raw) if cards_raw else []
+        except Exception:
+            cards = []
+
         domain_profile_fields = [
             ("actividad_fisica", "Profile Actividad Fisica"),
             ("dieta",            "Profile Dieta"),
@@ -1719,6 +1726,7 @@ class NotionDataStore:
             saved_lon=_get_number(props, "Longitude"),
             saved_city=_get_text(props, "City") or None,
             last_summary_date=_get_text(props, "Last Summary Date") or None,
+            cards=cards or None,
         )
         return config, page["id"]
 
@@ -1737,6 +1745,7 @@ class NotionDataStore:
             "Known Places":      {"rich_text": [{"text": {"content": json.dumps(config.known_places or [], ensure_ascii=False)}}]},
             "Activities":        {"rich_text": [{"text": {"content": json.dumps(config.activities or {}, ensure_ascii=False)}}]},
             "Purchase Counts":   {"rich_text": [{"text": {"content": json.dumps(config.purchase_counts or {}, ensure_ascii=False)[:2000]}}]},
+            "Cards":             {"rich_text": [{"text": {"content": json.dumps(config.cards or [], ensure_ascii=False)[:2000]}}]},
             "Resumen Nocturno Enabled": {"checkbox": config.resumen_nocturno_enabled},
         }
         for key, field in [

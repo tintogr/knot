@@ -33,6 +33,8 @@ async def load_user_config(wa_number: str):
             user_prefs["activities"] = cfg.activities
         if cfg.purchase_counts:
             user_prefs["purchase_counts"] = cfg.purchase_counts
+        if cfg.cards:
+            user_prefs["cards"] = cfg.cards
         if cfg.domain_profiles:
             user_prefs.setdefault("domain_profiles", {}).update(cfg.domain_profiles)
         user_prefs["_config_page_id"] = page_id
@@ -82,6 +84,7 @@ async def save_user_config(wa_number: str):
             activities=user_prefs.get("activities", {}),
             domain_profiles=user_prefs.get("domain_profiles", {}),
             purchase_counts=user_prefs.get("purchase_counts", {}),
+            cards=user_prefs.get("cards", []),
         )
         await _ds.save_config(page_id, cfg)
     except Exception:
@@ -90,7 +93,7 @@ async def save_user_config(wa_number: str):
 
 async def handle_configurar(text: str) -> str:
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=200,
+        model="claude-sonnet-4-20250514", max_tokens=300,
         system="Extrae que configuracion cambiar. Responde SOLO JSON.",
         messages=[{"role": "user", "content": f"""Mensaje: {text}
 Responde:
@@ -99,7 +102,9 @@ Responde:
   "minute": minutos como entero. si no se mencionan usa 0,
   "greeting_name": nuevo nombre del saludo matutino o null,
   "add_extra": instruccion nueva para agregar al Resumen Diario, o null,
-  "remove_extra": texto de instruccion a quitar del Resumen Diario, o null}}"""}]
+  "remove_extra": texto de instruccion a quitar del Resumen Diario, o null,
+  "add_card": {{"label": "nombre del medio de pago (ej: BBVA Debito, Visa Credito)", "last4": "ultimos 4 digitos como string o null si no se mencionan"}} o null,
+  "remove_card": "texto parcial del nombre de la tarjeta a quitar" o null}}"""}]
     )
     raw = response.content[0].text.strip()
     if raw.startswith("```"):
@@ -115,6 +120,8 @@ Responde:
     greeting_name = data.get("greeting_name")
     add_extra  = data.get("add_extra")
     remove_extra = data.get("remove_extra")
+    add_card = data.get("add_card")
+    remove_card = data.get("remove_card")
 
     changed = []
 
@@ -133,6 +140,24 @@ Responde:
         extras = user_prefs.get("resumen_extras", [])
         user_prefs["resumen_extras"] = [e for e in extras if remove_extra.lower() not in e.lower()]
         changed.append(f"Extra removido: _{remove_extra}_")
+
+    if add_card and isinstance(add_card, dict) and add_card.get("label"):
+        cards = user_prefs.get("cards") or []
+        label = add_card["label"].strip()
+        last4 = str(add_card.get("last4") or "").strip() or None
+        existing = next((c for c in cards if c.get("label", "").lower() == label.lower()), None)
+        if existing:
+            existing["last4"] = last4
+        else:
+            cards.append({"label": label, "last4": last4})
+        user_prefs["cards"] = cards
+        suffix = f" (****{last4})" if last4 else ""
+        changed.append(f"Tarjeta agregada: *{label}{suffix}*")
+
+    if remove_card:
+        cards = user_prefs.get("cards") or []
+        user_prefs["cards"] = [c for c in cards if remove_card.lower() not in c.get("label", "").lower()]
+        changed.append(f"Tarjeta removida: _{remove_card}_")
 
     if setting == "daily_summary_hour" and hour is not None:
         try:
@@ -154,6 +179,7 @@ Responde:
         return "Listo:\n" + "\n".join(changed)
 
     extras_actuales = user_prefs.get("resumen_extras", [])
+    cards_actuales = user_prefs.get("cards") or []
     hora_actual = user_prefs.get("daily_summary_hour") or DAILY_SUMMARY_HOUR
     mins_actual = user_prefs.get("daily_summary_minute") or 0
     estado = f"Actualmente el Resumen Diario llega a las *{hora_actual:02d}:{mins_actual:02d}*"
@@ -161,4 +187,7 @@ Responde:
         estado += f" e incluye: {', '.join(extras_actuales)}"
     else:
         estado += " sin extras configurados"
-    return f"Dale! Que queres modificar del Resumen Diario?\n\n{estado}\n\nPodes pedirme cosas como cambiar el horario, agregar que te cuente el clima de manana, una frase del dia, o lo que se te ocurra."
+    if cards_actuales:
+        card_list = ", ".join(f"{c['label']}" + (f" (****{c['last4']})" if c.get("last4") else "") for c in cards_actuales)
+        estado += f"\nTarjetas/medios de pago: {card_list}"
+    return f"Dale! Que queres modificar?\n\n{estado}\n\nPodes cambiar el horario del resumen, agregar extras, o agregar/quitar tarjetas (ej: \"agregá BBVA Débito terminada en 1234\")."

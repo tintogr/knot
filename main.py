@@ -44,6 +44,7 @@ async def startup_event():
     await load_geo_reminders()
     await _ds.ensure_db_select_field("finances", "Estado", ["Impaga", "Pagada"])
     await _ds.ensure_db_text_field("config", "Last Summary Date")
+    await _ds.ensure_db_text_field("config", "Cards")
     asyncio.create_task(_cron_loop())
 
 @app.on_event("shutdown")
@@ -363,9 +364,10 @@ async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=N
                 "date":      {"type": "string", "description": "YYYY-MM-DD"},
                 "time":      {"type": ["string", "null"], "description": "HH:MM o null"},
                 "litros":    {"type": ["number", "null"]},
-                "notas":     {"type": ["string", "null"]},
-                "client":    {"type": "array", "items": {"type": "string"}},
-                "emoji":     {"type": "string"}
+                "notas":          {"type": ["string", "null"]},
+                "client":         {"type": "array", "items": {"type": "string"}},
+                "emoji":          {"type": "string"},
+                "payment_method": {"type": ["string", "null"], "description": "Medio de pago: banco o tarjeta. Deducilo del ticket si menciona digitos de tarjeta. Null si no se puede determinar."}
             },
             "required": ["name", "in_out", "value_ars", "categoria", "metodo", "date", "emoji"]
         }
@@ -383,13 +385,26 @@ async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=N
 
     profile_gastos = get_domain_profile("gastos")
     profile_gastos_ctx = f"\nPerfil de gastos del usuario: {profile_gastos}\n" if profile_gastos else ""
+    cards = user_prefs.get("cards") or []
+    cards_ctx = ""
+    if cards:
+        card_lines = []
+        for c in cards:
+            label = c.get("label", "")
+            last4 = c.get("last4", "")
+            if last4:
+                card_lines.append(f"  - {label} (****{last4})")
+            else:
+                card_lines.append(f"  - {label}")
+        cards_ctx = "\nMedios de pago configurados:\n" + "\n".join(card_lines) + "\n"
     system = f"""Sos Knot, asistente personal por WhatsApp. Hablas en espanol rioplatense, natural y conciso.
 Hoy: {hoy_str(now)}. Calendario: {semana_str(now)}.
 Tasa dolar blue
-{profile_gastos_ctx}
+{profile_gastos_ctx}{cards_ctx}
 Tu tarea: registrar gastos e ingresos del usuario.
 - Si el mensaje tiene descripcion Y monto -> usa la tool registrar_gasto directamente.
 - Si hay una imagen (ticket, screenshot de pedido, factura) -> lee TODOS los items, suma los montos vos mismo, y registra el total. No le pidas al usuario que sume.
+- Si el ticket o recibo muestra digitos de tarjeta, deducí el payment_method comparando con los medios de pago configurados (ultimos 4 digitos). Si no hay coincidencia exacta pero se ve el banco, usa el nombre del banco.
 - Si falta el monto Y no hay imagen de donde sacarlo -> pregunta de forma natural y breve.
 - Si hay ambiguedad (ej: "compre algo" sin monto ni imagen) -> pregunta que fue y cuanto.
 
@@ -538,6 +553,9 @@ async def create_notion_entry(data: dict, exchange_rate: float) -> tuple[bool, s
     if not data.get("value_ars") or not data.get("in_out"):
         return False, "No se pudo interpretar"
     try:
+        notes = data.get("notas") or ""
+        if data.get("payment_method"):
+            notes = f"💳 {data['payment_method']}" + (f" — {notes}" if notes else "")
         entry = await _ds.create_expense({
             "name":         data["name"],
             "in_out":       data["in_out"],
@@ -550,7 +568,7 @@ async def create_notion_entry(data: dict, exchange_rate: float) -> tuple[bool, s
             "client":       data.get("client"),
             "liters":       data.get("litros"),
             "consumo_kwh":  data.get("consumo_kwh"),
-            "notes":        data.get("notas"),
+            "notes":        notes or None,
             "emoji":        data.get("emoji"),
         })
         last_touched[MY_NUMBER] = {"page_id": entry.id, "name": data["name"]}
@@ -1874,7 +1892,7 @@ CRITICO: si guardar_lugar_conocido devuelve error o dice "NO fue guardado", info
                 for r in geo_reminders_cache:
                     tipo = "🔁 Recurrente" if r.get("recurrent") else "1️⃣ Una vez"
                     if r.get("type") == "shop" and r.get("shop_name"):
-                        lugar = f"cerca de {r['shop_name']}"
+                        lugar = f"cerca de {r['shop_name']} (radio {r.get('radius', 300)}m)"
                     elif r.get("lat") and r.get("lon"):
                         lugar = f"en coordenadas {r['lat']:.4f}, {r['lon']:.4f} (radio {r.get('radius', 300)}m)"
                     else:
