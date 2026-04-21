@@ -363,7 +363,6 @@ async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=N
                 "in_out":    {"type": "string", "enum": ["\u2192INGRESO\u2190", "\u2190 EGRESO \u2192"]},
                 "value_ars": {"type": "number"},
                 "categoria": {"type": "array", "items": {"type": "string"}},
-                "metodo":    {"type": "string", "enum": ["Payment", "Suscription"]},
                 "date":      {"type": "string", "description": "YYYY-MM-DD"},
                 "time":      {"type": ["string", "null"], "description": "HH:MM o null"},
                 "litros":    {"type": ["number", "null"]},
@@ -372,7 +371,7 @@ async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=N
                 "emoji":          {"type": "string"},
                 "payment_method": {"type": ["string", "null"], "description": "Medio de pago: banco o tarjeta. Deducilo del ticket si menciona digitos de tarjeta. Null si no se puede determinar."}
             },
-            "required": ["name", "in_out", "value_ars", "categoria", "metodo", "date", "emoji"]
+            "required": ["name", "in_out", "value_ars", "categoria", "date", "emoji"]
         }
     }]
 
@@ -425,7 +424,6 @@ Tu tarea: registrar gastos e ingresos del usuario.
 
 Categorias disponibles: Supermercado, Sueldo, Servicios, Transporte, Vianda, Salud, Salud Mental, Salida, Birra, Ocio, Compras, Depto, Plantas, Viajes, Venta.
 Servicios = pagos recurrentes (alquiler, luz, gas, internet, streaming, gimnasio). Depto = compras fisicas para el depto (muebles, materiales, herramientas).
-Metodo Suscription: SOLO si es un cargo recurrente mensual real (ej: Netflix, gimnasio, alquiler). Payment: todo lo demas, incluyendo pagos puntuales, extra usage, prepaid, one-time charges aunque sean de servicios que normalmente se pagan por mes.
 Si in_out es INGRESO -> categoria solo puede ser Sueldo o Venta.
 Clientes posibles: LBL, OPERA, ALPATACO, Juan Martin, Depto, Work, Santi Vales, Jorge, Barbara, Vanguardia, Alejo, Dinamo, Paula Diaz, Labti, PlanA, JGA, ATE.
 Emoji: elegi el mas especifico segun el contexto real."""
@@ -596,7 +594,6 @@ async def create_notion_entry(data: dict, exchange_rate: float) -> tuple[bool, s
             "value_ars":    data["value_ars"],
             "exchange_rate": exchange_rate,
             "categories":   data.get("categoria"),
-            "method":       data.get("metodo", "Payment"),
             "date":         data.get("date"),
             "time":         data.get("time"),
             "client":       data.get("client"),
@@ -1904,7 +1901,7 @@ CRITICO: si guardar_lugar_conocido devuelve error o dice "NO fue guardado", info
                 for e in historial:
                     monto = f"${e.value_ars:,.0f}"
                     fecha = str(e.date)[:10] if e.date else "fecha desconocida"
-                    metodo = f" via {e.method}" if e.method and e.method != "Payment" else ""
+                    metodo = ""
                     nota = f" — {e.notes}" if e.notes else ""
                     lines.append(f"- {fecha}: {monto}{metodo}{nota}")
                 t_result = f"Historial de pagos — {provider}:\n" + "\n".join(lines)
