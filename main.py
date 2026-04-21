@@ -1278,19 +1278,6 @@ async def handle_chat(phone: str, text: str) -> str:
     add_to_history(phone, "user", text)
     now = now_argentina()
 
-    # Detectar pedido explicito de resumen diario
-    _resumen_kw = ["resumen diario", "resumen de hoy", "dame el resumen", "manda el resumen",
-                   "manda resumen", "resumen matutino", "mandame el resumen"]
-    if any(k in text.lower() for k in _resumen_kw):
-        try:
-            _at = await get_gcal_access_token()
-            async with httpx.AsyncClient() as _http:
-                await send_daily_summary(_http, _at, now)
-            add_to_history(phone, "assistant", "[Resumen diario enviado]")
-            return None
-        except Exception as _e:
-            pass  # si falla, cae al chat normal
-
     # Armar contexto del usuario desde su config en Notion
     user_context_parts = []
     providers = user_prefs.get("service_providers", {})
@@ -4130,6 +4117,19 @@ async def process_single_item(phone: str, item: dict):
 
         if user_prefs.get("_config_page_id") is None:
             await load_user_config(phone)
+
+        # Shortcut: pedido explícito de resumen diario — antes de clasificar para evitar falsos RECORDATORIO
+        _resumen_kw = ["resumen diario", "resumen de hoy", "dame el resumen", "manda el resumen",
+                       "manda resumen", "resumen matutino", "mandame el resumen", "pasame el resumen"]
+        if text and not image_b64 and any(k in text.lower() for k in _resumen_kw):
+            try:
+                _at = await get_gcal_access_token()
+                async with httpx.AsyncClient() as _http:
+                    await send_daily_summary(_http, _at, now_argentina())
+                add_to_history(phone, "assistant", "[Resumen diario enviado]")
+                return
+            except Exception:
+                pass  # si falla, sigue al clasificador normal
 
         tipo = await classify(text, image_b64 is not None, image_b64, image_type, history=get_history(phone), extra_images=extra_images)
         exchange_rate = await get_exchange_rate()
