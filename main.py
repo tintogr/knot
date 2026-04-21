@@ -288,7 +288,7 @@ MAX_PROCESSED_IDS = 500
 # ── Buffer de mensajes (agrupa mensajes relacionados en ventana de tiempo) ────
 buffer_timers: dict[str, asyncio.Task] = {}
 BUFFER_WINDOW_SECS = 4.0
-PROCESSING_INDICATOR_DELAY = 1.0
+PROCESSING_INDICATOR_DELAY = 4.0
 
 
 async def get_media_base64(media_id: str) -> tuple[str, str]:
@@ -1968,7 +1968,7 @@ CRITICO: si guardar_lugar_conocido devuelve error o dice "NO fue guardado", info
                 changed.append(f"Hora nocturno -> {int(t_input['nocturno_hour']):02d}:00")
             if changed:
                 await save_user_config(MY_NUMBER)
-                t_result = "Configuracion actualizada: " + ", ".join(changed)
+                t_result = "Configuracion actualizada: " + ", ".join(changed) + ". El cambio toma efecto inmediatamente (el cron lo va a respetar en la proxima verificacion, menos de 1 minuto)."
             else:
                 t_result = "No se especifico que cambiar."
         elif t_name == "crear_proyecto":
