@@ -714,13 +714,17 @@ Responde:
     else:
         limit = 20 if all_matching else 1
         qfilter = QueryFilter(name_contains=search_term, limit=limit)
+        from datetime import date as _date
         if date_filter:
-            from datetime import date as _date
             try:
                 d = _date.fromisoformat(date_filter)
                 qfilter.date_range = DateRange(start=d, end=d)
             except Exception:
                 pass
+        elif all_matching:
+            # Sin fecha explícita en batch → acotar a hoy para no tocar historial
+            today = now.date()
+            qfilter.date_range = DateRange(start=today, end=today)
         results = await _ds.query_expenses(qfilter)
         if not results:
             return False, f"No encontre ningun gasto llamado _{search_term}_"
