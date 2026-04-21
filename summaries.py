@@ -6,8 +6,9 @@ from state import (
     _ds, QueryFilter, DateRange,
     MY_NUMBER, user_prefs, current_location, geo_reminders_cache,
     now_argentina, claude_create, add_to_history, DIAS_SEMANA,
+    pending_state,
 )
-from wa_utils import send_message
+from wa_utils import send_message, send_interactive_buttons
 from gcal import get_gcal_access_token
 from config import load_user_config
 
@@ -397,6 +398,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
             except Exception:
                 pass
 
+    mismatch_followups = []
     try:
         gmail_summary = await get_gmail_summary()
         if gmail_summary:
@@ -412,6 +414,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
             except Exception:
                 invoices = []
 
+            mismatch_followups = []
             for inv in invoices:
                 provider = inv.get("provider", "")
                 amount = float(inv.get("amount") or 0)
@@ -435,8 +438,11 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                 ok, page_id = await _ds.create_finance_invoice(provider, amount, period, due_date, inv.get("category", "Servicios"))
                 if ok:
                     await _ds.create_factura_task(provider, amount, due_date, period, finance_page_id=page_id)
-                if pago_dudoso and amount:
-                    lines.append(f"_⚠️ {provider}: factura ${amount:,.0f} pero último pago registrado ${pago_dudoso.value_ars:,.0f} — revisá si coincide._")
+                if pago_dudoso and amount and page_id:
+                    mismatch_followups.append({
+                        "provider": provider, "invoice_amount": amount,
+                        "paid_amount": pago_dudoso.value_ars, "page_id": page_id,
+                    })
 
         impagas = await _ds.get_impaga_facturas()
         impaga_lines = []
@@ -484,6 +490,30 @@ async def send_daily_summary(http, access_token: str, now: datetime):
     msg_text = "\n".join(lines)
     await send_message(MY_NUMBER, msg_text)
     add_to_history(MY_NUMBER, "assistant", msg_text)
+
+    # Resolver mismatches de facturas interactivamente (uno a la vez)
+    try:
+        if mismatch_followups:
+            first = mismatch_followups[0]
+            pending_state[MY_NUMBER] = {
+                "type": "factura_mismatch_confirm",
+                "provider": first["provider"],
+                "invoice_amount": first["invoice_amount"],
+                "paid_amount": first["paid_amount"],
+                "page_id": first["page_id"],
+                "remaining": mismatch_followups[1:],
+            }
+            diff = abs(first["invoice_amount"] - first["paid_amount"])
+            await send_interactive_buttons(
+                MY_NUMBER,
+                f"Factura *{first['provider']}* por ${first['invoice_amount']:,.0f} pero tu último pago fue ${first['paid_amount']:,.0f} (diff ${diff:,.0f}). ¿Ya está pagada?",
+                [
+                    {"id": "mismatch_yes", "title": "Sí, ya la pagué"},
+                    {"id": "mismatch_no", "title": "No, está pendiente"},
+                ]
+            )
+    except Exception:
+        pass
 
 
 # ── Resumen nocturno ──────────────────────────────────────────────────────────

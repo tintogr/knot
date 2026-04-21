@@ -385,6 +385,11 @@ async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=N
 
     profile_gastos = get_domain_profile("gastos")
     profile_gastos_ctx = f"\nPerfil de gastos del usuario: {profile_gastos}\n" if profile_gastos else ""
+    providers = user_prefs.get("service_providers") or {}
+    providers_ctx = ""
+    if providers:
+        prov_lines = [f"  - {k}: {v}" for k, v in providers.items()]
+        providers_ctx = "\nProveedores de servicios configurados (usar para resolver nombres):\n" + "\n".join(prov_lines) + "\nSi el gasto menciona un proveedor conocido, usa el nombre canonico (ej: 'electricidad' → 'Electricidad - {nombre proveedor}').\n"
     cards = user_prefs.get("cards") or []
     cards_ctx = ""
     if cards:
@@ -400,7 +405,7 @@ async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=N
     system = f"""Sos Knot, asistente personal por WhatsApp. Hablas en espanol rioplatense, natural y conciso.
 Hoy: {hoy_str(now)}. Calendario: {semana_str(now)}.
 Tasa dolar blue
-{profile_gastos_ctx}{cards_ctx}
+{profile_gastos_ctx}{providers_ctx}{cards_ctx}
 Tu tarea: registrar gastos e ingresos del usuario.
 - Si el mensaje tiene descripcion Y monto -> usa la tool registrar_gasto directamente.
 - Si hay una imagen (ticket, screenshot de pedido, factura) -> lee TODOS los items, suma los montos vos mismo, y registra el total. No le pidas al usuario que sume.
@@ -543,6 +548,24 @@ Emoji: elegi el mas especifico segun el contexto real."""
                     "expires_at": expires_at,
                 }
                 reply += "\n\n_Si algo no quedó bien, avisame._"
+
+    # Unknown card detection: si el payment_method tiene dígitos no registrados, preguntar
+    if len(created_entries) == 1:
+        _, data_entry, success_entry = created_entries[0]
+        if success_entry and data_entry.get("payment_method") and not pending_state.get(phone):
+            import re as _re
+            pm = data_entry["payment_method"]
+            digits = _re.findall(r'\d{4}', pm)
+            if digits:
+                last4 = digits[-1]
+                configured_cards = user_prefs.get("cards") or []
+                is_known = any(
+                    (c.get("last4") == last4) or c.get("label", "").lower() in pm.lower()
+                    for c in configured_cards
+                )
+                if not is_known:
+                    pending_state[phone] = {"type": "unknown_card_register", "last4": last4}
+                    reply += f"\n\n💳 Vi una tarjeta terminada en *{last4}* que no tengo registrada. ¿De qué banco es y es débito o crédito?"
 
     add_to_history(phone, "user", text)
     add_to_history(phone, "assistant", reply)
@@ -3744,6 +3767,74 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
             await send_message(phone, "Ok, la task queda pendiente")
         return True
 
+    if state_type == "factura_mismatch_confirm":
+        provider = state.get("provider", "la factura")
+        page_id = state.get("page_id")
+        invoice_amount = state.get("invoice_amount")
+        paid_amount = state.get("paid_amount")
+        remaining = state.get("remaining", [])
+        del pending_state[phone]
+        if text.strip() == "mismatch_yes":
+            # Pedir nota explicativa y marcar como pagada
+            pending_state[phone] = {
+                "type": "factura_mismatch_note",
+                "provider": provider, "page_id": page_id,
+                "paid_amount": paid_amount, "remaining": remaining,
+            }
+            await send_message(phone, f"✅ Entendido. ¿Querés dejar una nota sobre la diferencia? (ej: _\"pagué también el mes siguiente\"_) o mandá «no» para omitir.")
+        else:
+            await send_message(phone, f"Ok, *{provider}* queda como factura pendiente.")
+            # Seguir con el próximo mismatch si hay
+            if remaining:
+                nxt = remaining[0]
+                pending_state[phone] = {
+                    "type": "factura_mismatch_confirm",
+                    "provider": nxt["provider"], "invoice_amount": nxt["invoice_amount"],
+                    "paid_amount": nxt["paid_amount"], "page_id": nxt["page_id"],
+                    "remaining": remaining[1:],
+                }
+                diff = abs(nxt["invoice_amount"] - nxt["paid_amount"])
+                await send_interactive_buttons(
+                    phone,
+                    f"Factura *{nxt['provider']}* por ${nxt['invoice_amount']:,.0f} pero tu último pago fue ${nxt['paid_amount']:,.0f} (diff ${diff:,.0f}). ¿Ya está pagada?",
+                    [{"id": "mismatch_yes", "title": "Sí, ya la pagué"}, {"id": "mismatch_no", "title": "No, está pendiente"}]
+                )
+        return True
+
+    if state_type == "factura_mismatch_note":
+        provider = state.get("provider", "la factura")
+        page_id = state.get("page_id")
+        paid_amount = state.get("paid_amount")
+        remaining = state.get("remaining", [])
+        del pending_state[phone]
+        note = text.strip() if text.strip().lower() not in ["no", "nope", "n", ""] else None
+        await _ds.mark_finance_paid(page_id, paid_amount, None, note)
+        tasks = await get_pending_factura_tasks()
+        for t in tasks:
+            if t.get("finance_page_id") == page_id:
+                await mark_factura_task_paid(t["page_id"])
+                break
+        msg = f"✅ *{provider}* marcada como pagada"
+        if note:
+            msg += f" — nota: _{note}_"
+        await send_message(phone, msg)
+        # Seguir con el próximo mismatch si hay
+        if remaining:
+            nxt = remaining[0]
+            pending_state[phone] = {
+                "type": "factura_mismatch_confirm",
+                "provider": nxt["provider"], "invoice_amount": nxt["invoice_amount"],
+                "paid_amount": nxt["paid_amount"], "page_id": nxt["page_id"],
+                "remaining": remaining[1:],
+            }
+            diff = abs(nxt["invoice_amount"] - nxt["paid_amount"])
+            await send_interactive_buttons(
+                phone,
+                f"Factura *{nxt['provider']}* por ${nxt['invoice_amount']:,.0f} pero tu último pago fue ${nxt['paid_amount']:,.0f} (diff ${diff:,.0f}). ¿Ya está pagada?",
+                [{"id": "mismatch_yes", "title": "Sí, ya la pagué"}, {"id": "mismatch_no", "title": "No, está pendiente"}]
+            )
+        return True
+
     if state_type == "factura_note":
         finance_page_id = state.get("finance_page_id")
         task_page_id = state.get("task_page_id")
@@ -3765,6 +3856,35 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
         if note:
             msg += " con nota guardada."
         await send_message(phone, msg)
+        return True
+
+    if state_type == "unknown_card_register":
+        last4 = state.get("last4", "")
+        del pending_state[phone]
+        skip_words = {"no", "n", "nope", "omitir", "skip", "no gracias"}
+        if text.strip().lower() in skip_words:
+            return True
+        response_ai = await claude_create(
+            model="claude-haiku-4-5-20251001", max_tokens=100,
+            system="Extrae banco y tipo de tarjeta. Responde SOLO JSON.",
+            messages=[{"role": "user", "content": f'Mensaje: "{text}". Ultimos 4 digitos: {last4}. Responde: {{"label": "Nombre del banco + Debito/Credito (ej: BBVA Debito)", "last4": "{last4}"}}'}]
+        )
+        raw_ai = response_ai.content[0].text.strip().strip("`").lstrip("json").strip()
+        try:
+            card_data = json.loads(raw_ai)
+            label = card_data.get("label", "").strip()
+            if label:
+                cards = user_prefs.get("cards") or []
+                existing = next((c for c in cards if c.get("last4") == last4), None)
+                if existing:
+                    existing["label"] = label
+                else:
+                    cards.append({"label": label, "last4": last4})
+                user_prefs["cards"] = cards
+                await save_user_config(MY_NUMBER)
+                await send_message(phone, f"✅ Guardé *{label}* (****{last4}) en tu config.")
+        except Exception:
+            await send_message(phone, "No pude interpretar la tarjeta. Podés agregarla con: _\"agregá [banco] [débito/crédito] terminada en {last4}\"_")
         return True
 
     if state_type == "save_location_confirm":
