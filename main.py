@@ -46,6 +46,7 @@ async def startup_event():
     await _ds.ensure_db_select_field("finances", "Estado", ["Impaga", "Pagada"])
     await _ds.ensure_db_text_field("config", "Last Summary Date")
     await _ds.ensure_db_text_field("finances", "Payment Method")
+    asyncio.create_task(_run_once_migrations())
     asyncio.create_task(_cron_loop())
 
 @app.on_event("shutdown")
@@ -494,7 +495,8 @@ Emoji: elegi el mas especifico segun el contexto real."""
         model="claude-sonnet-4-20250514", max_tokens=400,
         system=system,
         messages=messages,
-        tools=tools
+        tools=tools,
+        tool_choice={"type": "none"},
     )
     reply = next((b.text for b in final_response.content if hasattr(b, "text") and b.text), "").strip()
 
@@ -5045,6 +5047,16 @@ async def load_payment_methods():
         print(f"[PaymentMethods] Cargados {len(payment_methods_cache)} métodos")
     except Exception as e:
         print(f"[PaymentMethods] Error cargando: {e}")
+
+
+async def _run_once_migrations():
+    """Migraciones puntuales que se ejecutan una vez al arrancar."""
+    try:
+        n = await _ds.migrate_empty_categories_to_recurrente()
+        if n:
+            print(f"[Migration] {n} registros sin categoria actualizados a Recurrente")
+    except Exception as e:
+        print(f"[Migration] Error: {e}")
 
 
 async def load_geo_reminders():

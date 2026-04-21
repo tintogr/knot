@@ -517,6 +517,36 @@ class NotionDataStore:
     async def archive_expense(self, entry_id: str) -> bool:
         return await self._archive_page(entry_id)
 
+    async def migrate_empty_categories_to_recurrente(self) -> int:
+        """One-time migration: set Category=Recurrente on all Finance records with empty Category."""
+        updated = 0
+        cursor = None
+        while True:
+            body = {
+                "page_size": 100,
+                "filter": {"property": "Category", "multi_select": {"is_empty": True}},
+            }
+            if cursor:
+                body["start_cursor"] = cursor
+            r = await self._http.post(
+                f"{NOTION_API}/databases/{self._db('finances')}/query",
+                headers=self._headers_cache,
+                json=body,
+            )
+            if r.status_code != 200:
+                break
+            data = r.json()
+            for page in data.get("results", []):
+                page_id = page["id"]
+                await self._update_page(page_id, {
+                    "Category": {"multi_select": [{"name": "Recurrente"}]}
+                })
+                updated += 1
+            if not data.get("has_more"):
+                break
+            cursor = data.get("next_cursor")
+        return updated
+
     async def get_financial_summary(self, month: str = None) -> dict:
         """
         Financial summary for a month (format YYYY-MM).
