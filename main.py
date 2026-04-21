@@ -633,6 +633,16 @@ async def create_notion_entry(data: dict, exchange_rate: float) -> tuple[bool, s
             "payment_method": data.get("payment_method") or None,
         })
         last_touched[MY_NUMBER] = {"page_id": entry.id, "name": data["name"]}
+        # Increment payment method usage counter
+        pm_str = (data.get("payment_method") or "").lower()
+        if pm_str and payment_methods_cache:
+            matched = next((
+                pm for pm in payment_methods_cache
+                if (pm.last4 and pm.last4 in pm_str) or (pm.name and pm.name.lower() in pm_str)
+            ), None)
+            if matched:
+                asyncio.create_task(_ds.increment_payment_method_uses(matched.id, matched.uses))
+                matched.uses += 1
         return True, entry.id
     except Exception as e:
         return False, str(e)
@@ -656,15 +666,17 @@ async def check_and_apply_category(name: str, predicted_cats: list[str]) -> tupl
 async def corregir_gasto(text: str, phone: str = None) -> tuple[bool, str]:
     now = now_argentina()
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=200,
+        model="claude-sonnet-4-20250514", max_tokens=300,
         system="Extrae que gasto corregir y que cambiar. Si el mensaje no menciona un nombre concreto, usa null en search_term. Responde SOLO JSON.",
         messages=[{"role": "user", "content": f"""Hoy: {now.strftime("%Y-%m-%d")}
 Mensaje: {text}
 Responde:
 {{"search_term": "nombre del gasto o null si no se menciona uno concreto",
+  "all_matching": true si hay que corregir TODOS los que coinciden (ej: 'los 3 de anthropic', 'todos los de hoy'), false si es uno solo,
   "new_value_ars": nuevo monto en ARS o null,
   "new_categoria": ["categoria"] o null,
-  "new_name": "nuevo nombre" o null}}"""}]
+  "new_name": "nuevo nombre" o null,
+  "new_notes": "nueva nota" o null}}"""}]
     )
     raw = response.content[0].text.strip()
     if raw.startswith("```"):
@@ -672,6 +684,7 @@ Responde:
     intent = json.loads(raw)
 
     search_term = intent.get("search_term")
+    all_matching = intent.get("all_matching", False)
     page_id_direct = None
 
     if not search_term and phone and phone in last_touched:
@@ -681,19 +694,6 @@ Responde:
     elif not search_term:
         return False, "No entendi que gasto queres corregir"
 
-    if page_id_direct:
-        page_id = page_id_direct
-        old_name = search_term
-        old_value = 0
-    else:
-        results = await _ds.query_expenses(QueryFilter(name_contains=search_term, limit=1))
-        if not results:
-            return False, f"No encontre ningun gasto llamado _{search_term}_"
-        entry = results[0]
-        page_id = entry.id
-        old_name = entry.name
-        old_value = entry.value_ars
-
     updates = {}
     if intent.get("new_value_ars"):
         updates["value_ars"] = float(intent["new_value_ars"])
@@ -701,26 +701,46 @@ Responde:
         updates["categories"] = intent["new_categoria"]
     if intent.get("new_name"):
         updates["name"] = intent["new_name"]
+    if intent.get("new_notes") is not None:
+        updates["notes"] = intent["new_notes"]
     if not updates:
         return False, "No entendi que campo queres cambiar"
 
-    try:
-        await _ds.update_expense(page_id, updates)
-    except Exception as e:
-        return False, f"Error actualizando en Notion: {str(e)[:100]}"
+    if page_id_direct and not all_matching:
+        entries_to_update = [type("E", (), {"id": page_id_direct, "name": search_term, "value_ars": 0})()]
+    else:
+        limit = 20 if all_matching else 1
+        results = await _ds.query_expenses(QueryFilter(name_contains=search_term, limit=limit))
+        if not results:
+            return False, f"No encontre ningun gasto llamado _{search_term}_"
+        entries_to_update = results
 
-    if phone:
-        new_name = intent.get("new_name") or old_name
-        last_touched[phone] = {"page_id": page_id, "name": new_name}
+    errors = []
+    updated = 0
+    for entry in entries_to_update:
+        try:
+            await _ds.update_expense(entry.id, updates)
+            updated += 1
+            if phone:
+                last_touched[phone] = {"page_id": entry.id, "name": intent.get("new_name") or entry.name}
+        except Exception as e:
+            errors.append(str(e)[:80])
+
+    if errors and not updated:
+        return False, f"Error actualizando en Notion: {errors[0]}"
 
     changes = []
     if intent.get("new_value_ars"):
-        changes.append(f"${old_value:,.0f} -> *${float(intent['new_value_ars']):,.0f} ARS*")
+        changes.append(f"Monto -> *${float(intent['new_value_ars']):,.0f} ARS*")
     if intent.get("new_categoria"):
         changes.append(f"Categoria -> _{', '.join(intent['new_categoria'])}_")
     if intent.get("new_name"):
         changes.append(f"Nombre -> _{intent['new_name']}_")
-    return True, f"*{old_name}* corregido\n" + "\n".join(changes) + "\n\nActualizado en Notion"
+    if intent.get("new_notes") is not None:
+        changes.append(f"Nota -> _{intent['new_notes']}_")
+
+    label = f"{updated} entradas" if updated > 1 else f"*{entries_to_update[0].name}*"
+    return True, f"{label} corregido{'s' if updated > 1 else ''}\n" + "\n".join(changes)
 
 async def eliminar_gasto(text: str, phone: str = None) -> tuple[bool, str]:
     response = await claude_create(

@@ -178,6 +178,7 @@ except ImportError:
         last4: str = None
         owner: str = None
         is_default: bool = False
+        uses: int = 0
 
 
 # ── Domain constants ───────────────────────────────────────────────────────────
@@ -501,8 +502,8 @@ class NotionDataStore:
             props["Category"] = {"multi_select": [{"name": c} for c in updates["categories"]]}
         if "name" in updates:
             props["Name"] = {"title": [{"text": {"content": updates["name"]}}]}
-        if "method" in updates:
-            props["Method"] = {"select": {"name": updates["method"]}}
+        if "payment_method" in updates:
+            props["Payment Method"] = {"rich_text": [{"text": {"content": updates["payment_method"][:200]}}]}
         if "notes" in updates:
             props["Notes"] = {"rich_text": [{"text": {"content": updates["notes"]}}]}
         if "liters" in updates:
@@ -513,6 +514,13 @@ class NotionDataStore:
 
     async def archive_expense(self, entry_id: str) -> bool:
         return await self._archive_page(entry_id)
+
+    async def increment_payment_method_uses(self, page_id: str, current_uses: int) -> None:
+        """Increment the Uses counter for a payment method."""
+        try:
+            await self._update_page(page_id, {"Uses": {"number": current_uses + 1}})
+        except Exception:
+            pass
 
     async def migrate_empty_categories_to_recurrente(self) -> int:
         """One-time migration: set Category=Recurrente on all Finance records with empty Category."""
@@ -1130,6 +1138,7 @@ class NotionDataStore:
             results = []
             for p in pages:
                 props = p.get("properties", {})
+                uses_raw = props.get("Uses", {}).get("number") or 0
                 results.append(PaymentMethod(
                     id=p["id"],
                     name=_get_title(props, "Name"),
@@ -1138,6 +1147,7 @@ class NotionDataStore:
                     last4=_get_text(props, "Last4") or None,
                     owner=_get_text(props, "Owner") or None,
                     is_default=_get_checkbox(props, "Default"),
+                    uses=int(uses_raw),
                 ))
             return results
         except Exception:
@@ -1319,9 +1329,9 @@ class NotionDataStore:
         return True, task.id
 
     async def mark_factura_task_paid(self, page_id: str) -> bool:
-        """Mark a bill task as paid (Notion status: Listo)."""
+        """Archive a paid bill task so it disappears from Tasks DB."""
         try:
-            await self.update_task(page_id, {"status": "Listo"})
+            await self._archive_page(page_id)
             return True
         except Exception:
             return False
