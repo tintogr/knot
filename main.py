@@ -486,9 +486,11 @@ Emoji: elegi el mas especifico segun el contexto real."""
             "content": tr
         })
 
-    # Armar confirmación directamente sin segundo call — evita que Claude reintente
+    # Texto libre que Claude puso ANTES de llamar la tool (ej: aclaración, pregunta)
+    pre_text = next((b.text for b in response.content if hasattr(b, "text") and b.text), "").strip()
+
     if not created_entries:
-        reply = "No encontré nada para registrar."
+        reply = pre_text or "No encontré nada para registrar."
     elif all(not ok for _, _, ok in created_entries):
         reply = "No pude registrar el gasto en Notion."
     else:
@@ -508,6 +510,8 @@ Emoji: elegi el mas especifico segun el contexto real."""
             if pm:
                 line += f" · {pm}"
             lines.append(line)
+        if pre_text:
+            lines.insert(0, pre_text)
         reply = "\n".join(lines)
 
     # Pending state solo cuando hay un unico gasto en el mensaje

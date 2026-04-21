@@ -429,7 +429,6 @@ class NotionDataStore:
             "In - Out": {"select": {"name": normalized_in_out}},
             "Value (ars)": {"number": float(data["value_ars"])},
             "Exchange Rate": {"number": data.get("exchange_rate", 0)},
-            "Method": {"select": {"name": data.get("method", "Payment")}},
         }
         if data.get("categories"):
             props["Category"] = {"multi_select": [{"name": c} for c in data["categories"]]}
@@ -451,8 +450,6 @@ class NotionDataStore:
             props["Notes"] = {"rich_text": [{"text": {"content": data["notes"]}}]}
         if data.get("estado"):
             props["Estado"] = {"select": {"name": data["estado"]}}
-        if data.get("medio_pago"):
-            props["Method"] = {"select": {"name": data["medio_pago"]}}
         if data.get("payment_method"):
             props["Payment Method"] = {"rich_text": [{"text": {"content": data["payment_method"][:200]}}]}
 
