@@ -486,19 +486,29 @@ Emoji: elegi el mas especifico segun el contexto real."""
             "content": tr
         })
 
-    messages = [
-        {"role": "user", "content": content},
-        {"role": "assistant", "content": response.content},
-        {"role": "user", "content": all_tool_results}
-    ]
-    final_response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=400,
-        system="Confirmá el registro al usuario de forma breve y natural en español rioplatense. Si hubo error mencionalo. No intentes registrar de nuevo ni corrijas el payment_method.",
-        messages=messages,
-        tools=tools,
-        tool_choice={"type": "none"},
-    )
-    reply = next((b.text for b in final_response.content if hasattr(b, "text") and b.text), "").strip()
+    # Armar confirmación directamente sin segundo call — evita que Claude reintente
+    if not created_entries:
+        reply = "No encontré nada para registrar."
+    elif all(not ok for _, _, ok in created_entries):
+        reply = "No pude registrar el gasto en Notion."
+    else:
+        lines = []
+        for _, data, ok in created_entries:
+            if not ok:
+                lines.append(f"❌ No pude registrar *{data.get('name', '?')}*.")
+                continue
+            usd = data["value_ars"] / exchange_rate
+            cats = data.get("categoria") or []
+            pm = data.get("payment_method") or ""
+            line = f"✅ *{data['name']}* — ${data['value_ars']:,.0f} ARS"
+            if abs(usd - data["value_ars"]) > 1:
+                line += f" (USD {usd:.2f})"
+            if cats:
+                line += f" · _{', '.join(cats)}_"
+            if pm:
+                line += f" · {pm}"
+            lines.append(line)
+        reply = "\n".join(lines)
 
     # Pending state solo cuando hay un unico gasto en el mensaje
     if len(created_entries) == 1:
