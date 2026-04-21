@@ -417,8 +417,8 @@ Tu tarea: registrar gastos e ingresos del usuario.
 - Si falta el monto Y no hay imagen de donde sacarlo -> pregunta de forma natural y breve.
 - Si hay ambiguedad (ej: "compre algo" sin monto ni imagen) -> pregunta que fue y cuanto.
 
-Categorias disponibles: Supermercado, Sueldo, Recurrente, Transporte, Vianda, Salud, Salud Mental, Salida, Birra, Ocio, Compras, Depto, Plantas, Viajes, Venta.
-Recurrente = pagos recurrentes (alquiler, luz, gas, internet, streaming, gimnasio). Depto = compras fisicas para el depto (muebles, materiales, herramientas).
+Categorias disponibles: Supermercado, Sueldo, Recurrente, Servicio, Transporte, Vianda, Salud, Salud Mental, Salida, Birra, Ocio, Compras, Depto, Plantas, Viajes, Venta.
+Recurrente = pagos que se repiten todos los meses (alquiler, luz, gas, internet, streaming, gimnasio, suscripciones fijas). Servicio = pago puntual de un servicio no recurrente (factura extra, credito adicional, uso puntual — ej: Anthropic extra usage, multa, servicio tecnico). Depto = compras fisicas para el depto (muebles, materiales, herramientas).
 Si in_out es INGRESO -> categoria solo puede ser Sueldo o Venta.
 Clientes posibles: LBL, OPERA, ALPATACO, Juan Martin, Depto, Work, Santi Vales, Jorge, Barbara, Vanguardia, Alejo, Dinamo, Paula Diaz, Labti, PlanA, JGA, ATE.
 Emoji: elegi el mas especifico segun el contexto real."""
