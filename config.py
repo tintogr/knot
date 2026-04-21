@@ -1,7 +1,7 @@
 import json
 from notion_datastore import UserConfig
 from state import (
-    _ds, user_prefs, current_location,
+    _ds, user_prefs, current_location, _last_summary_sent,
     MY_NUMBER, DAILY_SUMMARY_HOUR, claude_create,
 )
 
@@ -43,6 +43,16 @@ async def load_user_config(wa_number: str):
                 current_location["source"] = "restored"
                 if cfg.saved_city:
                     current_location["location_name"] = cfg.saved_city
+        if cfg.last_summary_date:
+            user_prefs["_last_summary_date"] = cfg.last_summary_date
+            from datetime import date
+            if not _last_summary_sent.get("daily"):
+                try:
+                    if cfg.last_summary_date == date.today().isoformat():
+                        from datetime import datetime
+                        _last_summary_sent["daily"] = datetime.now()
+                except Exception:
+                    pass
     except Exception:
         pass
     if "payment_methods" not in user_prefs:

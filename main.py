@@ -43,6 +43,7 @@ async def startup_event():
     await load_user_config(MY_NUMBER)
     await load_geo_reminders()
     await _ds.ensure_db_select_field("finances", "Estado", ["Impaga", "Pagada"])
+    await _ds.ensure_db_text_field("config", "Last Summary Date")
     asyncio.create_task(_cron_loop())
 
 @app.on_event("shutdown")
@@ -4608,6 +4609,8 @@ REGLAS:
     return reply
 
 
+_cron_job_running = False
+
 async def _cron_loop():
     """Background loop que ejecuta cron_job cada 60 segundos sin depender de llamadas externas."""
     await asyncio.sleep(60)  # Espera inicial para que el servidor termine de arrancar
@@ -4621,6 +4624,16 @@ async def _cron_loop():
 # ── CRON JOB ───────────────────────────────────────────────────────────────────
 @app.get("/cron")
 async def cron_job():
+    global _cron_job_running
+    if _cron_job_running:
+        return {"ok": False, "reason": "already running"}
+    _cron_job_running = True
+    try:
+        return await _cron_job_inner()
+    finally:
+        _cron_job_running = False
+
+async def _cron_job_inner():
     await load_user_config(MY_NUMBER)
     now = now_argentina()
     fired = []
@@ -4633,12 +4646,20 @@ async def cron_job():
     _curr_min = now.hour * 60 + now.minute
     _last_daily = _last_summary_sent.get("daily")
     _sent_today = bool(_last_daily and _last_daily.date() == now.date())
-    if 0 <= (_curr_min - _sched_min) <= 29 and not _sent_today:
+    # Also check persisted date from Notion to survive restarts
+    if not _sent_today:
+        _persisted_date = user_prefs.get("_last_summary_date")
+        if _persisted_date == now.date().isoformat():
+            _sent_today = True
+    if 0 <= (_curr_min - _sched_min) <= 3 and not _sent_today:
+        # Mark BEFORE sending to prevent concurrent double-sends
+        _last_summary_sent["daily"] = now
+        user_prefs["_last_summary_date"] = now.date().isoformat()
         try:
             access_token_summary = await get_gcal_access_token()
             async with httpx.AsyncClient() as http_summary:
                 await send_daily_summary(http_summary, access_token_summary, now)
-            _last_summary_sent["daily"] = now
+            await save_user_config(MY_NUMBER)
             fired.append("DAILY_SUMMARY")
         except Exception as e:
             fired.append(f"DAILY_SUMMARY_ERROR: {str(e)[:60]}")

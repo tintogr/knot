@@ -164,6 +164,7 @@ except ImportError:
         saved_lat: float = None
         saved_lon: float = None
         saved_city: str = None
+        last_summary_date: str = None
 
 
 # ── Domain constants ───────────────────────────────────────────────────────────
@@ -1080,6 +1081,18 @@ class NotionDataStore:
         except Exception:
             return False
 
+    async def ensure_db_text_field(self, db_name: str, field_name: str) -> bool:
+        """Add a rich_text field to a Notion DB if it doesn't already exist."""
+        try:
+            r = await self._http.patch(
+                f"{NOTION_API}/databases/{self._db(db_name)}",
+                headers=self._headers_cache,
+                json={"properties": {field_name: {"rich_text": {}}}},
+            )
+            return r.status_code == 200
+        except Exception:
+            return False
+
     async def create_finance_invoice(
         self, provider: str, amount: float, period: str, due_date: str = "", category: str = "Servicios"
     ) -> tuple[bool, str]:
@@ -1705,6 +1718,7 @@ class NotionDataStore:
             saved_lat=_get_number(props, "Latitude"),
             saved_lon=_get_number(props, "Longitude"),
             saved_city=_get_text(props, "City") or None,
+            last_summary_date=_get_text(props, "Last Summary Date") or None,
         )
         return config, page["id"]
 
@@ -1745,9 +1759,14 @@ class NotionDataStore:
 
         try:
             await self._update_page(page_id, props)
-            return True
         except Exception:
             return False
+        if config.last_summary_date:
+            try:
+                await self._update_page(page_id, {"Last Summary Date": {"rich_text": [{"text": {"content": config.last_summary_date}}]}})
+            except Exception:
+                pass
+        return True
 
     async def save_location(self, page_id: str, lat: float, lon: float, city: str = None) -> bool:
         """Save coordinates and city to config. Kept separate for throttling purposes."""
