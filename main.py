@@ -4885,8 +4885,9 @@ async def check_geo_reminders(lat: float, lon: float) -> list[dict]:
             if shop_name:
                 reminder_radius = reminder.get("radius", 300)
                 shops = await search_nearby_shops(lat, lon, radius=reminder_radius, name_filter=shop_name)
-                if shops and shops[0]["distance_m"] <= reminder_radius:
-                    reminder["_matched_shop"] = shops[0]
+                close_shops = [s for s in shops if s["distance_m"] <= reminder_radius]
+                if close_shops:
+                    reminder["_matched_shops"] = close_shops[:3]
                     triggered.append(reminder)
     return triggered
 
@@ -4953,15 +4954,15 @@ async def receive_location(request: Request):
                     continue
                 _geo_reminders_in_range.add(r_id)
                 _geo_reminder_cooldowns[r_id] = now
-                shop = reminder.get("_matched_shop")
-                if shop:
-                    shop_info = f"*{shop['name']}* a {shop['distance_m']}m"
-                    if shop.get("address"):
-                        shop_info += f"\n📍 {shop['address']}"
-                    if shop.get("opening_hours"):
-                        shop_info += f"\n🕐 {shop['opening_hours']}"
-                    shop_info += f"\n🗺️ {shop['maps_link']}"
-                    msg = f"📍 *{reminder['name']}*\n\n{shop_info}"
+                shops = reminder.get("_matched_shops") or []
+                if shops:
+                    lines = [f"📍 *{reminder['name']}*", ""]
+                    for s in shops:
+                        line = f"• *{s['name']}* a {s['distance_m']}m"
+                        if s.get("maps_link"):
+                            line += f" — {s['maps_link']}"
+                        lines.append(line)
+                    msg = "\n".join(lines)
                 else:
                     msg = f"📍 *{reminder['name']}*"
                 if reminder.get("recurrent"):
