@@ -6,7 +6,9 @@ de los handlers ni de main.py, evitando imports circulares.
 """
 
 import os
+import asyncio
 from datetime import datetime, timedelta, timezone
+from anthropic import Anthropic
 from notion_datastore import NotionDataStore, QueryFilter, DateRange  # noqa: F401
 
 # ── Credenciales y constantes de entorno ──────────────────────────────────────
@@ -125,3 +127,55 @@ _last_summary_sent: dict[str, datetime | None] = {"daily": None, "nocturno": Non
 
 def now_argentina() -> datetime:
     return datetime.now(timezone.utc) - timedelta(hours=3)
+
+# ── Claude client ──────────────────────────────────────────────────────────────
+
+anthropic = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+async def claude_create(**kwargs):
+    """Wrapper con reintentos automaticos para errores 529 (API sobrecargada)."""
+    last_err = None
+    for attempt in range(3):
+        try:
+            return anthropic.messages.create(**kwargs)
+        except Exception as e:
+            last_err = e
+            if "529" in str(e) or "overloaded" in str(e).lower():
+                await asyncio.sleep(2 ** attempt)
+                continue
+            raise
+    raise last_err
+
+# ── Helpers de tiempo y conversacion ──────────────────────────────────────────
+
+def hoy_str(now: datetime = None) -> str:
+    """Retorna 'martes 07/04/2026 08:33' en espanol."""
+    if not now:
+        now = now_argentina()
+    dia = DIAS_SEMANA[now.weekday()]
+    return f"{dia} {now.strftime('%d/%m/%Y')} {now.strftime('%H:%M')}"
+
+def semana_str(now: datetime = None) -> str:
+    """Retorna tabla de los proximos 7 dias para que Claude no calcule."""
+    if not now:
+        now = now_argentina()
+    lines = []
+    for i in range(8):
+        d = now + timedelta(days=i)
+        label = "HOY" if i == 0 else "MANANA" if i == 1 else ""
+        dia = DIAS_SEMANA[d.weekday()]
+        entry = f"{dia} {d.strftime('%d/%m/%Y')}"
+        if label:
+            entry += f" ({label})"
+        lines.append(entry)
+    return " | ".join(lines)
+
+def get_history(phone: str) -> list:
+    return chat_history.get(phone, [])
+
+def add_to_history(phone: str, role: str, content: str):
+    if phone not in chat_history:
+        chat_history[phone] = []
+    chat_history[phone].append({"role": role, "content": content})
+    if len(chat_history[phone]) > MAX_HISTORY:
+        chat_history[phone] = chat_history[phone][-MAX_HISTORY:]
