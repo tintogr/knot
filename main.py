@@ -397,10 +397,12 @@ async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=N
         for c in cards:
             label = c.get("label", "")
             last4 = c.get("last4", "")
+            owner = c.get("owner", "")
+            owner_str = f" — de {owner}" if owner else ""
             if last4:
-                card_lines.append(f"  - {label} (****{last4})")
+                card_lines.append(f"  - {label} (****{last4}){owner_str}")
             else:
-                card_lines.append(f"  - {label}")
+                card_lines.append(f"  - {label}{owner_str}")
         cards_ctx = "\nMedios de pago configurados:\n" + "\n".join(card_lines) + "\n"
     system = f"""Sos Knot, asistente personal por WhatsApp. Hablas en espanol rioplatense, natural y conciso.
 Hoy: {hoy_str(now)}. Calendario: {semana_str(now)}.
@@ -3781,7 +3783,7 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
                 "provider": provider, "page_id": page_id,
                 "paid_amount": paid_amount, "remaining": remaining,
             }
-            await send_message(phone, f"✅ Entendido. ¿Querés dejar una nota sobre la diferencia? (ej: _\"pagué también el mes siguiente\"_) o mandá «no» para omitir.")
+            await send_message(phone, f"✅ Entendido. ¿Cuál fue la razón de la diferencia? (o «no» para omitir)")
         else:
             await send_message(phone, f"Ok, *{provider}* queda como factura pendiente.")
             # Seguir con el próximo mismatch si hay
@@ -3874,17 +3876,29 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
             card_data = json.loads(raw_ai)
             label = card_data.get("label", "").strip()
             if label:
-                cards = user_prefs.get("cards") or []
-                existing = next((c for c in cards if c.get("last4") == last4), None)
-                if existing:
-                    existing["label"] = label
-                else:
-                    cards.append({"label": label, "last4": last4})
-                user_prefs["cards"] = cards
-                await save_user_config(MY_NUMBER)
-                await send_message(phone, f"✅ Guardé *{label}* (****{last4}) en tu config.")
+                pending_state[phone] = {"type": "unknown_card_owner", "last4": last4, "label": label}
+                await send_message(phone, f"✅ *{label}* (****{last4}). ¿De quién es? (ej: _\"mía\"_, _\"Sofi\"_) o «no» para omitir.")
         except Exception:
-            await send_message(phone, "No pude interpretar la tarjeta. Podés agregarla con: _\"agregá [banco] [débito/crédito] terminada en {last4}\"_")
+            await send_message(phone, f"No pude interpretar. Podés agregarla con: _\"agregá [banco] [débito/crédito] terminada en {last4}\"_")
+        return True
+
+    if state_type == "unknown_card_owner":
+        last4 = state.get("last4", "")
+        label = state.get("label", "")
+        del pending_state[phone]
+        skip_words = {"no", "n", "nope", "omitir", "skip"}
+        owner = None if text.strip().lower() in skip_words else text.strip()
+        cards = user_prefs.get("cards") or []
+        existing = next((c for c in cards if c.get("last4") == last4), None)
+        if existing:
+            existing["label"] = label
+            existing["owner"] = owner
+        else:
+            cards.append({"label": label, "last4": last4, "owner": owner})
+        user_prefs["cards"] = cards
+        await save_user_config(MY_NUMBER)
+        owner_str = f" — de {owner}" if owner else ""
+        await send_message(phone, f"✅ Guardé *{label}* (****{last4}){owner_str} en tu config.")
         return True
 
     if state_type == "save_location_confirm":

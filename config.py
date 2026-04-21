@@ -103,7 +103,7 @@ Responde:
   "greeting_name": nuevo nombre del saludo matutino o null,
   "add_extra": instruccion nueva para agregar al Resumen Diario, o null,
   "remove_extra": texto de instruccion a quitar del Resumen Diario, o null,
-  "add_card": {{"label": "nombre del medio de pago (ej: BBVA Debito, Visa Credito)", "last4": "ultimos 4 digitos como string o null si no se mencionan"}} o null,
+  "add_card": {{"label": "nombre del medio de pago (ej: BBVA Debito, Visa Credito)", "last4": "ultimos 4 digitos como string o null si no se mencionan", "owner": "de quien es la tarjeta o null si no se menciona"}} o null,
   "remove_card": "texto parcial del nombre de la tarjeta a quitar" o null}}"""}]
     )
     raw = response.content[0].text.strip()
@@ -145,14 +145,18 @@ Responde:
         cards = user_prefs.get("cards") or []
         label = add_card["label"].strip()
         last4 = str(add_card.get("last4") or "").strip() or None
+        owner = add_card.get("owner") or None
         existing = next((c for c in cards if c.get("label", "").lower() == label.lower()), None)
         if existing:
             existing["last4"] = last4
+            if owner:
+                existing["owner"] = owner
         else:
-            cards.append({"label": label, "last4": last4})
+            cards.append({"label": label, "last4": last4, "owner": owner})
         user_prefs["cards"] = cards
         suffix = f" (****{last4})" if last4 else ""
-        changed.append(f"Tarjeta agregada: *{label}{suffix}*")
+        owner_str = f" — de {owner}" if owner else ""
+        changed.append(f"Tarjeta agregada: *{label}{suffix}*{owner_str}")
 
     if remove_card:
         cards = user_prefs.get("cards") or []
@@ -188,6 +192,9 @@ Responde:
     else:
         estado += " sin extras configurados"
     if cards_actuales:
-        card_list = ", ".join(f"{c['label']}" + (f" (****{c['last4']})" if c.get("last4") else "") for c in cards_actuales)
+        card_list = ", ".join(
+            f"{c['label']}" + (f" (****{c['last4']})" if c.get("last4") else "") + (f" — de {c['owner']}" if c.get("owner") else "")
+            for c in cards_actuales
+        )
         estado += f"\nTarjetas/medios de pago: {card_list}"
     return f"Dale! Que queres modificar?\n\n{estado}\n\nPodes cambiar el horario del resumen, agregar extras, o agregar/quitar tarjetas (ej: \"agregá BBVA Débito terminada en 1234\")."
