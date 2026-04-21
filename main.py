@@ -414,7 +414,7 @@ Tu tarea: registrar gastos e ingresos del usuario.
 - Si el mensaje tiene descripcion Y monto -> usa la tool registrar_gasto directamente.
 - Si hay una imagen (ticket, screenshot de pedido, factura) -> lee TODOS los items, suma los montos vos mismo, y registra el total. No le pidas al usuario que sume.
 - Si el ticket o recibo muestra digitos de tarjeta, deducí el payment_method comparando con los medios de pago (ultimos 4 digitos → campo Last4). Si no hay coincidencia exacta pero se ve el banco, usá el método DEFAULT de ese banco.
-- Si el usuario menciona un banco sin especificar modalidad, usá el método marcado DEFAULT para ese banco. Si no hay DEFAULT y hay múltiples opciones, usá el campo payment_method como null y el sistema preguntará.
+- Si el usuario menciona un banco sin especificar modalidad, usá el método marcado DEFAULT para ese banco. Si no hay DEFAULT y hay múltiples opciones, igual poné el nombre del banco en payment_method (ej: "BBVA") y el sistema preguntará al usuario cuál usar.
 - Si falta el monto Y no hay imagen de donde sacarlo -> pregunta de forma natural y breve.
 - Si hay ambiguedad (ej: "compre algo" sin monto ni imagen) -> pregunta que fue y cuanto.
 
@@ -587,6 +587,25 @@ Emoji: elegi el mas especifico segun el contexto real."""
                 if not is_known:
                     pending_state[phone] = {"type": "unknown_card_register", "last4": last4}
                     reply += f"\n\n💳 Vi una tarjeta terminada en *{last4}* que no tengo registrada. ¿De qué banco es y es débito o crédito?"
+
+    # Banco sin modalidad: si payment_method es solo nombre de banco (sin dígitos) y hay múltiples opciones
+    if len(created_entries) == 1 and pending_state.get(phone, {}).get("type") in (None, "undo_window"):
+        _, data_entry, success_entry = created_entries[0]
+        pm = (data_entry.get("payment_method") or "").strip()
+        if success_entry and pm and not any(c.isdigit() for c in pm):
+            matching = [e for e in payment_methods_cache if e.bank and e.bank.lower() == pm.lower()]
+            if len(matching) > 1:
+                default = next((e for e in matching if e.is_default), None)
+                if not default:
+                    page_id_entry = created_entries[0][0]
+                    opts = ", ".join(f"*{e.modality}*" + (f" ****{e.last4}" if e.last4 else "") for e in matching)
+                    pending_state[phone] = {
+                        "type": "select_payment_method",
+                        "page_id": page_id_entry,
+                        "bank": pm,
+                        "options": [{"modality": e.modality, "last4": e.last4, "name": e.name} for e in matching],
+                    }
+                    reply += f"\n\n💳 ¿Con qué método de *{pm}* pagaste? {opts}"
 
     add_to_history(phone, "user", _hist_text)
     add_to_history(phone, "assistant", reply)
@@ -3936,6 +3955,30 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
         await send_message(phone, f"✅ Guardé *{label}* (****{last4}){owner_str} en tus medios de pago.")
         return True
 
+    if state_type == "select_payment_method":
+        page_id = state.get("page_id")
+        bank = state.get("bank", "")
+        options = state.get("options", [])
+        del pending_state[phone]
+        # Buscar la opción que matchea lo que dijo el usuario
+        t = text.strip().lower()
+        chosen = None
+        for opt in options:
+            mod = opt.get("modality", "").lower()
+            l4 = opt.get("last4") or ""
+            if mod in t or (l4 and l4 in t):
+                chosen = opt
+                break
+        if not chosen and options:
+            chosen = options[0]
+        if chosen and page_id:
+            pm_str = chosen["name"] if chosen.get("name") else f"{bank} {chosen.get('modality','')}"
+            if chosen.get("last4"):
+                pm_str += f" ****{chosen['last4']}"
+            await _ds.update_expense(page_id, {"payment_method": pm_str})
+            await send_message(phone, f"✅ Actualicé el medio de pago a *{pm_str}*.")
+        return True
+
     if state_type == "save_location_confirm":
         lat = state.get("lat")
         lon = state.get("lon")
@@ -4402,7 +4445,7 @@ async def process_single_item(phone: str, item: dict):
         if phone in pending_state:
             # Si llega una imagen sin texto y el pending state es "soft" (no bloqueante),
             # lo descartamos y procesamos la imagen como un mensaje nuevo
-            _soft_states = {"unknown_card_register", "unknown_card_owner", "undo_window"}
+            _soft_states = {"unknown_card_register", "unknown_card_owner", "undo_window", "select_payment_method"}
             if image_b64 and not text and pending_state.get(phone, {}).get("type") in _soft_states:
                 del pending_state[phone]
             else:

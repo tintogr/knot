@@ -1134,7 +1134,7 @@ class NotionDataStore:
                     id=p["id"],
                     name=_get_title(props, "Name"),
                     modality=_get_select(props, "Modality") or "",
-                    bank=_get_text(props, "Bank") or None,
+                    bank=_get_select(props, "Bank") or _get_text(props, "Bank") or None,
                     last4=_get_text(props, "Last4") or None,
                     owner=_get_text(props, "Owner") or None,
                     is_default=_get_checkbox(props, "Default"),
@@ -1153,7 +1153,7 @@ class NotionDataStore:
                 "Default": {"checkbox": is_default},
             }
             if bank:
-                props["Bank"] = {"rich_text": [{"text": {"content": bank}}]}
+                props["Bank"] = {"select": {"name": bank}}
             if last4:
                 props["Last4"] = {"rich_text": [{"text": {"content": last4}}]}
             if owner:
