@@ -4371,7 +4371,8 @@ async def handle_geo_reminder(phone: str, text: str) -> str:
         model="claude-sonnet-4-20250514", max_tokens=300,
         system=f"""Extrae info de un recordatorio geolocalizacion. Hoy: {now.strftime("%Y-%m-%d")}.
 Responde SOLO JSON valido sin markdown:
-{{"description": "que recordar",
+{{"description": "que recordar (solo la tarea, ej: 'agarrar los planos', 'comprar leche')",
+  "place_name": "nombre del lugar donde disparar (ej: 'trabajo', 'casa', 'gym', 'super'). null si no se menciona lugar.",
   "type": "place" o "shop",
   "shop_name": "nombre del comercio si es tipo shop, null si no",
   "address": "direccion si la menciona, null si no",
@@ -4387,6 +4388,7 @@ Responde SOLO JSON valido sin markdown:
         return "No pude interpretar el recordatorio. Intentalo de nuevo."
 
     description = data.get("description", text)
+    place_name = data.get("place_name")
     rtype = data.get("type", "place")
     shop_name = data.get("shop_name")
     recurrent = data.get("recurrent", False)
@@ -4483,11 +4485,11 @@ Responde SOLO JSON valido sin markdown:
         except Exception:
             pass
 
-    # Buscar en known_places por nombre antes de pedir ubicacion
-    desc_lower = description.lower()
+    # Buscar en known_places por place_name (lugar donde disparar), no por description
+    search_place = (place_name or description).lower()
     for _kp in user_prefs.get("known_places", []):
         _kp_name = _kp.get("name", "").lower()
-        if _kp_name and _kp_name in desc_lower:
+        if _kp_name and _kp_name in search_place:
             _kp_lat = _kp.get("lat")
             _kp_lon = _kp.get("lon")
             if _kp_lat and _kp_lon:
@@ -4505,9 +4507,11 @@ Responde SOLO JSON valido sin markdown:
     pending_state[phone] = {
         "type": "geo_reminder_awaiting_location",
         "description": description,
+        "place_name": place_name,
         "recurrent": recurrent,
     }
-    return f"Para crear ese recordatorio necesito la ubicacion del lugar.\n¿Podés compartirla por WhatsApp (📎 → Ubicacion) o decirme la direccion exacta?"
+    lugar_str = f" de *{place_name}*" if place_name else ""
+    return f"No tengo guardada la ubicacion{lugar_str}. Compartila por WhatsApp (📎 → Ubicacion), mandame la dirección, o pegá un link de Google Maps."
 
 # ── Keywords para detectar carga de combustible ──────────────────────────────
 FUEL_KEYWORDS = {"nafta", "combustible", "gnc", "gasoil", "premium", "super nafta",
