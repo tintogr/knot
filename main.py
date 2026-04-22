@@ -1147,9 +1147,9 @@ EDITAR_PLANTA: modificar datos de una planta existente (estado, riego, ubicacion
 ELIMINAR_PLANTA: eliminar una planta de Notion.
 EDITAR_EVENTO: modificar un evento existente en el calendario.
 ELIMINAR_EVENTO: eliminar o borrar un evento del calendario.
-RECORDATORIO: el usuario quiere que se le recuerde algo en el futuro. "recordame en X", "avisame en X", "recuerdame que llame a X". NUNCA para pedidos de resumen o informacion. NUNCA cuando menciona un lugar fisico o comercio.
+RECORDATORIO: el usuario quiere que se le recuerde algo en un momento de tiempo futuro. "recordame en X", "avisame en X", "recuerdame que llame a X a las Y". NUNCA si dice "cuando llegue", "al llegar", "cuando pase", "cuando este cerca" — eso es GEO_REMINDER. NUNCA cuando menciona un lugar fisico o comercio.
 CANCELAR_RECORDATORIO: cancelar o borrar un recordatorio pendiente.
-GEO_REMINDER: recordatorios basados en ubicacion. "recordame cuando pase cerca de X", "cuando este en/cerca de X avisame que Y". Cualquier recordatorio que involucre un lugar fisico o comercio.
+GEO_REMINDER: recordatorio basado en ubicacion — se dispara cuando el usuario llega o pasa cerca de un lugar. Ejemplos: "avisame cuando llegue al trabajo", "recordame al llegar a casa", "cuando llegue al gym avisame que X", "cuando pase cerca del super". Cualquier recordatorio con "cuando llegue", "al llegar", "cuando pase cerca" → siempre GEO_REMINDER, aunque no especifique la dirección exacta.
 EVENTO: crear un evento nuevo -- turno, cumple, cita, viaje.
 SHOPPING: gestionar lista de compras o recetas. Incluye preguntas sobre el estado de la lista.
 CORREGIR_SHOPPING: editar las notas, cantidad o categoria de un item de la lista de compras.
