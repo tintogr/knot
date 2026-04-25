@@ -43,6 +43,7 @@ async def get_weather(days: int = 2) -> dict | None:
         lat = current_location.get("lat")
         lon = current_location.get("lon")
         if lat is None or lon is None:
+            print(f"[weather] skipped: lat/lon missing (source={current_location.get('source')})")
             return None
         async with httpx.AsyncClient(timeout=10) as http:
             r = await http.get(
@@ -56,6 +57,7 @@ async def get_weather(days: int = 2) -> dict | None:
                 }
             )
             if r.status_code != 200:
+                print(f"[weather] open-meteo HTTP {r.status_code}: {r.text[:200]}")
                 return None
             data = r.json()
             c = data["current"]
@@ -75,6 +77,7 @@ async def get_weather(days: int = 2) -> dict | None:
                     "desc": fd,
                     "emoji": fe,
                 })
+            print(f"[weather] ok: temp={round(c['temperature_2m'])}C @ ({lat},{lon})")
             return {
                 "temp":           round(c["temperature_2m"]),
                 "sensacion":      round(c["apparent_temperature"]),
@@ -97,7 +100,8 @@ async def get_weather(days: int = 2) -> dict | None:
                 "manana_wind_desc": wind_description(viento_manana),
                 "forecast_days":  forecast_days,
             }
-    except Exception:
+    except Exception as e:
+        print(f"[weather] exception: {type(e).__name__}: {e}")
         return None
 
 
@@ -399,6 +403,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                 pass
 
     mismatch_followups = []
+    gmail_summary = None
     try:
         gmail_summary = await get_gmail_summary()
         if gmail_summary:
@@ -470,6 +475,21 @@ async def send_daily_summary(http, access_token: str, now: datetime):
             lines.append("✅ Facturas al día")
     except Exception:
         pass
+
+    if gmail_summary:
+        try:
+            mail_resp = await claude_create(
+                model="claude-haiku-4-5-20251001", max_tokens=350,
+                system="Resumi mails IMPORTANTES en bullets cortos (max 4). Excluye facturas/servicios (ya las manejamos aparte), newsletters, promociones, GitHub. Responde solo los bullets, sin encabezado. Si no hay nada importante, responde exactamente: NADA",
+                messages=[{"role": "user", "content": gmail_summary}]
+            )
+            mail_text = mail_resp.content[0].text.strip()
+            if mail_text and mail_text.upper() != "NADA":
+                lines.append("")
+                lines.append("*📬 Emails importantes:*")
+                lines.append(mail_text)
+        except Exception as e:
+            print(f"[daily_summary] mails section failed: {type(e).__name__}: {e}")
 
     extras = user_prefs.get("resumen_extras", [])
     if extras:

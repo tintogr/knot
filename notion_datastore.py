@@ -165,9 +165,7 @@ except ImportError:
         saved_lon: float = None
         saved_city: str = None
         last_summary_date: str = None
-        cards: list = None          # [{last4, bank, type, owner}]
-        banks: list = None          # ["BBVA", "Mercado Pago"]
-        payment_modalities: list = None  # ["Debit", "Credit", "Cash", "Transfer"]
+        generative_lists: dict = None  # {name: db_id}
 
     @dataclass
     class PaymentMethod:
@@ -383,6 +381,71 @@ class NotionDataStore:
             json={"archived": True},
         )
         return r.status_code == 200
+
+    async def _get_workspace_parent(self) -> str | None:
+        """Find a page_id we can use as parent for new databases.
+        Walks up from any configured DB until it hits a workspace-rooted page."""
+        for db_name in ("config", "tasks", "shopping", "finances"):
+            db_id = self._db_ids.get(db_name)
+            if not db_id:
+                continue
+            r = await self._http.get(f"{NOTION_API}/databases/{db_id}", headers=self._headers_cache)
+            if r.status_code != 200:
+                continue
+            parent = r.json().get("parent", {})
+            if parent.get("type") == "page_id":
+                return parent["page_id"]
+        return None
+
+    async def create_generative_list_db(self, list_name: str) -> str | None:
+        """Create a new Notion database to back a generative list."""
+        parent_page_id = await self._get_workspace_parent()
+        if not parent_page_id:
+            return None
+        body = {
+            "parent": {"type": "page_id", "page_id": parent_page_id},
+            "title": [{"type": "text", "text": {"content": list_name}}],
+            "icon": {"type": "emoji", "emoji": "📋"},
+            "properties": {
+                "Name":  {"title": {}},
+                "Notes": {"rich_text": {}},
+                "Added": {"date": {}},
+                "Tags":  {"multi_select": {"options": []}},
+                "Done":  {"checkbox": {}},
+            },
+        }
+        r = await self._http.post(f"{NOTION_API}/databases", headers=self._headers_cache, json=body)
+        if r.status_code in (200, 201):
+            return r.json().get("id")
+        return None
+
+    async def add_items_to_list_db(self, db_id: str, items: list[dict]) -> int:
+        """items: [{name: str, notes: str|None, tags: list[str]|None}]. Returns count inserted."""
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        today = (_dt.now(_tz.utc) - _td(hours=3)).date().isoformat()
+        count = 0
+        for item in items:
+            name = (item.get("name") or "").strip()
+            if not name:
+                continue
+            props = {
+                "Name":  {"title": [{"text": {"content": name[:200]}}]},
+                "Added": {"date": {"start": today}},
+            }
+            notes = (item.get("notes") or "").strip()
+            if notes:
+                props["Notes"] = {"rich_text": [{"text": {"content": notes[:500]}}]}
+            tags = item.get("tags") or []
+            if tags:
+                props["Tags"] = {"multi_select": [{"name": str(t)[:100]} for t in tags[:5]]}
+            r = await self._http.post(
+                f"{NOTION_API}/pages",
+                headers=self._headers_cache,
+                json={"parent": {"database_id": db_id}, "properties": props},
+            )
+            if r.status_code in (200, 201):
+                count += 1
+        return count
 
     async def _append_blocks(self, page_id: str, blocks: list[dict]) -> bool:
         """Append content blocks to a page (used for recipes, etc.)."""
@@ -1782,23 +1845,11 @@ class NotionDataStore:
         except Exception:
             purchase_counts = {}
 
-        cards_raw = _get_text(props, "Cards")
+        generative_lists_raw = _get_text(props, "Generative Lists")
         try:
-            cards = json.loads(cards_raw) if cards_raw else []
+            generative_lists = json.loads(generative_lists_raw) if generative_lists_raw else {}
         except Exception:
-            cards = []
-
-        banks_raw = _get_text(props, "Banks")
-        try:
-            banks = json.loads(banks_raw) if banks_raw else []
-        except Exception:
-            banks = []
-
-        modalities_raw = _get_text(props, "Payment Modalities")
-        try:
-            payment_modalities = json.loads(modalities_raw) if modalities_raw else []
-        except Exception:
-            payment_modalities = []
+            generative_lists = {}
 
         domain_profile_fields = [
             ("actividad_fisica", "Profile Actividad Fisica"),
@@ -1839,9 +1890,7 @@ class NotionDataStore:
             saved_lon=_get_number(props, "Longitude"),
             saved_city=_get_text(props, "City") or None,
             last_summary_date=_get_text(props, "Last Summary Date") or None,
-            cards=cards or None,
-            banks=banks or None,
-            payment_modalities=payment_modalities or None,
+            generative_lists=generative_lists or None,
         )
         return config, page["id"]
 
@@ -1860,9 +1909,7 @@ class NotionDataStore:
             "Known Places":      {"rich_text": [{"text": {"content": json.dumps(config.known_places or [], ensure_ascii=False)}}]},
             "Activities":        {"rich_text": [{"text": {"content": json.dumps(config.activities or {}, ensure_ascii=False)}}]},
             "Purchase Counts":   {"rich_text": [{"text": {"content": json.dumps(config.purchase_counts or {}, ensure_ascii=False)[:2000]}}]},
-            "Cards":             {"rich_text": [{"text": {"content": json.dumps(config.cards or [], ensure_ascii=False)[:2000]}}]},
-            "Banks":             {"rich_text": [{"text": {"content": json.dumps(config.banks or [], ensure_ascii=False)[:2000]}}]},
-            "Payment Modalities":{"rich_text": [{"text": {"content": json.dumps(config.payment_modalities or [], ensure_ascii=False)[:2000]}}]},
+            "Generative Lists":  {"rich_text": [{"text": {"content": json.dumps(config.generative_lists or {}, ensure_ascii=False)[:2000]}}]},
             "Resumen Nocturno Enabled": {"checkbox": config.resumen_nocturno_enabled},
         }
         for key, field in [

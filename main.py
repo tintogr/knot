@@ -441,7 +441,6 @@ async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=N
     if providers:
         prov_lines = [f"  - {k}: {v}" for k, v in providers.items()]
         providers_ctx = "\nProveedores de servicios configurados (usar para resolver nombres):\n" + "\n".join(prov_lines) + "\nSi el gasto menciona un proveedor conocido, usa el nombre canonico (ej: 'electricidad' → 'Electricidad - {nombre proveedor}').\n"
-    cards = user_prefs.get("cards") or []
     pm_lines = []
     for pm in payment_methods_cache:
         parts = [f"  - {pm.name} ({pm.modality}"]
@@ -1186,7 +1185,7 @@ async def classify(text: str, has_image: bool, image_b64: str = None, image_type
     content.append({"type": "text", "text": history_ctx + "\n" + prompt_text if history_ctx else prompt_text})
     response = await claude_create(
         model="claude-sonnet-4-20250514", max_tokens=10,
-        system="""Responde SOLO una palabra: GASTO, CORREGIR_GASTO, ELIMINAR_GASTO, PLANTA, EDITAR_PLANTA, ELIMINAR_PLANTA, EVENTO, EDITAR_EVENTO, ELIMINAR_EVENTO, RECORDATORIO, CANCELAR_RECORDATORIO, SHOPPING, CORREGIR_SHOPPING, ELIMINAR_SHOPPING, REUNION, EDITAR_REUNION, ELIMINAR_REUNION, SALUD, ACTIVIDAD_FISICA, GEO_REMINDER, CONFIGURAR, RESUMEN_DIARIO o CHAT.
+        system="""Responde SOLO una palabra: GASTO, CORREGIR_GASTO, ELIMINAR_GASTO, PLANTA, EDITAR_PLANTA, ELIMINAR_PLANTA, EVENTO, EDITAR_EVENTO, ELIMINAR_EVENTO, RECORDATORIO, CANCELAR_RECORDATORIO, SHOPPING, CORREGIR_SHOPPING, ELIMINAR_SHOPPING, REUNION, EDITAR_REUNION, ELIMINAR_REUNION, SALUD, ACTIVIDAD_FISICA, GEO_REMINDER, CONFIGURAR, RESUMEN_DIARIO, LISTA o CHAT.
 
 GASTO: registrar un pago, compra o ingreso NUEVO. El usuario describe algo que acaba de pagar o comprar ahora. NUNCA cuando usa "corregir", "cambiar", "editar", "actualizar", "la descripcion", "las notas", "el nombre" de algo ya registrado.
 DEUDA: registrar algo que el usuario TODAVIA NO PAGO pero debe pagar. "le debo X a Y", "me deben X", "tengo que pagar X". Diferente a GASTO que es un pago ya realizado.
@@ -1211,6 +1210,7 @@ SALUD: registrar o consultar informacion medica. Analisis, consultas, diagnostic
 ACTIVIDAD_FISICA: registrar, consultar, editar o eliminar actividad física. "corri 5km", "jugue al futbol", "fui al gym", "cuantos km corri este mes", screenshot de Adidas/Strava/Nike. NUNCA para eventos de calendario relacionados al deporte — esos son EVENTO.
 CONFIGURAR: cambiar configuracion de Knot. Solo cuando el usuario quiere CAMBIAR algo. Incluye cambiar el horario del resumen diario: "pasame el resumen a las 8", "dime el resumen a las 9", "manda el buenos dias a las 7.30" — cualquier pedido de resumen que incluya una hora especifica implica CAMBIAR el horario. Nunca cuando pregunta o se queja.
 RESUMEN_DIARIO: el usuario pide RECIBIR el resumen ahora, sin especificar un horario nuevo. "manda el resumen", "pasame el resumen diario", "dame el resumen ya", "enviame el buenos dias". NUNCA si incluye una hora especifica ("a las X") — eso es CONFIGURAR. NUNCA si pregunta sobre la configuracion → eso es CHAT.
+LISTA: gestionar listas generativas del usuario (peliculas, libros, lugares, ideas, etc., distintas de SHOPPING que es supermercado). Ejemplos: "agrega 3 pelis de Tarantino a mi lista de pelis", "sumame 5 libros de no ficcion a leer", "agrega Inception a mi lista de pelis", "que tengo en mi lista de libros", "borra X de mi lista de Y", "crea una lista de viajes". El usuario menciona "mi lista de X" o pide agregar items que NO son del super.
 CHAT: cualquier pregunta, consulta o conversacion. Si tiene "?" o pide informacion -> CHAT.
 
 REGLA: si el mensaje PREGUNTA algo -> siempre CHAT, nunca GASTO.
@@ -1244,6 +1244,7 @@ IMAGENES SIN TEXTO:
     if "REUNION" in r:                 return "REUNION"
     if "RESUMEN_DIARIO" in r:          return "RESUMEN_DIARIO"
     if "CONFIGURAR" in r:              return "CONFIGURAR"
+    if "LISTA" in r:                   return "LISTA"
     if "RECORDATORIO" in r:            return "RECORDATORIO"
     if "PLANTA" in r:                  return "PLANTA"
     if "EVENTO" in r:                  return "EVENTO"
@@ -3786,6 +3787,32 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
             await send_message(phone, f"✅ Radio actualizado a *{new_radius}m*.")
         return True
 
+    if state_type == "lista_create_confirm":
+        list_name = state.get("list_name", "")
+        pending_action = state.get("pending_action") or {}
+        del pending_state[phone]
+        affirm = text.strip().lower() in ("si", "sí", "yes", "y", "dale", "ok", "crear", "creala", "crea")
+        if not affirm:
+            await send_message(phone, "Ok, no la creé.")
+            return True
+        db_id = await _ds.create_generative_list_db(list_name)
+        if not db_id:
+            await send_message(phone, f"No pude crear la lista en Notion (no encontré una página padre accesible).")
+            return True
+        lists = user_prefs.setdefault("generative_lists", {})
+        lists[list_name] = db_id
+        await save_user_config(MY_NUMBER)
+        await send_message(phone, f"📋 Creé la lista de _{list_name}_ en Notion.")
+        result = await _execute_lista_add(
+            list_name, db_id,
+            pending_action.get("count"),
+            pending_action.get("criteria"),
+            pending_action.get("items") or [],
+        )
+        if result:
+            await send_message(phone, result)
+        return True
+
     if state_type == "geo_reminder_fired":
         page_id = state.get("page_id")
         name = state.get("name", "Recordatorio")
@@ -3794,6 +3821,9 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
             await deactivate_geo_reminder(page_id)
             await send_message(phone, f"✅ _{name}_ desactivado.")
         else:
+            # Reset cooldown so the next location update re-fires the reminder
+            _geo_reminder_cooldowns.pop(page_id, None)
+            _geo_reminders_in_range.discard(page_id)
             await send_message(phone, "Ok, te sigo avisando cuando estes cerca.")
         return True
 
@@ -4052,14 +4082,6 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
         del pending_state[phone]
         skip_words = {"no", "n", "nope", "omitir", "skip"}
         owner = None if text.strip().lower() in skip_words else text.strip()
-        cards = user_prefs.get("cards") or []
-        existing = next((c for c in cards if c.get("last4") == last4), None)
-        if existing:
-            existing["bank"] = bank
-            existing["type"] = ctype
-            existing["owner"] = owner
-        else:
-            cards.append({"bank": bank, "type": ctype, "last4": last4, "owner": owner})
         name = f"{label} ****{last4}" if last4 else label
         page_id = await _ds.create_payment_method(
             name=name, modality=ctype, bank=bank, last4=last4, owner=owner
@@ -4726,6 +4748,11 @@ async def process_single_item(phone: str, item: dict):
             respuesta = await handle_chat(phone, text)
             await send_message(phone, respuesta)
 
+        elif tipo == "LISTA":
+            respuesta = await handle_lista_generativa(phone, text)
+            if respuesta:
+                await send_message(phone, respuesta)
+
         elif tipo == "SALUD":
             reply = await handle_salud_agent(phone, text, image_b64, image_type)
             if reply:
@@ -5224,6 +5251,91 @@ async def create_factura_task(provider: str, amount: float, due_date: str, perio
 async def mark_factura_task_paid(page_id: str) -> bool:
     """Marca una task de factura como Listo."""
     return await _ds.mark_factura_task_paid(page_id)
+
+async def handle_lista_generativa(phone: str, text: str) -> str:
+    """Gestiona listas generativas (peliculas, libros, lugares, etc.) — auto-crea DB en Notion."""
+    lists = user_prefs.get("generative_lists") or {}
+    existing_names = list(lists.keys())
+    existing_str = ", ".join(existing_names) if existing_names else "(ninguna todavia)"
+
+    parse = await claude_create(
+        model="claude-haiku-4-5-20251001", max_tokens=400,
+        system="Extrae intencion sobre listas generativas. Responde SOLO JSON.",
+        messages=[{"role": "user", "content": f"""Mensaje: {text}
+Listas existentes del usuario: {existing_str}
+
+Responde JSON:
+{{"action": "add" | "show" | "delete_item" | "create_only",
+  "list_name": "nombre canonico de la lista (ej: 'pelis', 'libros', 'viajes'). Matchea con existentes si es posible.",
+  "count": cuantos items pidio generar (entero), null si menciono items concretos,
+  "criteria": "criterio para generar (ej: 'de Tarantino', 'no ficcion'), null si dio items explicitos",
+  "items": ["item1", "item2"] si dio items concretos, null si pidio generar,
+  "delete_target": "nombre del item a borrar" si action=delete_item, sino null}}"""}]
+    )
+    raw = parse.content[0].text.strip().strip("`").lstrip("json").strip()
+    try:
+        intent = json.loads(raw)
+    except Exception:
+        return "No entendí qué hacer con la lista. Ejemplo: _\"agregá 3 pelis de Tarantino a mi lista de pelis\"_."
+
+    action = intent.get("action") or "add"
+    list_name = (intent.get("list_name") or "").strip().lower()
+    count = intent.get("count")
+    criteria = intent.get("criteria")
+    items = intent.get("items") or []
+
+    if not list_name:
+        return "¿A qué lista? (ej: _pelis_, _libros_, _viajes_)"
+
+    if action == "show":
+        if list_name not in lists:
+            return f"No tenés una lista de _{list_name}_ todavía."
+        return f"Tu lista de _{list_name}_ está en Notion. Mirala ahí."
+
+    list_db_id = lists.get(list_name)
+
+    if not list_db_id:
+        # Need to create the DB. Ask confirmation.
+        pending_state[phone] = {
+            "type": "lista_create_confirm",
+            "list_name": list_name,
+            "pending_action": {"action": action, "count": count, "criteria": criteria, "items": items},
+        }
+        return f"No tenés una lista de _{list_name}_ todavía. ¿La creo en Notion? (sí/no)"
+
+    if action == "delete_item":
+        target = (intent.get("delete_target") or "").strip()
+        return f"Borrar items aún no implementado. Hacelo desde Notion por ahora."
+
+    return await _execute_lista_add(list_name, list_db_id, count, criteria, items)
+
+
+async def _execute_lista_add(list_name: str, db_id: str, count: int | None, criteria: str | None, items: list) -> str:
+    """Inserta items en una lista generativa (los genera con Sonnet si hace falta)."""
+    if not items and (count or criteria):
+        gen = await claude_create(
+            model="claude-sonnet-4-20250514", max_tokens=600,
+            system=f"Generas items concretos para una lista de '{list_name}'. Responde SOLO JSON array, sin markdown.",
+            messages=[{"role": "user", "content": f"Generá {count or 3} items{' ' + criteria if criteria else ''}. Formato: [{{\"name\": \"...\", \"notes\": \"breve nota o null\", \"tags\": [\"tag1\"] o []}}]"}]
+        )
+        raw = gen.content[0].text.strip().strip("`").lstrip("json").strip()
+        try:
+            generated = json.loads(raw)
+            items = generated if isinstance(generated, list) else []
+        except Exception:
+            return "No pude generar los items."
+    elif items:
+        items = [{"name": str(i), "notes": None, "tags": []} for i in items]
+
+    if not items:
+        return "No tengo items para agregar."
+
+    inserted = await _ds.add_items_to_list_db(db_id, items)
+    if not inserted:
+        return "No pude agregar nada a la lista."
+    bullet = "\n".join(f"• {i.get('name', '')}" for i in items[:inserted])
+    return f"✅ Agregué {inserted} a tu lista de _{list_name}_:\n{bullet}"
+
 
 async def handle_deuda_agent(phone: str, text: str) -> str:
     """Registra una deuda pendiente: crea entrada Impaga en Finanzas + Task."""
