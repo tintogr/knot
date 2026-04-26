@@ -3250,7 +3250,10 @@ REGLAS:
 - Nunca recomendas ni modificas tratamientos medicos.
 - Si el usuario pregunta si un valor es preocupante o que deberia hacer, decile que esa pregunta es para su medico. Vos solo organizas la info.
 - Si hay imagen de un analisis o documento: extraé todos los datos vos mismo, no le pidas al usuario que los dicte.
-- Para analisis de sangre u otros examenes: extraé los valores numericos en key_values como JSON."""
+- Para analisis de sangre u otros examenes: extraé los valores numericos en key_values como JSON.
+- Si el usuario MENCIONA que necesita comprar medicamento (no preguntar diagnóstico), NO le digas que vaya al medico ni le rechaces ayuda. En su lugar, ofrecele:
+  "¿Querés que te avise cuando pases cerca de una farmacia? O si preferís te puedo recordar a una hora específica para que pases a comprarlo."
+  Y dejá que el usuario elija. NO uses ninguna tool en ese caso, solo respondé el mensaje."""
 
     response = await claude_create(
         model="claude-sonnet-4-20250514", max_tokens=1500,
@@ -4826,6 +4829,16 @@ async def process_single_item(phone: str, item: dict):
 
     _done = [False]
     indicator_task = asyncio.create_task(_delayed_indicator(phone, _done))
+
+    def _cancel_indicator():
+        _done[0] = True
+        if not indicator_task.done():
+            indicator_task.cancel()
+
+    async def _reply(msg: str):
+        _cancel_indicator()
+        await send_message(phone, msg)
+
     try:
         if phone in pending_state:
             # Si llega una imagen sin texto y el pending state es "soft" (no bloqueante),
@@ -4848,26 +4861,24 @@ async def process_single_item(phone: str, item: dict):
 
         if tipo == "GASTO":
             reply = await handle_gasto_agent(phone, text, image_b64, image_type, exchange_rate, extra_images=extra_images)
-            _done[0] = True
-            indicator_task.cancel()
-            await send_message(phone, reply)
+            await _reply(reply)
 
         elif tipo == "DEUDA":
             reply = await handle_deuda_agent(phone, text)
-            await send_message(phone, reply)
+            await _reply(reply)
 
         elif tipo == "ELIMINAR_SHOPPING":
             success, msg = await eliminar_shopping(text)
-            await send_message(phone, msg if success else msg)
+            await _reply(msg if success else msg)
 
         elif tipo == "ELIMINAR_GASTO":
             success, msg = await eliminar_gasto(text, phone)
             if msg:
-                await send_message(phone, msg)
+                await _reply(msg)
 
         elif tipo == "CORREGIR_GASTO":
             success, msg = await corregir_gasto(text, phone=phone)
-            await send_message(phone, msg if success else msg)
+            await _reply(msg if success else msg)
 
         elif tipo == "PLANTA":
             parsed = await parse_planta(text, exchange_rate)
@@ -4881,40 +4892,40 @@ async def process_single_item(phone: str, item: dict):
                     "expires_at": expires_at,
                 }
                 reply += "\n\n_Si algo no quedó bien, avisame._"
-                await send_message(phone, reply)
+                await _reply(reply)
             else:
-                await send_message(phone, plant_id)
+                await _reply(plant_id)
 
         elif tipo == "EDITAR_PLANTA":
             success, msg = await editar_planta(text)
-            await send_message(phone, msg)
+            await _reply(msg)
 
         elif tipo == "ELIMINAR_PLANTA":
             success, msg = await eliminar_planta(text, phone)
             if msg:
-                await send_message(phone, msg)
+                await _reply(msg)
 
         elif tipo in ("EVENTO", "EDITAR_EVENTO", "ELIMINAR_EVENTO"):
             reply = await handle_evento_agent(phone, text, image_b64, image_type)
             if reply:
-                await send_message(phone, reply)
+                await _reply(reply)
 
         elif tipo == "GEO_REMINDER":
             respuesta = await handle_geo_reminder(phone, text)
             if respuesta:
-                await send_message(phone, respuesta)
+                await _reply(respuesta)
 
         elif tipo == "RECORDATORIO":
             parsed = await parse_recordatorio(text)
             success, error = await create_recordatorio(parsed)
             if success:
-                await send_message(phone, format_recordatorio(parsed))
+                await _reply(format_recordatorio(parsed))
             else:
-                await send_message(phone, f"No pude crear el recordatorio: {error[:100]}")
+                await _reply(f"No pude crear el recordatorio: {error[:100]}")
 
         elif tipo == "CANCELAR_RECORDATORIO":
             success, msg = await cancelar_recordatorio(text)
-            await send_message(phone, msg)
+            await _reply(msg)
 
         elif tipo == "SHOPPING":
             shopping_text = text
@@ -4933,54 +4944,55 @@ async def process_single_item(phone: str, item: dict):
                     shopping_text = ""
             respuesta = await handle_shopping(shopping_text, phone=phone)
             if respuesta is not None:
-                await send_message(phone, respuesta)
+                await _reply(respuesta)
                 add_to_history(phone, "user", text)
                 add_to_history(phone, "assistant", respuesta)
 
         elif tipo == "RESUMEN_DIARIO":
             try:
+                _cancel_indicator()
                 _at = await get_gcal_access_token()
                 async with httpx.AsyncClient() as _http:
                     await send_daily_summary(_http, _at, now_argentina())
                 add_to_history(phone, "assistant", "[Resumen diario enviado]")
             except Exception as _e:
-                await send_message(phone, f"No pude generar el resumen: {str(_e)[:100]}")
+                await _reply(f"No pude generar el resumen: {str(_e)[:100]}")
 
         elif tipo == "CONFIGURAR":
             respuesta = await handle_chat(phone, text)
-            await send_message(phone, respuesta)
+            await _reply(respuesta)
 
         elif tipo == "SALUD":
             reply = await handle_salud_agent(phone, text, image_b64, image_type)
             if reply:
-                await send_message(phone, reply)
+                await _reply(reply)
 
         elif tipo == "ACTIVIDAD_FISICA":
             reply = await handle_fitness_agent(phone, text, image_b64, image_type)
             if reply:
-                await send_message(phone, reply)
+                await _reply(reply)
 
         elif tipo == "REUNION":
             respuesta = await handle_reunion(text, image_b64, image_type, phone=phone)
-            await send_message(phone, respuesta)
+            await _reply(respuesta)
 
         elif tipo == "EDITAR_REUNION":
             success, msg = await editar_reunion(text)
-            await send_message(phone, msg)
+            await _reply(msg)
 
         elif tipo == "ELIMINAR_REUNION":
             success, msg = await eliminar_reunion(text, phone)
             if msg:
-                await send_message(phone, msg)
+                await _reply(msg)
 
         elif tipo == "CORREGIR_SHOPPING":
             success, msg = await corregir_shopping(text)
-            await send_message(phone, msg)
+            await _reply(msg)
 
         elif tipo == "CHAT":
             respuesta = await handle_chat(phone, text)
             if respuesta:
-                await send_message(phone, respuesta)
+                await _reply(respuesta)
                 if "Ingredientes:" in respuesta and "Preparacion:" in respuesta:
                     try:
                         ext_response = await claude_create(
