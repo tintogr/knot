@@ -835,7 +835,8 @@ Responde:
   "new_value_ars": nuevo monto en ARS o null,
   "new_categoria": ["categoria"] o null,
   "new_name": "nuevo nombre" o null,
-  "new_notes": "nueva nota" o null}}"""}]
+  "new_notes": "nueva nota" o null,
+  "new_emoji": emoji nuevo (un solo caracter) o null. Ej: si dice 'ponele uno de supermercado' -> '🛒', 'cerveza' -> '🍺', 'comida' -> '🍽️'}}"""}]
     )
     raw = response.content[0].text.strip()
     if raw.startswith("```"):
@@ -863,6 +864,8 @@ Responde:
         updates["name"] = intent["new_name"]
     if intent.get("new_notes") is not None:
         updates["notes"] = intent["new_notes"]
+    if intent.get("new_emoji"):
+        updates["emoji"] = intent["new_emoji"]
     if not updates:
         return False, "No entendi que campo queres cambiar"
 
@@ -3618,6 +3621,17 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
                 await send_message(phone, "No pude guardar el método de pago.")
         else:
             await send_message(phone, f"No reconocí ese método. Probá con: {', '.join((p.name or p.bank or '') for p in payment_methods_cache[:8])}")
+
+        # Si el mensaje contiene MAS que solo el método (ej: corrección de emoji o categoría),
+        # procesar el resto via corregir_gasto
+        if len(text.strip()) > 30 or any(w in t for w in ("emoji", "emogi", "categoría", "categoria", "nombre", "nota", "notas", "ponle", "cambia", "corrige", "corregí", "no era", "está mal", "esta mal")):
+            try:
+                last_touched[phone] = {"page_id": page_id, "name": name}
+                _, corr_msg = await corregir_gasto(text, phone=phone)
+                if corr_msg:
+                    await send_message(phone, corr_msg)
+            except Exception:
+                pass
         return True
 
     if state_type == "confirm_known_shop":
@@ -4834,6 +4848,8 @@ async def process_single_item(phone: str, item: dict):
 
         if tipo == "GASTO":
             reply = await handle_gasto_agent(phone, text, image_b64, image_type, exchange_rate, extra_images=extra_images)
+            _done[0] = True
+            indicator_task.cancel()
             await send_message(phone, reply)
 
         elif tipo == "DEUDA":

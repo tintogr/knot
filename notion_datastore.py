@@ -505,12 +505,22 @@ class NotionDataStore:
             props["Name"] = {"title": [{"text": {"content": updates["name"]}}]}
         if "payment_method_id" in updates:
             props["Method"] = {"relation": [{"id": updates["payment_method_id"]}]}
+        emoji_update = updates.get("emoji")
         if "notes" in updates:
             props["Notes"] = {"rich_text": [{"text": {"content": updates["notes"]}}]}
         if "liters" in updates:
             props["Liters"] = {"number": float(updates["liters"])}
 
         page = await self._update_page(entry_id, props)
+        if emoji_update:
+            try:
+                await self._http.patch(
+                    f"{NOTION_API}/pages/{entry_id}",
+                    headers=self._headers_cache,
+                    json={"icon": {"type": "emoji", "emoji": emoji_update}},
+                )
+            except Exception:
+                pass
         return self._parse_expense(page)
 
     async def archive_expense(self, entry_id: str) -> bool:
