@@ -1211,8 +1211,7 @@ class NotionDataStore:
         import re
         from datetime import date as _date, timezone
         new_digits = set(re.findall(r"\d+", period or ""))
-        today = datetime.now(timezone.utc).date() - timedelta(hours=3).seconds // 86400 * 0 + timedelta(hours=-3).seconds // 86400 * 0
-        today = (_date.today())
+        today = _date.today()
         # Check both impaga AND pagada records — avoid recreating an already-paid invoice
         for existing in [await self.get_impaga_facturas(provider=provider),
                          await self.get_finance_history_by_provider(provider, limit=10)]:

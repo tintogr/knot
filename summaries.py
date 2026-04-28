@@ -38,6 +38,11 @@ def wind_description(kmh: float) -> str:
 
 # ── Clima ─────────────────────────────────────────────────────────────────────
 
+# Cache simple del clima: evita rate limit de open-meteo (free tier ~10k req/dia)
+_weather_cache: dict = {"data": None, "fetched_at": None, "key": None}
+_WEATHER_CACHE_TTL_MIN = 30
+
+
 async def get_weather(days: int = 2) -> dict | None:
     try:
         lat = current_location.get("lat")
@@ -49,6 +54,15 @@ async def get_weather(days: int = 2) -> dict | None:
         if lat is None or lon is None:
             print(f"[weather] sin coordenadas (current_location={current_location})")
             return None
+
+        # Cache check: si tenemos data fresca para coords aprox iguales, usarla
+        cache_key = f"{round(lat, 2)},{round(lon, 2)}"
+        if _weather_cache["data"] and _weather_cache["key"] == cache_key:
+            fetched = _weather_cache["fetched_at"]
+            if fetched and (datetime.now() - fetched).total_seconds() < _WEATHER_CACHE_TTL_MIN * 60:
+                print(f"[weather] usando cache (edad {int((datetime.now() - fetched).total_seconds())}s)")
+                return _weather_cache["data"]
+
         print(f"[weather] usando lat={lat}, lon={lon}")
         async with httpx.AsyncClient(timeout=10) as http:
             r = await http.get(
@@ -63,6 +77,10 @@ async def get_weather(days: int = 2) -> dict | None:
             )
             print(f"[weather] api status={r.status_code}, body[:200]={r.text[:200]}")
             if r.status_code != 200:
+                # Si hay rate limit (429) y tenemos cache aunque vencido, usarlo igual
+                if _weather_cache["data"] and _weather_cache["key"] == cache_key:
+                    print("[weather] api fail, usando cache vencido")
+                    return _weather_cache["data"]
                 return None
             data = r.json()
             c = data["current"]
@@ -82,7 +100,7 @@ async def get_weather(days: int = 2) -> dict | None:
                     "desc": fd,
                     "emoji": fe,
                 })
-            return {
+            result = {
                 "temp":           round(c["temperature_2m"]),
                 "sensacion":      round(c["apparent_temperature"]),
                 "lluvia":         c["precipitation"],
@@ -104,6 +122,10 @@ async def get_weather(days: int = 2) -> dict | None:
                 "manana_wind_desc": wind_description(viento_manana),
                 "forecast_days":  forecast_days,
             }
+            _weather_cache["data"] = result
+            _weather_cache["fetched_at"] = datetime.now()
+            _weather_cache["key"] = cache_key
+            return result
     except Exception as e:
         print(f"[weather] EXCEPCION: {type(e).__name__}: {e}")
         return None
