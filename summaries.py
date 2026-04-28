@@ -42,7 +42,12 @@ async def get_weather(days: int = 2) -> dict | None:
     try:
         lat = current_location.get("lat")
         lon = current_location.get("lon")
+        # Fallback: si current_location no tiene coords, usar las saved del config
         if lat is None or lon is None:
+            lat = user_prefs.get("saved_lat")
+            lon = user_prefs.get("saved_lon")
+        if lat is None or lon is None:
+            print(f"[weather] sin coordenadas (current_location={current_location})")
             return None
         async with httpx.AsyncClient(timeout=10) as http:
             r = await http.get(
@@ -360,19 +365,54 @@ async def send_daily_summary(http, access_token: str, now: datetime):
         except Exception:
             pass
     else:
-        if not events:
-            lines.append("Hoy no tenes eventos agendados.")
+        # Detectar eventos posiblemente duplicados (mismo horario + nombre similar)
+        def _evt_key(e):
+            s = e.get("start", {})
+            t = s.get("dateTime", "")[:16] if "dateTime" in s else s.get("date", "")
+            name = (e.get("summary", "") or "").lower()
+            # Normalizar nombre para fuzzy match (sin tildes, articulos, espacios extra)
+            import re as _re
+            norm = _re.sub(r"[^a-z0-9]", "", name)
+            return t, norm
+
+        unique_events = []
+        possible_dups = []
+        seen_keys = []
+        for e in events:
+            k = _evt_key(e)
+            # Si hay un evento previo con mismo horario y nombre similar (substring), considerarlo dup
+            dup_idx = None
+            for idx, prev_k in enumerate(seen_keys):
+                if k[0] == prev_k[0]:
+                    if k[1] in prev_k[1] or prev_k[1] in k[1]:
+                        dup_idx = idx
+                        break
+            if dup_idx is not None:
+                possible_dups.append((unique_events[dup_idx], e))
+            else:
+                seen_keys.append(k)
+                unique_events.append(e)
+
+        hoy_emoji = (w or {}).get("hoy_emoji") or "📅"
+        if not unique_events:
+            lines.append(f"{hoy_emoji} Hoy no tenes eventos agendados.")
         else:
-            lines.append(f"*{'Tus eventos de hoy' if len(events) > 1 else 'Tu evento de hoy'}:*")
-            for e in events:
+            lines.append(f"{hoy_emoji} *{'Tus eventos de hoy' if len(unique_events) > 1 else 'Tu evento de hoy'}:*")
+            for e in unique_events:
                 start = e.get("start", {})
                 loc_str = f" -- 📍{e.get('location', '')}" if e.get("location") else ""
                 if "dateTime" in start:
                     lines.append(f"- {start['dateTime'][11:16]} -- {e.get('summary', 'Evento')}{loc_str}")
                 else:
                     lines.append(f"- {e.get('summary', 'Evento')} (todo el dia){loc_str}")
+        if possible_dups:
+            lines.append("")
+            lines.append("⚠️ Detecté eventos parecidos a la misma hora — capaz están duplicados:")
+            for orig, dup in possible_dups:
+                lines.append(f"  • _{orig.get('summary','?')}_ y _{dup.get('summary','?')}_")
+            lines.append("Decime si querés que borre alguno.")
         # Mostrar también eventos de mañana si hay pocos hoy
-        if len(events) <= 2:
+        if len(unique_events) <= 2:
             try:
                 manana = now + timedelta(days=1)
                 async with httpx.AsyncClient(timeout=8) as _cal2:
@@ -388,7 +428,9 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                 if r2.status_code == 200:
                     ev_man = [e for e in r2.json().get("items", []) if "[TEMP]" not in (e.get("description") or "")]
                     if ev_man:
-                        lines.append(f"*Mañana:*")
+                        lines.append("")
+                        manana_emoji = (w or {}).get("manana_emoji") or "⏭️"
+                        lines.append(f"{manana_emoji} *Mañana:*")
                         for e in ev_man[:3]:
                             s = e.get("start", {})
                             if "dateTime" in s:
@@ -399,6 +441,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                 pass
 
     mismatch_followups = []
+    gmail_summary = None
     try:
         gmail_summary = await get_gmail_summary()
         if gmail_summary:
@@ -481,8 +524,24 @@ async def send_daily_summary(http, access_token: str, now: datetime):
         else:
             lines.append("")
             lines.append("✅ Facturas al día")
-    except Exception:
-        pass
+    except Exception as _e:
+        print(f"[daily_summary] error en seccion facturas: {type(_e).__name__}: {_e}")
+
+    # Sección "📬 Emails importantes": resumen breve de mails NO-factura
+    if gmail_summary:
+        try:
+            mails_resp = await claude_create(
+                model="claude-haiku-4-5-20251001", max_tokens=300,
+                system="Sos Knot. Del siguiente resumen de Gmail, extraé SOLO los emails importantes que NO son facturas/servicios (turnos, citas, comunicaciones personales, recordatorios externos, novedades relevantes). Devolvé hasta 4 lineas, una por mail, formato breve: '- Asunto / De quién / contexto'. Si no hay nada importante distinto a facturas, respondé exactamente 'NADA'.",
+                messages=[{"role": "user", "content": gmail_summary}]
+            )
+            mails_text = mails_resp.content[0].text.strip()
+            if mails_text and mails_text.upper() != "NADA":
+                lines.append("")
+                lines.append("📬 *Emails importantes:*")
+                lines.append(mails_text)
+        except Exception as _e:
+            print(f"[daily_summary] error en seccion emails: {type(_e).__name__}: {_e}")
 
     extras = user_prefs.get("resumen_extras", [])
     if extras:

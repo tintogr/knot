@@ -47,6 +47,9 @@ async def load_user_config(wa_number: str):
             user_prefs.setdefault("domain_profiles", {}).update(cfg.domain_profiles)
         user_prefs["_config_page_id"] = page_id
         if cfg.saved_lat is not None and cfg.saved_lon is not None:
+            # Siempre guardar en user_prefs como fallback
+            user_prefs["saved_lat"] = float(cfg.saved_lat)
+            user_prefs["saved_lon"] = float(cfg.saved_lon)
             if current_location.get("source") in ("default", "env", "unknown"):
                 current_location["lat"] = float(cfg.saved_lat)
                 current_location["lon"] = float(cfg.saved_lon)
