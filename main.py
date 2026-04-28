@@ -3682,7 +3682,38 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
                             headers={"Authorization": f"Bearer {access_token}"}
                         )
                         ok = r.status_code == 204
-                msg = f"*{name}* eliminado del calendario." if ok else error_servicio("calendar")
+                if ok:
+                    msg = f"*{name}* eliminado del calendario."
+                    # Después de eliminar, mostrar como queda el día
+                    try:
+                        now_ar = now_argentina()
+                        async with httpx.AsyncClient(timeout=8) as _h:
+                            r2 = await _h.get(
+                                "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+                                headers={"Authorization": f"Bearer {access_token}"},
+                                params={
+                                    "timeMin": now_ar.replace(hour=0, minute=0, second=0).strftime("%Y-%m-%dT00:00:00-03:00"),
+                                    "timeMax": now_ar.replace(hour=23, minute=59, second=59).strftime("%Y-%m-%dT23:59:59-03:00"),
+                                    "singleEvents": "true", "orderBy": "startTime", "maxResults": "10"
+                                }
+                            )
+                        if r2.status_code == 200:
+                            evs = [e for e in r2.json().get("items", []) if "[TEMP]" not in (e.get("description") or "")]
+                            if evs:
+                                msg += "\n\nTu día queda así:"
+                                for e in evs:
+                                    s = e.get("start", {})
+                                    loc = f" -- 📍{e.get('location','')}" if e.get("location") else ""
+                                    if "dateTime" in s:
+                                        msg += f"\n- {s['dateTime'][11:16]} -- {e.get('summary','Evento')}{loc}"
+                                    else:
+                                        msg += f"\n- {e.get('summary','Evento')} (todo el día){loc}"
+                            else:
+                                msg += "\n\nNo te queda nada agendado para hoy."
+                    except Exception:
+                        pass
+                else:
+                    msg = error_servicio("calendar")
             elif action == "health_record":
                 ok = await _ds.archive_health_record(page_id)
                 msg = "Registro médico eliminado." if ok else "No pude eliminar."

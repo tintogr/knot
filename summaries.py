@@ -49,6 +49,7 @@ async def get_weather(days: int = 2) -> dict | None:
         if lat is None or lon is None:
             print(f"[weather] sin coordenadas (current_location={current_location})")
             return None
+        print(f"[weather] usando lat={lat}, lon={lon}")
         async with httpx.AsyncClient(timeout=10) as http:
             r = await http.get(
                 "https://api.open-meteo.com/v1/forecast",
@@ -102,7 +103,8 @@ async def get_weather(days: int = 2) -> dict | None:
                 "manana_wind_desc": wind_description(viento_manana),
                 "forecast_days":  forecast_days,
             }
-    except Exception:
+    except Exception as e:
+        print(f"[weather] EXCEPCION: {type(e).__name__}: {e}")
         return None
 
 
@@ -308,7 +310,9 @@ async def send_daily_summary(http, access_token: str, now: datetime):
     except Exception:
         pass
     await load_user_config(MY_NUMBER)
+    print(f"[daily_summary] current_location={current_location}, saved_lat={user_prefs.get('saved_lat')}, saved_lon={user_prefs.get('saved_lon')}")
     w = await get_weather()
+    print(f"[daily_summary] weather result: {'OK' if w else 'None'}")
     greeting = user_prefs.get("greeting_name") or _saludo_tiempo
     lines = [f"*{greeting}!*", ""]
     if w:
@@ -394,11 +398,11 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                 unique_events.append(e)
 
         hoy_emoji = (w or {}).get("hoy_emoji") or "📅"
-        if not unique_events:
+        if not events:
             lines.append(f"{hoy_emoji} Hoy no tenes eventos agendados.")
         else:
-            lines.append(f"{hoy_emoji} *{'Tus eventos de hoy' if len(unique_events) > 1 else 'Tu evento de hoy'}:*")
-            for e in unique_events:
+            lines.append(f"{hoy_emoji} *{'Tus eventos de hoy' if len(events) > 1 else 'Tu evento de hoy'}:*")
+            for e in events:
                 start = e.get("start", {})
                 loc_str = f" -- 📍{e.get('location', '')}" if e.get("location") else ""
                 if "dateTime" in start:
@@ -412,7 +416,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                 lines.append(f"  • _{orig.get('summary','?')}_ y _{dup.get('summary','?')}_")
             lines.append("Decime si querés que borre alguno.")
         # Mostrar también eventos de mañana si hay pocos hoy
-        if len(unique_events) <= 2:
+        if len(events) <= 2:
             try:
                 manana = now + timedelta(days=1)
                 async with httpx.AsyncClient(timeout=8) as _cal2:
@@ -444,6 +448,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
     gmail_summary = None
     try:
         gmail_summary = await get_gmail_summary()
+        print(f"[daily_summary] gmail_summary len={len(gmail_summary) if gmail_summary else 0}")
         if gmail_summary:
             period_str = now.strftime("%B %Y")
             try:
