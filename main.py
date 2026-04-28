@@ -795,12 +795,13 @@ Emoji: elegi el mas especifico segun el contexto real."""
                         # Trigger #6: detectar pago con apuro (≤2 días al vencimiento)
                         try:
                             due = getattr(impaga, "due_date", None)
-                            if due:
-                                days_left = (due - now.date()).days if hasattr(due, "days") is False else 0
-                                # Calcular días entre hoy y due_date
-                                from datetime import date as _date
-                                if isinstance(due, str):
+                            from datetime import date as _date
+                            if isinstance(due, str):
+                                try:
                                     due = _date.fromisoformat(due[:10])
+                                except Exception:
+                                    due = None
+                            if isinstance(due, _date):
                                 days_left = (due - now.date()).days
                                 if -1 <= days_left <= 2:
                                     hints_state = user_prefs.get("feature_hints") or {}

@@ -61,6 +61,7 @@ async def get_weather(days: int = 2) -> dict | None:
                     "forecast_days": max(days, 7)
                 }
             )
+            print(f"[weather] api status={r.status_code}, body[:200]={r.text[:200]}")
             if r.status_code != 200:
                 return None
             data = r.json()
@@ -530,7 +531,9 @@ async def send_daily_summary(http, access_token: str, now: datetime):
             lines.append("")
             lines.append("✅ Facturas al día")
     except Exception as _e:
+        import traceback
         print(f"[daily_summary] error en seccion facturas: {type(_e).__name__}: {_e}")
+        print(traceback.format_exc())
 
     # Sección "📬 Emails importantes": resumen breve de mails NO-factura
     if gmail_summary:
