@@ -228,6 +228,16 @@ Responde:
             user_prefs["daily_summary_minute"] = mins
             hora_fmt = f"{hora:02d}:{mins:02d}"
             changed.append(f"Horario del resumen -> *{hora_fmt}*")
+            # Si el nuevo horario es futuro (todavia no llego hoy), resetear el flag
+            # para permitir el envio en este cambio (no esperar al dia siguiente)
+            from datetime import datetime as _dt
+            now_ar = _dt.now()
+            target_min = hora * 60 + mins
+            curr_min = now_ar.hour * 60 + now_ar.minute
+            if target_min > curr_min:
+                user_prefs.pop("_last_summary_date", None)
+                _last_summary_sent.pop("daily", None)
+                changed.append("_(reseteo: si el nuevo horario es futuro, te llega hoy)_")
         except Exception:
             return "No pude interpretar el horario"
 
