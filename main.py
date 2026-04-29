@@ -13,7 +13,6 @@ from state import (
     _ds, QueryFilter, DateRange,
     WA_TOKEN, WA_PHONE_ID, WA_API, MY_NUMBER, DAILY_SUMMARY_HOUR,
     USER_LAT, USER_LON,
-    NOTION_TOKEN, NOTION_DB_ID,
     DIAS_SEMANA, INGRESO_EXACT, EGRESO_EXACT, MAX_HISTORY,
     user_prefs, current_location, geo_reminders_cache, payment_methods_cache,
     last_event_touched, pending_state, message_buffer,
