@@ -2762,7 +2762,7 @@ Tu tarea: gestionar eventos del calendario del usuario.
 - Podes consultar el calendario primero si necesitas verificar algo.
 - Si el usuario manda una imagen (flyer, screenshot de turno, invitacion), extrae la info y crea el evento.
 IMPORTANTE: No inventes datos. Usa zona horaria Argentina (UTC-3).
-NO hagas preguntas de seguimiento sobre campos opcionales (lugar, descripcion, duracion). Si el usuario no los mencionó, dejálos en null. El sistema ofrece recordatorios por separado — vos no preguntes sobre eso.
+El sistema ofrece recordatorios por separado después de crear/editar — vos no preguntes sobre recordatorios.
 VERIFICACION OBLIGATORIA: despues de cada crear_evento o editar_evento, llama a consultar_calendario para verificar que el cambio quedo bien. Si no coincide con lo pedido, intentalo de nuevo. NUNCA confirmes un cambio sin verificarlo.
 ANTES DE CREAR O EDITAR: llama a consultar_calendario con el parametro "fecha" igual a la fecha exacta mencionada. Si ya existe un evento similar en ESE DIA especifico → editar_evento. Si no existe en ese dia → crear_evento. NUNCA edites un evento de un dia distinto al que menciono el usuario.
 MULTIPLES EVENTOS EN UN MENSAJE O IMAGEN: procesa uno a la vez. Para cada fecha: 1) consultar_calendario, 2) si existe evento similar → editar_evento, si no existe → crear_evento, 3) verificar. Luego el siguiente.
@@ -3189,7 +3189,7 @@ EVENTOS RECURRENTES:
                 "event_id": evento_creado["event_id"],
                 "summary": data.get("summary", "Evento"),
             }
-            await send_message(phone, "Queres que te avise antes de cada " + data.get("summary", "sesion") + "? Decime con cuanta anticipacion (ej: '30 min', '1 hora', 'la noche anterior'). Podes elegir hasta 2 recordatorios.\n\nSi no queres recordatorio, manda 'no'.")
+            await send_message(phone, "⏰ ¿Querés que te avise antes de cada " + data.get("summary", "sesión") + "? Decime con cuánta anticipación (ej: '30 min', '1 hora', 'la noche anterior'). Podés elegir hasta 2 recordatorios, o mandá 'no' para omitir.")
         else:
             # Construir descripcion de eventos con fecha y hora
             lineas = []
@@ -3197,10 +3197,10 @@ EVENTOS RECURRENTES:
                 try:
                     fecha_fmt = datetime.strptime(ev["date"], "%Y-%m-%d")
                     dia = DIAS_SEMANA[fecha_fmt.weekday()]
-                    fecha_label = f"{dia} {fecha_fmt.strftime('%d/%m')} {ev['time']}"
+                    fecha_label = f"{dia} {fecha_fmt.strftime('%d/%m')} a las {ev['time']}"
                 except Exception:
                     fecha_label = f"{ev['date']} {ev['time']}"
-                lineas.append(f"_{ev['summary']}_ — {fecha_label}")
+                lineas.append(f"📅 {ev['summary']} — {fecha_label}")
             eventos_str = "\n".join(lineas)
             pending_state[phone] = {
                 "type": "event_reminder",
@@ -3208,7 +3208,7 @@ EVENTOS RECURRENTES:
             }
             await send_interactive_buttons(
                 phone,
-                f"Queres que te avise antes?\n{eventos_str}",
+                f"⏰ ¿Querés un recordatorio?\n{eventos_str}",
                 [
                     {"id": "rem_15", "title": "15 min antes"},
                     {"id": "rem_60", "title": "1 hora antes"},
