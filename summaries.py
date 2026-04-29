@@ -52,6 +52,7 @@ async def get_weather(days: int = 2) -> dict | None:
             lat = user_prefs.get("saved_lat")
             lon = user_prefs.get("saved_lon")
         if lat is None or lon is None:
+            print(f"[weather] skipped: lat/lon missing (source={current_location.get('source')})")
             return None
 
         # Cache check: si tenemos data fresca para coords aprox iguales, usarla
@@ -562,6 +563,21 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                 lines.append(mails_text)
         except Exception as _e:
             pass
+
+    if gmail_summary:
+        try:
+            mail_resp = await claude_create(
+                model="claude-haiku-4-5-20251001", max_tokens=350,
+                system="Resumi mails IMPORTANTES en bullets cortos (max 4). Excluye facturas/servicios (ya las manejamos aparte), newsletters, promociones, GitHub. Responde solo los bullets, sin encabezado. Si no hay nada importante, responde exactamente: NADA",
+                messages=[{"role": "user", "content": gmail_summary}]
+            )
+            mail_text = mail_resp.content[0].text.strip()
+            if mail_text and mail_text.upper() != "NADA":
+                lines.append("")
+                lines.append("*📬 Emails importantes:*")
+                lines.append(mail_text)
+        except Exception as e:
+            print(f"[daily_summary] mails section failed: {type(e).__name__}: {e}")
 
     extras = user_prefs.get("resumen_extras", [])
     if extras:

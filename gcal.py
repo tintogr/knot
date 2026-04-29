@@ -365,6 +365,23 @@ def calcular_fecha_exacta(descripcion: str) -> str:
         target = now + timedelta(days=int(match.group(1)))
         return f"{DIAS_SEMANA[target.weekday()]} {target.strftime('%d/%m/%Y')}"
 
+    # Plain weekday: "viernes", "el viernes", "este viernes", "proximo viernes"
+    for dia_name, dia_num in DIAS.items():
+        if re.search(rf'\b{dia_name}\b', desc):
+            days_ahead = (dia_num - now.weekday()) % 7
+            if days_ahead == 0 and ("proximo" in desc or "próximo" in desc or "que viene" in desc):
+                days_ahead = 7
+            elif days_ahead == 0:
+                days_ahead = 7  # "viernes" said on a Friday means next Friday
+            target = now + timedelta(days=days_ahead)
+            return f"{DIAS_SEMANA[target.weekday()]} {target.strftime('%d/%m/%Y')}"
+
+    if "manana" in desc or "mañana" in desc:
+        target = now + timedelta(days=1)
+        return f"{DIAS_SEMANA[target.weekday()]} {target.strftime('%d/%m/%Y')}"
+    if "hoy" in desc:
+        return f"{DIAS_SEMANA[now.weekday()]} {now.strftime('%d/%m/%Y')}"
+
     return f"No pude interpretar la fecha: '{descripcion}'"
 
 

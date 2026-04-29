@@ -37,12 +37,8 @@ async def load_user_config(wa_number: str):
             user_prefs["known_shops"] = cfg.known_shops
         if cfg.feature_hints:
             user_prefs["feature_hints"] = cfg.feature_hints
-        if cfg.cards:
-            user_prefs["cards"] = cfg.cards
-        if cfg.banks:
-            user_prefs["banks"] = cfg.banks
-        if cfg.payment_modalities:
-            user_prefs["payment_modalities"] = cfg.payment_modalities
+        if cfg.generative_lists:
+            user_prefs["generative_lists"] = cfg.generative_lists
         if cfg.domain_profiles:
             user_prefs.setdefault("domain_profiles", {}).update(cfg.domain_profiles)
         user_prefs["_config_page_id"] = page_id
@@ -68,8 +64,6 @@ async def load_user_config(wa_number: str):
                     pass
     except Exception:
         pass
-    if "payment_methods" not in user_prefs:
-        user_prefs["payment_methods"] = ["BBVA", "Mercado Pago", "Efectivo", "Transferencia", "Débito", "Crédito", "Contado"]
 
 
 async def save_user_config(wa_number: str):
@@ -95,11 +89,9 @@ async def save_user_config(wa_number: str):
             activities=user_prefs.get("activities", {}),
             domain_profiles=user_prefs.get("domain_profiles", {}),
             purchase_counts=user_prefs.get("purchase_counts", {}),
-            cards=user_prefs.get("cards", []),
-            banks=user_prefs.get("banks", []),
-            payment_modalities=user_prefs.get("payment_modalities", []),
             known_shops=user_prefs.get("known_shops", {}),
             feature_hints=user_prefs.get("feature_hints", {}),
+            generative_lists=user_prefs.get("generative_lists", {}),
         )
         await _ds.save_config(page_id, cfg)
     except Exception:
@@ -117,13 +109,7 @@ Responde:
   "minute": minutos como entero. si no se mencionan usa 0,
   "greeting_name": nuevo nombre del saludo matutino o null,
   "add_extra": instruccion nueva para agregar al Resumen Diario, o null,
-  "remove_extra": texto de instruccion a quitar del Resumen Diario, o null,
-  "add_card": {{"bank": "banco (ej: BBVA)", "type": "Debit o Credit", "last4": "ultimos 4 digitos o null", "owner": "de quien es o null"}} o null,
-  "remove_card": "texto parcial del banco/tipo a quitar" o null,
-  "add_bank": "nombre del banco a agregar" o null,
-  "remove_bank": "nombre del banco a quitar" o null,
-  "add_modality": "modalidad de pago a agregar (ej: Debit, Credit, Cash, Transfer)" o null,
-  "remove_modality": "modalidad a quitar" o null}}"""}]
+  "remove_extra": texto de instruccion a quitar del Resumen Diario, o null}}"""}]
     )
     raw = response.content[0].text.strip()
     if raw.startswith("```"):
@@ -139,12 +125,6 @@ Responde:
     greeting_name = data.get("greeting_name")
     add_extra  = data.get("add_extra")
     remove_extra = data.get("remove_extra")
-    add_card = data.get("add_card")
-    remove_card = data.get("remove_card")
-    add_bank = data.get("add_bank")
-    remove_bank = data.get("remove_bank")
-    add_modality = data.get("add_modality")
-    remove_modality = data.get("remove_modality")
 
     changed = []
 
@@ -163,61 +143,6 @@ Responde:
         extras = user_prefs.get("resumen_extras", [])
         user_prefs["resumen_extras"] = [e for e in extras if remove_extra.lower() not in e.lower()]
         changed.append(f"Extra removido: _{remove_extra}_")
-
-    if add_bank:
-        banks = user_prefs.get("banks") or []
-        if add_bank not in banks:
-            banks.append(add_bank)
-            user_prefs["banks"] = banks
-        changed.append(f"Banco agregado: *{add_bank}*")
-
-    if remove_bank:
-        banks = user_prefs.get("banks") or []
-        user_prefs["banks"] = [b for b in banks if remove_bank.lower() not in b.lower()]
-        changed.append(f"Banco removido: _{remove_bank}_")
-
-    if add_modality:
-        modalities = user_prefs.get("payment_modalities") or []
-        if add_modality not in modalities:
-            modalities.append(add_modality)
-            user_prefs["payment_modalities"] = modalities
-        changed.append(f"Modalidad agregada: *{add_modality}*")
-
-    if remove_modality:
-        modalities = user_prefs.get("payment_modalities") or []
-        user_prefs["payment_modalities"] = [m for m in modalities if remove_modality.lower() not in m.lower()]
-        changed.append(f"Modalidad removida: _{remove_modality}_")
-
-    if add_card and isinstance(add_card, dict) and (add_card.get("bank") or add_card.get("label")):
-        cards = user_prefs.get("cards") or []
-        bank = add_card.get("bank", "").strip()
-        ctype = add_card.get("type", "").strip()
-        last4 = str(add_card.get("last4") or "").strip() or None
-        owner = add_card.get("owner") or None
-        label = add_card.get("label") or f"{bank} {ctype}".strip()
-        existing = next((c for c in cards if c.get("last4") == last4 and last4) or
-                        (c for c in cards if c.get("bank", "").lower() == bank.lower() and c.get("type", "").lower() == ctype.lower()), None)
-        if existing:
-            if bank: existing["bank"] = bank
-            if ctype: existing["type"] = ctype
-            if last4: existing["last4"] = last4
-            if owner: existing["owner"] = owner
-        else:
-            cards.append({"bank": bank, "type": ctype, "last4": last4, "owner": owner})
-            # Also ensure the bank is in the banks list
-            banks = user_prefs.get("banks") or []
-            if bank and bank not in banks:
-                banks.append(bank)
-                user_prefs["banks"] = banks
-        user_prefs["cards"] = cards
-        suffix = f" (****{last4})" if last4 else ""
-        owner_str = f" — de {owner}" if owner else ""
-        changed.append(f"Tarjeta agregada: *{label}{suffix}*{owner_str}")
-
-    if remove_card:
-        cards = user_prefs.get("cards") or []
-        user_prefs["cards"] = [c for c in cards if remove_card.lower() not in c.get("label", "").lower()]
-        changed.append(f"Tarjeta removida: _{remove_card}_")
 
     if setting == "daily_summary_hour" and hour is not None:
         try:
@@ -249,9 +174,6 @@ Responde:
         return "Listo:\n" + "\n".join(changed)
 
     extras_actuales = user_prefs.get("resumen_extras", [])
-    cards_actuales = user_prefs.get("cards") or []
-    banks_actuales = user_prefs.get("banks") or []
-    modalities_actuales = user_prefs.get("payment_modalities") or []
     hora_actual = user_prefs.get("daily_summary_hour") or DAILY_SUMMARY_HOUR
     mins_actual = user_prefs.get("daily_summary_minute") or 0
     estado = f"Actualmente el Resumen Diario llega a las *{hora_actual:02d}:{mins_actual:02d}*"
@@ -259,15 +181,4 @@ Responde:
         estado += f" e incluye: {', '.join(extras_actuales)}"
     else:
         estado += " sin extras configurados"
-    if banks_actuales:
-        estado += f"\nBancos: {', '.join(banks_actuales)}"
-    if modalities_actuales:
-        estado += f"\nModalidades de pago: {', '.join(modalities_actuales)}"
-    if cards_actuales:
-        def _card_display(c):
-            label = c.get("label") or f"{c.get('bank','')} {c.get('type','')}".strip()
-            suffix = f" (****{c['last4']})" if c.get("last4") else ""
-            owner_str = f" — de {c['owner']}" if c.get("owner") else ""
-            return f"{label}{suffix}{owner_str}"
-        estado += f"\nTarjetas: {', '.join(_card_display(c) for c in cards_actuales)}"
-    return f"Dale! Que queres modificar?\n\n{estado}\n\nPodes agregar bancos (\"agregá BBVA\"), modalidades (\"agregá Debit\"), tarjetas (\"agregá BBVA Debit terminada en 1234 de Martín\"), o cambiar el horario del resumen."
+    return f"Dale! Que queres modificar?\n\n{estado}\n\nPodes cambiar el horario del resumen, el saludo, o agregar/quitar extras. Para tarjetas y métodos de pago usá el comando aparte."
