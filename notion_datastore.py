@@ -276,6 +276,154 @@ def _normalize_in_out(raw: str) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Collections — templates y helpers
+# ══════════════════════════════════════════════════════════════════════════════
+
+COLLECTION_TEMPLATES: dict[str, dict] = {
+    "pelis": {
+        "aliases":       {"pelis", "películas", "peliculas", "peli", "movies", "cine", "film", "films"},
+        "icon":          "🎬",
+        "display":       "Películas",
+        "default_estado":"Pendiente",
+        "schema": {
+            "Name":       {"title": {}},
+            "Director":   {"rich_text": {}},
+            "Año":        {"number": {"format": "number"}},
+            "Género":     {"multi_select": {"options": []}},
+            "Estado":     {"select": {"options": [
+                {"name": "Pendiente", "color": "gray"},
+                {"name": "Viendo",    "color": "yellow"},
+                {"name": "Visto",     "color": "green"},
+            ]}},
+            "Puntuación": {"number": {"format": "number"}},
+            "Plataforma": {"select": {"options": [
+                {"name": "Netflix",  "color": "red"},
+                {"name": "Disney+",  "color": "blue"},
+                {"name": "Prime",    "color": "orange"},
+                {"name": "HBO",      "color": "purple"},
+                {"name": "Cine",     "color": "gray"},
+                {"name": "Otro",     "color": "default"},
+            ]}},
+            "Notas":      {"rich_text": {}},
+            "Agregada":   {"date": {}},
+        },
+        "item_prompt": '[{"name": "título", "director": "director o null", "year": año_entero_o_null, "genre": "género o null", "platform": "plataforma o null", "notes": "sinopsis breve o null"}]',
+    },
+    "libros": {
+        "aliases":       {"libros", "libro", "books", "book", "lectura", "leer"},
+        "icon":          "📚",
+        "display":       "Libros",
+        "default_estado":"Pendiente",
+        "schema": {
+            "Name":       {"title": {}},
+            "Autor":      {"rich_text": {}},
+            "Año":        {"number": {"format": "number"}},
+            "Género":     {"multi_select": {"options": []}},
+            "Estado":     {"select": {"options": [
+                {"name": "Pendiente", "color": "gray"},
+                {"name": "Leyendo",   "color": "yellow"},
+                {"name": "Leído",     "color": "green"},
+            ]}},
+            "Puntuación": {"number": {"format": "number"}},
+            "Notas":      {"rich_text": {}},
+            "Agregada":   {"date": {}},
+        },
+        "item_prompt": '[{"name": "título", "author": "autor o null", "year": año_entero_o_null, "genre": "género o null", "notes": "descripción breve o null"}]',
+    },
+    "lugares": {
+        "aliases":       {"lugares", "lugar", "viajes", "viaje", "destinos", "places", "travel"},
+        "icon":          "🗺️",
+        "display":       "Lugares",
+        "default_estado":"Soñado",
+        "schema": {
+            "Name":    {"title": {}},
+            "País":    {"rich_text": {}},
+            "Estado":  {"select": {"options": [
+                {"name": "Soñado",   "color": "gray"},
+                {"name": "Planeado", "color": "yellow"},
+                {"name": "Visitado", "color": "green"},
+            ]}},
+            "Notas":   {"rich_text": {}},
+            "Agregada":{"date": {}},
+        },
+        "item_prompt": '[{"name": "nombre del lugar", "country": "país o null", "notes": "descripción breve o null"}]',
+    },
+}
+
+# Reverse alias map: alias → template_key
+_ALIAS_TO_TEMPLATE: dict[str, str] = {
+    alias: key
+    for key, tmpl in COLLECTION_TEMPLATES.items()
+    for alias in tmpl["aliases"]
+}
+
+
+def detect_collection_template(list_name: str) -> str | None:
+    """Returns the template key for list_name, or None if generic."""
+    return _ALIAS_TO_TEMPLATE.get(list_name.lower().strip())
+
+
+def _build_collection_props(item: dict, template_key: str | None, today: str) -> dict:
+    """Map a generated item dict to Notion page properties per template."""
+    name = (item.get("name") or "").strip()
+    if template_key == "pelis":
+        props: dict = {
+            "Name":     {"title": [{"text": {"content": name[:200]}}]},
+            "Agregada": {"date": {"start": today}},
+            "Estado":   {"select": {"name": "Pendiente"}},
+        }
+        if item.get("director"):
+            props["Director"] = {"rich_text": [{"text": {"content": str(item["director"])[:200]}}]}
+        if item.get("year") and str(item["year"]).lstrip("-").isdigit():
+            props["Año"] = {"number": int(item["year"])}
+        if item.get("genre"):
+            props["Género"] = {"multi_select": [{"name": str(item["genre"])[:100]}]}
+        if item.get("platform"):
+            props["Plataforma"] = {"select": {"name": str(item["platform"])[:100]}}
+        if item.get("notes"):
+            props["Notas"] = {"rich_text": [{"text": {"content": str(item["notes"])[:500]}}]}
+        return props
+    if template_key == "libros":
+        props = {
+            "Name":     {"title": [{"text": {"content": name[:200]}}]},
+            "Agregada": {"date": {"start": today}},
+            "Estado":   {"select": {"name": "Pendiente"}},
+        }
+        if item.get("author"):
+            props["Autor"] = {"rich_text": [{"text": {"content": str(item["author"])[:200]}}]}
+        if item.get("year") and str(item["year"]).lstrip("-").isdigit():
+            props["Año"] = {"number": int(item["year"])}
+        if item.get("genre"):
+            props["Género"] = {"multi_select": [{"name": str(item["genre"])[:100]}]}
+        if item.get("notes"):
+            props["Notas"] = {"rich_text": [{"text": {"content": str(item["notes"])[:500]}}]}
+        return props
+    if template_key == "lugares":
+        props = {
+            "Name":     {"title": [{"text": {"content": name[:200]}}]},
+            "Agregada": {"date": {"start": today}},
+            "Estado":   {"select": {"name": "Soñado"}},
+        }
+        if item.get("country"):
+            props["País"] = {"rich_text": [{"text": {"content": str(item["country"])[:200]}}]}
+        if item.get("notes"):
+            props["Notas"] = {"rich_text": [{"text": {"content": str(item["notes"])[:500]}}]}
+        return props
+    # Generic
+    props = {
+        "Name":  {"title": [{"text": {"content": name[:200]}}]},
+        "Added": {"date": {"start": today}},
+    }
+    notes = (item.get("notes") or "").strip()
+    if notes:
+        props["Notes"] = {"rich_text": [{"text": {"content": notes[:500]}}]}
+    tags = item.get("tags") or []
+    if tags:
+        props["Tags"] = {"multi_select": [{"name": str(t)[:100]} for t in tags[:5]]}
+    return props
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # NotionDataStore
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -400,30 +548,34 @@ class NotionDataStore:
                 return parent["page_id"]
         return None
 
-    async def create_generative_list_db(self, list_name: str) -> str | None:
-        """Create a new Notion database to back a generative list."""
+    async def create_generative_list_db(self, list_name: str, template_key: str | None = None) -> str | None:
+        """Create a new Notion database to back a collection. Uses rich schema for known templates."""
         parent_page_id = await self._get_workspace_parent()
         if not parent_page_id:
             return None
+        tmpl = COLLECTION_TEMPLATES.get(template_key) if template_key else None
+        icon  = tmpl["icon"]    if tmpl else "📋"
+        title = tmpl["display"] if tmpl else list_name
+        props = tmpl["schema"]  if tmpl else {
+            "Name":  {"title": {}},
+            "Notes": {"rich_text": {}},
+            "Added": {"date": {}},
+            "Tags":  {"multi_select": {"options": []}},
+            "Done":  {"checkbox": {}},
+        }
         body = {
             "parent": {"type": "page_id", "page_id": parent_page_id},
-            "title": [{"type": "text", "text": {"content": list_name}}],
-            "icon": {"type": "emoji", "emoji": "📋"},
-            "properties": {
-                "Name":  {"title": {}},
-                "Notes": {"rich_text": {}},
-                "Added": {"date": {}},
-                "Tags":  {"multi_select": {"options": []}},
-                "Done":  {"checkbox": {}},
-            },
+            "title":  [{"type": "text", "text": {"content": title}}],
+            "icon":   {"type": "emoji", "emoji": icon},
+            "properties": props,
         }
         r = await self._http.post(f"{NOTION_API}/databases", headers=self._headers_cache, json=body)
         if r.status_code in (200, 201):
             return r.json().get("id")
         return None
 
-    async def add_items_to_list_db(self, db_id: str, items: list[dict]) -> int:
-        """items: [{name: str, notes: str|None, tags: list[str]|None}]. Returns count inserted."""
+    async def add_items_to_list_db(self, db_id: str, items: list[dict], template_key: str | None = None) -> int:
+        """items: dicts with fields per template. Returns count inserted."""
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td
         today = (_dt.now(_tz.utc) - _td(hours=3)).date().isoformat()
         count = 0
@@ -431,16 +583,7 @@ class NotionDataStore:
             name = (item.get("name") or "").strip()
             if not name:
                 continue
-            props = {
-                "Name":  {"title": [{"text": {"content": name[:200]}}]},
-                "Added": {"date": {"start": today}},
-            }
-            notes = (item.get("notes") or "").strip()
-            if notes:
-                props["Notes"] = {"rich_text": [{"text": {"content": notes[:500]}}]}
-            tags = item.get("tags") or []
-            if tags:
-                props["Tags"] = {"multi_select": [{"name": str(t)[:100]} for t in tags[:5]]}
+            props = _build_collection_props(item, template_key, today)
             r = await self._http.post(
                 f"{NOTION_API}/pages",
                 headers=self._headers_cache,

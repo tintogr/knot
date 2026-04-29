@@ -4472,26 +4472,32 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
         return True
 
     if state_type == "lista_create_confirm":
+        from notion_datastore import COLLECTION_TEMPLATES
         list_name = state.get("list_name", "")
+        template_key = state.get("template_key")
         pending_action = state.get("pending_action") or {}
         del pending_state[phone]
         affirm = text.strip().lower() in ("si", "sí", "yes", "y", "dale", "ok", "crear", "creala", "crea")
         if not affirm:
             await send_message(phone, "Ok, no la creé.")
             return True
-        db_id = await _ds.create_generative_list_db(list_name)
+        db_id = await _ds.create_generative_list_db(list_name, template_key)
         if not db_id:
-            await send_message(phone, f"No pude crear la lista en Notion (no encontré una página padre accesible).")
+            await send_message(phone, "No pude crear la colección en Notion (no encontré una página padre accesible).")
             return True
         lists = user_prefs.setdefault("generative_lists", {})
-        lists[list_name] = db_id
+        lists[list_name] = {"db_id": db_id, "template": template_key}
         await save_user_config(MY_NUMBER)
-        await send_message(phone, f"📋 Creé la lista de _{list_name}_ en Notion.")
+        tmpl = COLLECTION_TEMPLATES.get(template_key) if template_key else None
+        icon = tmpl["icon"] if tmpl else "📋"
+        display = tmpl["display"] if tmpl else list_name
+        await send_message(phone, f"{icon} Creé tu colección de _{display}_ en Notion.")
         result = await _execute_lista_add(
             list_name, db_id,
             pending_action.get("count"),
             pending_action.get("criteria"),
             pending_action.get("items") or [],
+            template_key,
         )
         if result:
             await send_message(phone, result)
@@ -5960,20 +5966,21 @@ async def mark_factura_task_paid(page_id: str) -> bool:
     return await _ds.mark_factura_task_paid(page_id)
 
 async def handle_lista_generativa(phone: str, text: str) -> str:
-    """Gestiona listas generativas (peliculas, libros, lugares, etc.) — auto-crea DB en Notion."""
+    """Gestiona colecciones del usuario (pelis, libros, lugares, etc.) — auto-crea DB en Notion con schema rico."""
+    from notion_datastore import detect_collection_template, COLLECTION_TEMPLATES
     lists = user_prefs.get("generative_lists") or {}
     existing_names = list(lists.keys())
     existing_str = ", ".join(existing_names) if existing_names else "(ninguna todavia)"
 
     parse = await claude_create(
         model="claude-haiku-4-5-20251001", max_tokens=400,
-        system="Extrae intencion sobre listas generativas. Responde SOLO JSON.",
+        system="Extrae intencion sobre colecciones del usuario. Responde SOLO JSON.",
         messages=[{"role": "user", "content": f"""Mensaje: {text}
-Listas existentes del usuario: {existing_str}
+Colecciones existentes del usuario: {existing_str}
 
 Responde JSON:
 {{"action": "add" | "show" | "delete_item" | "create_only",
-  "list_name": "nombre canonico de la lista (ej: 'pelis', 'libros', 'viajes'). Matchea con existentes si es posible.",
+  "list_name": "nombre canonico de la coleccion (ej: 'pelis', 'libros', 'viajes'). Matchea con existentes si es posible.",
   "count": cuantos items pidio generar (entero), null si menciono items concretos,
   "criteria": "criterio para generar (ej: 'de Tarantino', 'no ficcion'), null si dio items explicitos",
   "items": ["item1", "item2"] si dio items concretos, null si pidio generar,
@@ -5996,34 +6003,42 @@ Responde JSON:
 
     if action == "show":
         if list_name not in lists:
-            return f"No tenés una lista de _{list_name}_ todavía."
-        return f"Tu lista de _{list_name}_ está en Notion. Mirala ahí."
+            return f"No tenés una colección de _{list_name}_ todavía."
+        return f"Tu colección de _{list_name}_ está en Notion. Mirala ahí."
 
-    list_db_id = lists.get(list_name)
+    entry = lists.get(list_name)
+    list_db_id = entry.get("db_id") if isinstance(entry, dict) else entry  # compat formato viejo
 
     if not list_db_id:
-        # Need to create the DB. Ask confirmation.
+        template_key = detect_collection_template(list_name)
+        tmpl = COLLECTION_TEMPLATES.get(template_key) if template_key else None
+        display = tmpl["display"] if tmpl else list_name
         pending_state[phone] = {
             "type": "lista_create_confirm",
             "list_name": list_name,
+            "template_key": template_key,
             "pending_action": {"action": action, "count": count, "criteria": criteria, "items": items},
         }
-        return f"No tenés una lista de _{list_name}_ todavía. ¿La creo en Notion? (sí/no)"
+        return f"No tenés una colección de _{display}_ todavía. ¿La creo en Notion? (sí/no)"
 
     if action == "delete_item":
-        target = (intent.get("delete_target") or "").strip()
-        return f"Borrar items aún no implementado. Hacelo desde Notion por ahora."
+        return "Borrar items aún no implementado. Hacelo desde Notion por ahora."
 
-    return await _execute_lista_add(list_name, list_db_id, count, criteria, items)
+    template_key = entry.get("template") if isinstance(entry, dict) else detect_collection_template(list_name)
+    return await _execute_lista_add(list_name, list_db_id, count, criteria, items, template_key)
 
 
-async def _execute_lista_add(list_name: str, db_id: str, count: int | None, criteria: str | None, items: list) -> str:
-    """Inserta items en una lista generativa (los genera con Sonnet si hace falta)."""
+async def _execute_lista_add(list_name: str, db_id: str, count: int | None, criteria: str | None, items: list, template_key: str | None = None) -> str:
+    """Inserta items en una colección (los genera con Sonnet si hace falta, con schema del template)."""
+    from notion_datastore import COLLECTION_TEMPLATES
+    tmpl = COLLECTION_TEMPLATES.get(template_key) if template_key else None
+    item_prompt = tmpl["item_prompt"] if tmpl else '[{"name": "...", "notes": "breve nota o null", "tags": ["tag1"]}]'
+
     if not items and (count or criteria):
         gen = await claude_create(
             model="claude-sonnet-4-20250514", max_tokens=600,
-            system=f"Generas items concretos para una lista de '{list_name}'. Responde SOLO JSON array, sin markdown.",
-            messages=[{"role": "user", "content": f"Generá {count or 3} items{' ' + criteria if criteria else ''}. Formato: [{{\"name\": \"...\", \"notes\": \"breve nota o null\", \"tags\": [\"tag1\"] o []}}]"}]
+            system=f"Generás items concretos para una colección de '{list_name}'. Responde SOLO JSON array, sin markdown.",
+            messages=[{"role": "user", "content": f"Generá {count or 3} items{' ' + criteria if criteria else ''}. Formato: {item_prompt}"}]
         )
         raw = gen.content[0].text.strip().strip("`").lstrip("json").strip()
         try:
@@ -6032,16 +6047,16 @@ async def _execute_lista_add(list_name: str, db_id: str, count: int | None, crit
         except Exception:
             return "No pude generar los items."
     elif items:
-        items = [{"name": str(i), "notes": None, "tags": []} for i in items]
+        items = [{"name": str(i)} for i in items]
 
     if not items:
         return "No tengo items para agregar."
 
-    inserted = await _ds.add_items_to_list_db(db_id, items)
+    inserted = await _ds.add_items_to_list_db(db_id, items, template_key)
     if not inserted:
         return "No pude agregar nada a la lista."
     bullet = "\n".join(f"• {i.get('name', '')}" for i in items[:inserted])
-    return f"✅ Agregué {inserted} a tu lista de _{list_name}_:\n{bullet}"
+    return f"✅ Agregué {inserted} a tu colección de _{list_name}_:\n{bullet}"
 
 
 async def handle_deuda_agent(phone: str, text: str) -> str:
