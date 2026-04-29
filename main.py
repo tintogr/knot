@@ -5349,7 +5349,7 @@ async def process_single_item(phone: str, item: dict):
                 await _reply(f"No pude generar el resumen: {str(_e)[:100]}")
 
         elif tipo == "CONFIGURAR":
-            respuesta = await handle_chat(phone, text)
+            respuesta = await handle_configurar(text)
             await _reply(respuesta)
 
         elif tipo == "SALUD":
