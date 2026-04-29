@@ -626,6 +626,67 @@ async def lookup_business_type(name: str) -> str | None:
         return None
 
 
+# ── HELPERS RECONCILIACION DE FACTURAS ────────────────────────────────────────
+
+import uuid as _uuid
+
+def _pending_confirmations() -> list:
+    return user_prefs.get("pending_invoice_confirmations") or []
+
+async def _add_invoice_confirmation(situation: str, provider: str,
+                                    finance_page_ids: list[str], gasto_page_id: str | None,
+                                    paid_amount: float, invoice_amount: float | None) -> str:
+    """Agrega una confirmación pendiente y persiste en Notion. Retorna el conf_id."""
+    conf_id = str(_uuid.uuid4())[:8]
+    conf = {
+        "id":               conf_id,
+        "situation":        situation,
+        "provider":         provider,
+        "paid_amount":      paid_amount,
+        "invoice_amount":   invoice_amount,
+        "finance_page_ids": finance_page_ids,
+        "gasto_page_id":    gasto_page_id,
+        "asked_count":      1,
+        "last_asked_at":    now_argentina().isoformat(),
+        "created_at":       now_argentina().isoformat(),
+    }
+    confs = user_prefs.setdefault("pending_invoice_confirmations", [])
+    confs.append(conf)
+    await save_user_config(MY_NUMBER)
+    return conf_id
+
+async def _remove_invoice_confirmation(conf_id: str) -> None:
+    confs = user_prefs.get("pending_invoice_confirmations") or []
+    user_prefs["pending_invoice_confirmations"] = [c for c in confs if c.get("id") != conf_id]
+    await save_user_config(MY_NUMBER)
+
+async def _auto_mark_invoice_paid(impaga, paid_amount: float, payment_method: str | None = None) -> None:
+    """Marca la factura como pagada y su task asociada."""
+    await _ds.mark_finance_paid(impaga.id, paid_amount, payment_method)
+    tasks = await get_pending_factura_tasks()
+    for t in tasks:
+        if t.get("finance_page_id") == impaga.id:
+            await mark_factura_task_paid(t["page_id"])
+            break
+
+async def _find_invoice_candidates(name_lower: str) -> list:
+    """Busca facturas impagas que matcheen el proveedor por palabras clave."""
+    provider_words = [w for w in name_lower.split() if len(w) > 3]
+    # También buscar por service_providers (ej: "electricidad" → "CALF")
+    service_providers = user_prefs.get("service_providers") or {}
+    for alias, canonical in service_providers.items():
+        if alias.lower() in name_lower:
+            provider_words.append(canonical.lower())
+    seen_ids = set()
+    candidatos = []
+    for pw in provider_words:
+        for c in await _ds.get_impaga_facturas(provider=pw):
+            if c.id not in seen_ids:
+                seen_ids.add(c.id)
+                candidatos.append(c)
+    return candidatos
+
+
 # ── MODULO GASTOS ──────────────────────────────────────────────────────────────
 
 async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=None, exchange_rate=1000.0, extra_images=None) -> str:
@@ -822,60 +883,80 @@ Emoji: elegi el mas especifico segun el contexto real."""
                 reply += "\n\n⛽ Cuantos litros cargaste?"
             elif data.get("value_ars", 0) > 1000 and "EGRESO" in data.get("in_out", "").upper():
                 paid_amount = data.get("value_ars", 0)
-                provider_words = [w for w in name_lower.split() if len(w) > 3]
-                impaga = None
-                for pw in provider_words:
-                    candidatos = await _ds.get_impaga_facturas(provider=pw)
-                    if candidatos:
-                        impaga = candidatos[0]
-                        break
-                if impaga:
-                    inv_amount = impaga.value_ars
+                payment_method = data.get("payment_method")
+                candidatos = await _find_invoice_candidates(name_lower)
+
+                if len(candidatos) == 1:
+                    impaga = candidatos[0]
+                    inv_amount = impaga.value_ars or 0
                     diff_pct = abs(paid_amount - inv_amount) / max(inv_amount, 1) if inv_amount else 1
+
                     if diff_pct <= 0.10:
-                        await _ds.mark_finance_paid(impaga.id, paid_amount)
-                        tasks = await get_pending_factura_tasks()
-                        for t in tasks:
-                            if t.get("finance_page_id") == impaga.id:
-                                await mark_factura_task_paid(t["page_id"])
-                                break
+                        # Auto-marca sin preguntar
+                        await _auto_mark_invoice_paid(impaga, paid_amount, payment_method)
                         reply += f"\n\n✅ Marqué *{impaga.name}* como pagada."
-                        # Trigger #6: detectar pago con apuro (≤2 días al vencimiento)
+                        # Trigger #6: pago con apuro (≤2 días al vencimiento)
                         try:
                             due = getattr(impaga, "due_date", None)
                             from datetime import date as _date
                             if isinstance(due, str):
-                                try:
-                                    due = _date.fromisoformat(due[:10])
-                                except Exception:
-                                    due = None
-                            if isinstance(due, _date):
-                                days_left = (due - now.date()).days
-                                if -1 <= days_left <= 2:
-                                    hints_state = user_prefs.get("feature_hints") or {}
-                                    s = hints_state.get("apuro_factura", {})
-                                    payload_data = s.get("apuro_count", 0) + 1
-                                    s["apuro_count"] = payload_data
-                                    hints_state["apuro_factura"] = s
-                                    user_prefs["feature_hints"] = hints_state
-                                    if payload_data >= 2:
-                                        emit_hint(phone, suggestion_gate.Hint(
-                                            trigger_id="apuro_factura",
-                                            message="⏰ Veo que las últimas facturas las pagás sobre la fecha. ¿Querés que te avise 5 días antes la próxima? Decime *si* o *no*.",
-                                            action_intent="enable_factura_early_warning",
-                                            payload={},
-                                        ))
+                                due = _date.fromisoformat(due[:10])
+                            if isinstance(due, _date) and -1 <= (due - now.date()).days <= 2:
+                                hints_state = user_prefs.setdefault("feature_hints", {})
+                                s = hints_state.get("apuro_factura", {})
+                                s["apuro_count"] = s.get("apuro_count", 0) + 1
+                                hints_state["apuro_factura"] = s
+                                if s["apuro_count"] >= 2:
+                                    emit_hint(phone, suggestion_gate.Hint(
+                                        trigger_id="apuro_factura",
+                                        message="⏰ Veo que las últimas facturas las pagás sobre la fecha. ¿Querés que te avise 5 días antes la próxima? Decime *si* o *no*.",
+                                        action_intent="enable_factura_early_warning",
+                                        payload={},
+                                    ))
                         except Exception:
                             pass
-                    else:
+
+                    elif diff_pct <= 0.30:
+                        # Pide confirmación — podría ser la misma factura
+                        conf_id = await _add_invoice_confirmation(
+                            "diff_moderate", impaga.name, [impaga.id], page_id, paid_amount, inv_amount
+                        )
                         pending_state[phone] = {
-                            "type": "factura_note",
-                            "finance_page_id": impaga.id,
-                            "paid_amount": paid_amount,
-                            "invoice_amount": inv_amount,
+                            "type": "factura_confirm", "situation": "diff_moderate",
+                            "conf_id": conf_id, "finance_page_id": impaga.id,
+                            "paid_amount": paid_amount, "payment_method": payment_method,
                             "provider_name": impaga.name,
                         }
-                        reply += f"\n\n💡 Tenés registrado *{impaga.name}* por ${inv_amount:,.0f} pero pagaste ${paid_amount:,.0f}. ¿Querés agregar una nota?"
+                        reply += f"\n\n💡 Tenés una factura de *{impaga.name}* por ${inv_amount:,.0f}. ¿Este pago de ${paid_amount:,.0f} corresponde a esa? (sí/no)"
+
+                    else:
+                        # Diff grande — registra el gasto pero no toca la factura
+                        conf_id = await _add_invoice_confirmation(
+                            "diff_large", impaga.name, [impaga.id], page_id, paid_amount, inv_amount
+                        )
+                        pending_state[phone] = {
+                            "type": "factura_confirm", "situation": "diff_large",
+                            "conf_id": conf_id, "finance_page_id": impaga.id,
+                            "paid_amount": paid_amount, "payment_method": payment_method,
+                            "provider_name": impaga.name,
+                        }
+                        reply += f"\n\n⚠️ La factura de *{impaga.name}* era ${inv_amount:,.0f} pero pagaste ${paid_amount:,.0f}. ¿Fue un pago parcial? (sí/no)"
+
+                elif len(candidatos) > 1:
+                    # Múltiples facturas — pregunta cuál
+                    options = "\n".join(f"• {c.name} (${c.value_ars:,.0f})" for c in candidatos[:3])
+                    conf_id = await _add_invoice_confirmation(
+                        "multiple_invoices", candidatos[0].name,
+                        [c.id for c in candidatos[:3]], page_id, paid_amount, None
+                    )
+                    pending_state[phone] = {
+                        "type": "factura_confirm", "situation": "multiple_invoices",
+                        "conf_id": conf_id,
+                        "candidates": [{"id": c.id, "name": c.name, "amount": c.value_ars} for c in candidatos[:3]],
+                        "paid_amount": paid_amount, "payment_method": payment_method,
+                    }
+                    reply += f"\n\n💡 Tenés varias facturas pendientes:\n{options}\n¿A cuál corresponde este pago?"
+
                 else:
                     expires_at = (now_argentina() + timedelta(seconds=60)).replace(tzinfo=None).isoformat()
                     pending_state[phone] = {
@@ -4711,28 +4792,69 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
             )
         return True
 
-    if state_type == "factura_note":
-        finance_page_id = state.get("finance_page_id")
-        task_page_id = state.get("task_page_id")
+    if state_type == "factura_confirm":
+        situation   = state.get("situation")
+        conf_id     = state.get("conf_id")
         paid_amount = state.get("paid_amount")
         payment_method = state.get("payment_method")
-        provider_name = state.get("provider_name", "la factura")
         del pending_state[phone]
-        note = text.strip() if text.strip().lower() not in ["no", "nope", "dale", "ok", "si", "sí", ""] else None
-        await _ds.mark_finance_paid(finance_page_id, paid_amount, payment_method, note)
-        if task_page_id:
-            await mark_factura_task_paid(task_page_id)
-        else:
-            tasks = await get_pending_factura_tasks()
-            for t in tasks:
-                if t.get("finance_page_id") == finance_page_id:
-                    await mark_factura_task_paid(t["page_id"])
+        t_lower = text.strip().lower()
+        affirm = t_lower in ("si", "sí", "yes", "dale", "ok", "sip", "claro", "obvio")
+        deny   = t_lower in ("no", "nope", "nel", "nah")
+
+        if situation == "diff_moderate":
+            provider_name = state.get("provider_name", "la factura")
+            finance_page_id = state.get("finance_page_id")
+            if affirm:
+                await _auto_mark_invoice_paid(
+                    type("_", (), {"id": finance_page_id, "value_ars": paid_amount})(),
+                    paid_amount, payment_method
+                )
+                await _remove_invoice_confirmation(conf_id)
+                await send_message(phone, f"✅ *{provider_name}* marcada como pagada.")
+            else:
+                await _remove_invoice_confirmation(conf_id)
+                await send_message(phone, f"Ok, la dejo pendiente.")
+            return True
+
+        if situation == "diff_large":
+            provider_name = state.get("provider_name", "la factura")
+            finance_page_id = state.get("finance_page_id")
+            if affirm:
+                # Pago parcial confirmado — no marca la factura como pagada
+                await _remove_invoice_confirmation(conf_id)
+                await send_message(phone, f"Anotado como pago parcial de *{provider_name}*. La factura sigue pendiente hasta que la saldés completa.")
+            else:
+                await _remove_invoice_confirmation(conf_id)
+                await send_message(phone, f"Ok. La factura de *{provider_name}* sigue pendiente.")
+            return True
+
+        if situation == "multiple_invoices":
+            candidates = state.get("candidates") or []
+            # Intentar matchear la respuesta del usuario con algún candidato
+            matched = None
+            for c in candidates:
+                if c["name"].lower() in t_lower or str(int(c["amount"] or 0)) in t_lower:
+                    matched = c
                     break
-        msg = f"✅ *{provider_name}* marcada como pagada"
-        if note:
-            msg += " con nota guardada."
-        await send_message(phone, msg)
-        return True
+            if not matched and affirm and candidates:
+                # "sí" sin especificar → asumir la de monto más cercano
+                matched = min(candidates, key=lambda c: abs((c["amount"] or 0) - paid_amount))
+            if matched:
+                await _auto_mark_invoice_paid(
+                    type("_", (), {"id": matched["id"], "value_ars": matched["amount"]})(),
+                    paid_amount, payment_method
+                )
+                await _remove_invoice_confirmation(conf_id)
+                otros = [c for c in candidates if c["id"] != matched["id"]]
+                msg = f"✅ *{matched['name']}* marcada como pagada."
+                if otros:
+                    msg += " Todavía tenés pendiente: " + ", ".join(f"*{c['name']}*" for c in otros) + "."
+                await send_message(phone, msg)
+            else:
+                await _remove_invoice_confirmation(conf_id)
+                await send_message(phone, "Ok, dejé todas las facturas como pendientes.")
+            return True
 
     if state_type == "unknown_card_register":
         last4 = state.get("last4", "")

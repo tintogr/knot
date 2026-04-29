@@ -302,6 +302,60 @@ Si no hay nada relevante, respondé exactamente la palabra: NADA""",
         return ""
 
 
+# ── Recordatorio de confirmaciones de facturas pendientes ─────────────────────
+
+async def _remind_pending_invoice_confirmations(summary_type: str) -> None:
+    """Recuerda al usuario confirmaciones de facturas que no respondió. Máx 2 veces; después las registra automáticamente."""
+    from config import save_user_config
+    confs = user_prefs.get("pending_invoice_confirmations") or []
+    if not confs:
+        return
+    updated = []
+    for conf in confs:
+        asked = conf.get("asked_count", 1)
+        if asked >= 2:
+            # Ya se preguntó 2 veces — registrar automáticamente y eliminar
+            provider = conf.get("provider", "factura")
+            finance_ids = conf.get("finance_page_ids") or []
+            paid = conf.get("paid_amount")
+            if finance_ids and paid and conf.get("situation") not in ("diff_large",):
+                try:
+                    await _ds.mark_finance_paid(finance_ids[0], paid)
+                except Exception:
+                    pass
+            await send_message(MY_NUMBER, f"⚠️ Registré automáticamente el pago de *{provider}* ya que no obtuve respuesta.")
+            # No se agrega a updated → queda eliminada
+        else:
+            # Preguntar de nuevo
+            conf["asked_count"] = asked + 1
+            conf["last_asked_at"] = now_argentina().isoformat()
+            updated.append(conf)
+            situation = conf.get("situation")
+            provider = conf.get("provider", "factura")
+            paid = conf.get("paid_amount", 0)
+            inv = conf.get("invoice_amount", 0)
+            if situation == "diff_moderate":
+                msg = f"💡 Quedó pendiente: tenés una factura de *{provider}* por ${inv:,.0f} y registraste un pago de ${paid:,.0f}. ¿Corresponde a esa factura? (sí/no)"
+            elif situation == "diff_large":
+                msg = f"⚠️ Quedó pendiente: la factura de *{provider}* era ${inv:,.0f} pero el pago fue ${paid:,.0f}. ¿Fue un pago parcial? (sí/no)"
+            elif situation == "multiple_invoices":
+                msg = f"💡 Quedó pendiente: tenés varias facturas de *{provider}* y registraste un pago de ${paid:,.0f}. ¿A cuál corresponde?"
+            else:
+                continue
+            pending_state[MY_NUMBER] = {
+                "type": "factura_confirm",
+                "situation": situation,
+                "conf_id": conf["id"],
+                "finance_page_id": (conf.get("finance_page_ids") or [None])[0],
+                "candidates": conf.get("candidates"),
+                "paid_amount": paid,
+                "provider_name": provider,
+            }
+            await send_message(MY_NUMBER, msg)
+    user_prefs["pending_invoice_confirmations"] = updated
+    await save_user_config(MY_NUMBER)
+
+
 # ── Resumen diario ────────────────────────────────────────────────────────────
 
 async def send_daily_summary(http, access_token: str, now: datetime):
@@ -623,6 +677,9 @@ async def send_daily_summary(http, access_token: str, now: datetime):
     except Exception:
         pass
 
+    # Recordar confirmaciones de facturas pendientes de respuesta
+    await _remind_pending_invoice_confirmations("daily")
+
 
 # ── Resumen nocturno ──────────────────────────────────────────────────────────
 
@@ -691,6 +748,7 @@ Conciso, calido, natural. Maximo 5 lineas.""",
 
     await send_message(MY_NUMBER, msg)
     add_to_history(MY_NUMBER, "assistant", msg)
+    await _remind_pending_invoice_confirmations("nocturno")
 
 
 async def send_resumen_nocturno_dominical(http, access_token: str, now: datetime):

@@ -39,6 +39,8 @@ async def load_user_config(wa_number: str):
             user_prefs["feature_hints"] = cfg.feature_hints
         if cfg.generative_lists:
             user_prefs["generative_lists"] = cfg.generative_lists
+        if cfg.pending_invoice_confirmations:
+            user_prefs["pending_invoice_confirmations"] = cfg.pending_invoice_confirmations
         if cfg.domain_profiles:
             user_prefs.setdefault("domain_profiles", {}).update(cfg.domain_profiles)
         user_prefs["_config_page_id"] = page_id
@@ -92,6 +94,7 @@ async def save_user_config(wa_number: str):
             known_shops=user_prefs.get("known_shops", {}),
             feature_hints=user_prefs.get("feature_hints", {}),
             generative_lists=user_prefs.get("generative_lists", {}),
+            pending_invoice_confirmations=user_prefs.get("pending_invoice_confirmations", []),
         )
         await _ds.save_config(page_id, cfg)
     except Exception:

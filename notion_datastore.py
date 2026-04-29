@@ -169,6 +169,7 @@ except ImportError:
         known_shops: dict = None    # {"la anonima": "Supermercado", "farmacity": "Farmacia"}
         feature_hints: dict = None  # {trigger_id: {first_suggested_at, accepted, dismissed_count, disabled}}
         generative_lists: dict = None  # {name: db_id}
+        pending_invoice_confirmations: list = None  # [{id, situation, provider, ...}]
 
     @dataclass
     class PaymentMethod:
@@ -239,6 +240,18 @@ def _get_select(props: dict, field: str) -> str:
 def _get_multi_select(props: dict, field: str) -> list[str]:
     """Extract list of names from a multi_select field."""
     return [c["name"] for c in props.get(field, {}).get("multi_select", [])]
+
+
+def _load_json_list(props: dict, field: str) -> list | None:
+    """Extract a JSON list from a rich_text field. Returns None if empty or invalid."""
+    raw = _get_text(props, field)
+    if not raw:
+        return None
+    try:
+        result = json.loads(raw)
+        return result if isinstance(result, list) else None
+    except Exception:
+        return None
 
 
 def _get_status(props: dict, field: str) -> str:
@@ -2066,6 +2079,7 @@ class NotionDataStore:
             known_shops=known_shops or None,
             feature_hints=feature_hints or None,
             generative_lists=generative_lists or None,
+            pending_invoice_confirmations=_load_json_list(props, "Pending Invoice Confirmations"),
         )
         return config, page["id"]
 
@@ -2087,6 +2101,7 @@ class NotionDataStore:
             "Known Shops":       {"rich_text": [{"text": {"content": json.dumps(config.known_shops or {}, ensure_ascii=False)[:2000]}}]},
             "Feature Hints":     {"rich_text": [{"text": {"content": json.dumps(config.feature_hints or {}, ensure_ascii=False)[:2000]}}]},
             "Generative Lists":  {"rich_text": [{"text": {"content": json.dumps(config.generative_lists or {}, ensure_ascii=False)[:2000]}}]},
+            "Pending Invoice Confirmations": {"rich_text": [{"text": {"content": json.dumps(config.pending_invoice_confirmations or [], ensure_ascii=False)[:2000]}}]},
             "Resumen Nocturno Enabled": {"checkbox": config.resumen_nocturno_enabled},
         }
         for key, field in [
