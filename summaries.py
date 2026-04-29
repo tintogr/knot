@@ -52,7 +52,6 @@ async def get_weather(days: int = 2) -> dict | None:
             lat = user_prefs.get("saved_lat")
             lon = user_prefs.get("saved_lon")
         if lat is None or lon is None:
-            print(f"[weather] sin coordenadas (current_location={current_location})")
             return None
 
         # Cache check: si tenemos data fresca para coords aprox iguales, usarla
@@ -60,10 +59,9 @@ async def get_weather(days: int = 2) -> dict | None:
         if _weather_cache["data"] and _weather_cache["key"] == cache_key:
             fetched = _weather_cache["fetched_at"]
             if fetched and (datetime.now() - fetched).total_seconds() < _WEATHER_CACHE_TTL_MIN * 60:
-                print(f"[weather] usando cache (edad {int((datetime.now() - fetched).total_seconds())}s)")
                 return _weather_cache["data"]
 
-        print(f"[weather] usando lat={lat}, lon={lon}")
+
         async with httpx.AsyncClient(timeout=10) as http:
             r = await http.get(
                 "https://api.open-meteo.com/v1/forecast",
@@ -75,11 +73,9 @@ async def get_weather(days: int = 2) -> dict | None:
                     "forecast_days": max(days, 7)
                 }
             )
-            print(f"[weather] api status={r.status_code}, body[:200]={r.text[:200]}")
             if r.status_code != 200:
                 # Si hay rate limit (429) y tenemos cache aunque vencido, usarlo igual
                 if _weather_cache["data"] and _weather_cache["key"] == cache_key:
-                    print("[weather] api fail, usando cache vencido")
                     return _weather_cache["data"]
                 return None
             data = r.json()
@@ -126,8 +122,7 @@ async def get_weather(days: int = 2) -> dict | None:
             _weather_cache["fetched_at"] = datetime.now()
             _weather_cache["key"] = cache_key
             return result
-    except Exception as e:
-        print(f"[weather] EXCEPCION: {type(e).__name__}: {e}")
+    except Exception:
         return None
 
 
@@ -333,9 +328,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
     except Exception:
         pass
     await load_user_config(MY_NUMBER)
-    print(f"[daily_summary] current_location={current_location}, saved_lat={user_prefs.get('saved_lat')}, saved_lon={user_prefs.get('saved_lon')}")
     w = await get_weather()
-    print(f"[daily_summary] weather result: {'OK' if w else 'None'}")
     greeting = user_prefs.get("greeting_name") or _saludo_tiempo
     lines = [f"*{greeting}!*", ""]
     if w:
@@ -471,7 +464,6 @@ async def send_daily_summary(http, access_token: str, now: datetime):
     gmail_summary = None
     try:
         gmail_summary = await get_gmail_summary()
-        print(f"[daily_summary] gmail_summary len={len(gmail_summary) if gmail_summary else 0}")
         if gmail_summary:
             period_str = now.strftime("%B %Y")
             try:
@@ -553,9 +545,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
             lines.append("")
             lines.append("✅ Facturas al día")
     except Exception as _e:
-        import traceback
-        print(f"[daily_summary] error en seccion facturas: {type(_e).__name__}: {_e}")
-        print(traceback.format_exc())
+        import traceback; traceback.print_exc()
 
     # Sección "📬 Emails importantes": resumen breve de mails NO-factura
     if gmail_summary:
@@ -571,7 +561,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                 lines.append("📬 *Emails importantes:*")
                 lines.append(mails_text)
         except Exception as _e:
-            print(f"[daily_summary] error en seccion emails: {type(_e).__name__}: {_e}")
+            pass
 
     extras = user_prefs.get("resumen_extras", [])
     if extras:
