@@ -321,11 +321,14 @@ async def get_important_emails() -> str | None:
                 return None
             mail_text = "\n---\n".join(mail_lines)
             resp = await claude_create(
-                model="claude-haiku-4-5-20251001", max_tokens=250,
+                model="claude-haiku-4-5-20251001", max_tokens=350,
                 system="""Sos Knot. Revisas la bandeja de entrada del usuario.
 Identifica SOLO los emails que requieren atención o son relevantes: turnos médicos, mensajes de personas conocidas que esperan respuesta, notificaciones importantes de cuentas/servicios no financieros, alertas urgentes.
 Ignorá: newsletters, notificaciones automáticas de apps, publicidad, confirmaciones sin acción requerida.
-Devolvé hasta 4 lineas, formato: '- Asunto / De quién'. Si no hay nada relevante respondé exactamente: NADA""",
+Para cada email relevante, devolvé UNA línea con este formato exacto:
+- *Asunto* (De: nombre corto): resumen de 1 oración de qué dice o qué acción requiere.
+Ejemplo: - *mueble juani* (De: Martín): pregunta si podés pasar a buscarlo esta tarde.
+Máximo 4 emails. Si no hay nada relevante respondé exactamente: NADA""",
                 messages=[{"role": "user", "content": mail_text}]
             )
             result = resp.content[0].text.strip()
