@@ -273,6 +273,67 @@ Mails:
         return None
 
 
+async def get_important_emails() -> str | None:
+    """Busca emails importantes que NO son facturas ni servicios.
+    Usa una query de Gmail independiente, excluyendo proveedores conocidos."""
+    providers = user_prefs.get("service_providers", {})
+    provider_names = list(providers.values())
+    # Excluir proveedores conocidos con -from: y palabras de facturas
+    exclusions = " ".join(f'-from:"{n}"' for n in provider_names[:8] if n)
+    base_query = (
+        f"newer_than:14d {exclusions} "
+        "-(factura OR comprobante OR vencimiento OR boleta OR invoice OR \"pago pendiente\" OR AFIP OR ARCA) "
+        "-category:promotions -category:updates -category:social"
+    ).strip()
+    access_token = await get_gcal_access_token()
+    if not access_token:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=12) as http:
+            headers = {"Authorization": f"Bearer {access_token}"}
+            r = await http.get(
+                "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+                headers=headers,
+                params={"q": base_query, "maxResults": 15}
+            )
+            if r.status_code != 200:
+                return None
+            messages = r.json().get("messages", [])
+            if not messages:
+                return None
+            mail_lines = []
+            for msg in messages[:12]:
+                msg_r = await http.get(
+                    f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg['id']}",
+                    headers=headers,
+                    params={"format": "metadata", "metadataHeaders": ["Subject", "From", "Date"]}
+                )
+                if msg_r.status_code != 200:
+                    continue
+                msg_meta = msg_r.json()
+                hdrs = {h["name"]: h["value"] for h in msg_meta.get("payload", {}).get("headers", [])}
+                snippet = msg_meta.get("snippet", "")[:200]
+                subject = hdrs.get("Subject", "")
+                sender = hdrs.get("From", "")
+                if subject or snippet:
+                    mail_lines.append(f"De: {sender}\nAsunto: {subject}\nPreview: {snippet}")
+            if not mail_lines:
+                return None
+            mail_text = "\n---\n".join(mail_lines)
+            resp = await claude_create(
+                model="claude-haiku-4-5-20251001", max_tokens=250,
+                system="""Sos Knot. Revisas la bandeja de entrada del usuario.
+Identifica SOLO los emails que requieren atención o son relevantes: turnos médicos, mensajes de personas conocidas que esperan respuesta, notificaciones importantes de cuentas/servicios no financieros, alertas urgentes.
+Ignorá: newsletters, notificaciones automáticas de apps, publicidad, confirmaciones sin acción requerida.
+Devolvé hasta 4 lineas, formato: '- Asunto / De quién'. Si no hay nada relevante respondé exactamente: NADA""",
+                messages=[{"role": "user", "content": mail_text}]
+            )
+            result = resp.content[0].text.strip()
+            return None if result.upper() == "NADA" else result
+    except Exception:
+        return None
+
+
 # ── Contexto geografico ───────────────────────────────────────────────────────
 
 async def build_geo_context(lat: float, lon: float) -> str:
@@ -605,27 +666,15 @@ async def send_daily_summary(http, access_token: str, now: datetime):
     except Exception as _e:
         import traceback; traceback.print_exc()
 
-    # Sección "📬 Emails importantes": resumen breve de mails NO-factura
-    if gmail_summary:
-        try:
-            _sp = user_prefs.get("service_providers") or {}
-            _provider_names = ", ".join(_sp.values()) if _sp else "ninguno"
-            mails_resp = await claude_create(
-                model="claude-haiku-4-5-20251001", max_tokens=300,
-                system=f"""Sos Knot. Tenés el resumen de Gmail del usuario.
-TAREA: identificar emails que NO sean de servicios o facturas.
-EXCLUIR OBLIGATORIAMENTE (responde NADA si solo hay estos): cualquier mail de {_provider_names}, y cualquier mail sobre facturas, vencimientos, comprobantes, cobros, pagos, AFIP, ARCA, impuestos, aunque sea de un remitente desconocido.
-INCLUIR SOLO: turnos médicos, mensajes personales que requieren respuesta, alertas urgentes no-financieras.
-Devolvé hasta 4 lineas, una por mail: '- Asunto / De quién / contexto'. Si no hay NADA de este tipo, respondé exactamente: NADA""",
-                messages=[{"role": "user", "content": gmail_summary}]
-            )
-            mails_text = mails_resp.content[0].text.strip()
-            if mails_text and mails_text.upper() != "NADA":
-                lines.append("")
-                lines.append("📬 *Emails importantes:*")
-                lines.append(mails_text)
-        except Exception as _e:
-            pass
+    # Sección "📬 Emails importantes": query independiente que excluye facturas/servicios
+    try:
+        important_mails = await get_important_emails()
+        if important_mails:
+            lines.append("")
+            lines.append("📬 *Emails importantes:*")
+            lines.append(important_mails)
+    except Exception:
+        pass
 
     if gmail_summary:
         try:
