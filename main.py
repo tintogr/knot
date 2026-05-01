@@ -209,79 +209,182 @@ async def extract_coords_from_maps_url(url: str) -> tuple[float, float] | None:
         pass
     return None
 
+# ── Google Places API v1: cost-safe wrapper ───────────────────────────────────
+# Reglas:
+# 1. Field mask estricto: solo Basic Data (gratis). NUNCA Atmosphere ni Contact en el loop automatico.
+# 2. Cap diario: max 300 calls/dia. Protege contra bugs de loop.
+# 3. Horario nocturno se calcula con timezonefinder, sin request.
+# 4. Opening hours solo on demand via get_place_opening_hours() — funcion separada.
+
+_places_daily_calls: dict = {"date": None, "count": 0}
+PLACES_DAILY_CAP = 300
+
+# Field masks: solo cobran lo que pedimos
+_FIELDS_BASIC = "places.displayName,places.location,places.id,places.primaryType,places.formattedAddress"
+_FIELDS_HOURS = "places.id,places.currentOpeningHours.openNow,places.regularOpeningHours.weekdayDescriptions"
+
+def _places_budget_check() -> bool:
+    """Devuelve True si todavia podemos hacer la call. Resetea contador al cambiar de dia."""
+    today = now_argentina().date().isoformat()
+    if _places_daily_calls["date"] != today:
+        _places_daily_calls["date"] = today
+        _places_daily_calls["count"] = 0
+    if _places_daily_calls["count"] >= PLACES_DAILY_CAP:
+        print(f"[Places] CAP DIARIO ALCANZADO ({PLACES_DAILY_CAP} calls). Bloqueando hasta mañana.")
+        return False
+    _places_daily_calls["count"] += 1
+    return True
+
+def _local_hour_at(lat: float, lon: float) -> int | None:
+    """Hora local real del usuario segun lat/lon. None si no se puede determinar."""
+    try:
+        from timezonefinder import TimezoneFinder
+        import pytz
+        tf = TimezoneFinder()
+        tz_name = tf.timezone_at(lat=lat, lng=lon)
+        if not tz_name:
+            return None
+        tz = pytz.timezone(tz_name)
+        return datetime.now(tz).hour
+    except Exception:
+        return None
+
+def _is_likely_closed_hours(lat: float, lon: float) -> bool:
+    """True si la hora local esta en franja nocturna (20:00-07:00)."""
+    h = _local_hour_at(lat, lon)
+    if h is None:
+        h = now_argentina().hour  # fallback
+    return h >= 20 or h < 7
+
+
 async def search_nearby_shops(lat: float, lon: float, radius: int = 500, shop_types: list = None, name_filter: str = None) -> list[dict]:
-    """Busca comercios cercanos usando Google Places API."""
+    """Busca comercios cercanos usando Places API v1 con field mask Basic Data (gratis).
+
+    NO incluye opening_hours, rating, photos, contact info — esos campos cuestan plata
+    y solo se piden via get_place_opening_hours() cuando el usuario lo pide explicitamente.
+    """
     api_key = os.environ.get("GOOGLE_PLACES_KEY", "")
     if not api_key:
-        print("[Places] No hay GOOGLE_PLACES_API_KEY configurada")
         return []
+
+    if not _places_budget_check():
+        return []
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": _FIELDS_BASIC,  # Solo Basic Data — costo $0
+    }
 
     try:
         async with httpx.AsyncClient(timeout=10) as http:
             if name_filter:
-                # Busqueda por nombre especifico
-                r = await http.get(
-                    "https://maps.googleapis.com/maps/api/place/textsearch/json",
-                    params={
-                        "query": name_filter,
-                        "location": f"{lat},{lon}",
-                        "radius": radius,
-                        "key": api_key,
-                        "language": "es"
-                    }
+                # Text Search v1
+                body = {
+                    "textQuery": name_filter,
+                    "locationBias": {
+                        "circle": {
+                            "center": {"latitude": lat, "longitude": lon},
+                            "radius": float(radius),
+                        }
+                    },
+                    "languageCode": "es",
+                    "maxResultCount": 10,
+                }
+                r = await http.post(
+                    "https://places.googleapis.com/v1/places:searchText",
+                    headers=headers, json=body
                 )
             else:
-                # Busqueda por tipo
-                query_type = "supermarket"
+                # Nearby Search v1
+                included_type = "supermarket"
                 if shop_types:
-                    query_type = shop_types[0]
-                r = await http.get(
-                    "https://maps.googleapis.com/maps/api/place/nearbysearch/json",
-                    params={
-                        "location": f"{lat},{lon}",
-                        "radius": radius,
-                        "type": query_type,
-                        "key": api_key,
-                        "language": "es"
-                    }
+                    included_type = shop_types[0]
+                body = {
+                    "includedTypes": [included_type],
+                    "locationRestriction": {
+                        "circle": {
+                            "center": {"latitude": lat, "longitude": lon},
+                            "radius": float(radius),
+                        }
+                    },
+                    "languageCode": "es",
+                    "maxResultCount": 10,
+                }
+                r = await http.post(
+                    "https://places.googleapis.com/v1/places:searchNearby",
+                    headers=headers, json=body
                 )
 
             if r.status_code != 200:
-                print(f"[Places] Error {r.status_code}: {r.text[:100]}")
+                print(f"[Places] Error {r.status_code}: {r.text[:200]}")
                 return []
 
-            results = r.json().get("results", [])
+            places_list = r.json().get("places", [])
             shops = []
-            for place in results[:10]:
-                plat = place["geometry"]["location"]["lat"]
-                plon = place["geometry"]["location"]["lng"]
+            for place in places_list[:10]:
+                loc = place.get("location", {})
+                plat = loc.get("latitude")
+                plon = loc.get("longitude")
+                if plat is None or plon is None:
+                    continue
                 dist_m = round(haversine_km(lat, lon, plat, plon) * 1000)
-                address = place.get("vicinity", "")
-                maps_link = f"https://www.google.com/maps/place/?q=place_id:{place['place_id']}"
-                opening = ""
-                if place.get("opening_hours", {}).get("open_now") is True:
-                    opening = "Abierto ahora"
-                elif place.get("opening_hours", {}).get("open_now") is False:
-                    opening = "Cerrado ahora"
+                place_id = place.get("id", "")
+                # displayName es {"text": "...", "languageCode": "..."}
+                display_name = place.get("displayName", {})
+                name = display_name.get("text", "") if isinstance(display_name, dict) else str(display_name)
                 shops.append({
-                    "name": place.get("name", ""),
-                    "type": place.get("types", [""])[0],
+                    "name": name,
+                    "type": place.get("primaryType", ""),
                     "distance_m": dist_m,
                     "lat": plat,
                     "lon": plon,
-                    "address": address,
-                    "opening_hours": opening,
-                    "maps_link": maps_link,
+                    "address": place.get("formattedAddress", ""),
+                    "place_id": place_id,
+                    "maps_link": f"https://www.google.com/maps/place/?q=place_id:{place_id}",
                 })
 
             shops.sort(key=lambda x: x["distance_m"])
-            # Excluir resultados claramente fuera del area (mas de 50km)
             shops = [s for s in shops if s["distance_m"] <= 50000]
             return shops
 
     except Exception as e:
         print(f"[Places] Error buscando comercios: {e}")
         return []
+
+
+async def get_place_opening_hours(place_id: str) -> dict | None:
+    """Consulta horarios de un Place especifico. SOLO usar on-demand cuando el usuario lo pide.
+
+    Cuesta ~$0.003 por call (Contact Data). Nunca llamar en loops automaticos.
+    Devuelve {"open_now": bool, "weekly": [...]} o None.
+    """
+    api_key = os.environ.get("GOOGLE_PLACES_KEY", "")
+    if not api_key or not place_id:
+        return None
+    if not _places_budget_check():
+        return None
+    headers = {
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": "id,currentOpeningHours.openNow,regularOpeningHours.weekdayDescriptions",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=8) as http:
+            r = await http.get(
+                f"https://places.googleapis.com/v1/places/{place_id}",
+                headers=headers
+            )
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            current = data.get("currentOpeningHours", {})
+            regular = data.get("regularOpeningHours", {})
+            return {
+                "open_now": current.get("openNow"),
+                "weekly": regular.get("weekdayDescriptions", []),
+            }
+    except Exception:
+        return None
 
 async def check_shopping_proximity():
     """Chequea si hay comercios cerca que vendan cosas de la lista de compras."""
@@ -316,16 +419,18 @@ async def check_shopping_proximity():
                 by_store[store_name].append(item.name)
         if not by_store:
             return None
-            lat, lon = get_current_location()
-            for store_type, item_names in by_store.items():
-                osm_types = store_type_map.get(store_type, ["supermarket"])
-                shops = await search_nearby_shops(lat, lon, shop_types=osm_types)
-                if shops:
-                    return {
-                        "store_type": store_type,
-                        "items": item_names,
-                        "shops": shops
-                    }
+        lat, lon = get_current_location()
+        likely_closed = _is_likely_closed_hours(lat, lon)
+        for store_type, item_names in by_store.items():
+            osm_types = store_type_map.get(store_type, ["supermarket"])
+            shops = await search_nearby_shops(lat, lon, shop_types=osm_types)
+            if shops:
+                return {
+                    "store_type": store_type,
+                    "items": item_names,
+                    "shops": shops,
+                    "likely_closed": likely_closed,
+                }
     except Exception:
         pass
     return None
@@ -2161,12 +2266,24 @@ async def handle_chat(phone: str, text: str) -> str:
         },
         {
             "name": "buscar_comercios_cercanos",
-            "description": "Busca comercios, negocios o locales cerca de la ubicacion actual del usuario usando Google Places. Usar cuando el usuario pregunta si hay algun negocio cerca, si tiene alguna tienda a mano, donde queda tal comercio, etc.",
+            "description": "Busca comercios, negocios o locales cerca de la ubicacion actual del usuario usando Google Places. Usar cuando el usuario pregunta si hay algun negocio cerca, si tiene alguna tienda a mano, donde queda tal comercio, etc. NO devuelve horarios — para eso usar consultar_horario_comercio si el usuario pregunta explicitamente.",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "nombre": {"type": "string", "description": "Nombre del comercio o tipo de negocio. Ej: 'La Anonima', 'farmacia', 'panaderia', 'Panipunto'"},
                     "radio_metros": {"type": "integer", "description": "Radio de busqueda en metros. Default 1000."}
+                },
+                "required": ["nombre"]
+            }
+        },
+        {
+            "name": "consultar_horario_comercio",
+            "description": "Consulta los horarios de apertura de un comercio especifico. SOLO usar cuando el usuario pregunta explicitamente si esta abierto o que horarios tiene un negocio puntual. NUNCA usar de forma proactiva — tiene costo por call.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "nombre": {"type": "string", "description": "Nombre del comercio a consultar. Ej: 'La Anonima', 'Farmacia del Centro'"},
+                    "place_id": {"type": ["string", "null"], "description": "place_id de Google si ya lo tenemos de una busqueda previa. Si no, dejar null y se busca por nombre."}
                 },
                 "required": ["nombre"]
             }
@@ -2587,13 +2704,35 @@ La idea es que el usuario descubra capacidades de Knot a medida que las necesita
                     line = f"- {s['name']} a {s['distance_m']}m"
                     if s.get("address"):
                         line += f" ({s['address']})"
-                    if s.get("opening_hours"):
-                        line += f" — {s['opening_hours']}"
                     line += f" — {s['maps_link']}"
                     lines.append(line)
                 t_result = "\n".join(lines)
+                if _is_likely_closed_hours(lat, lon):
+                    t_result += "\n\n⚠️ Por el horario podrian estar cerrados. Si querés que confirme el horario de alguno en particular, decime cual."
             else:
                 t_result = f"No encontre '{nombre}' en un radio de {radio}m."
+        elif t_name == "consultar_horario_comercio":
+            place_id = t_input.get("place_id", "")
+            nombre = t_input.get("nombre", "")
+            if not place_id and nombre:
+                # Si no tenemos place_id, lo buscamos primero
+                lat, lon = get_current_location()
+                shops = await search_nearby_shops(lat, lon, radius=2000, name_filter=nombre)
+                if shops:
+                    place_id = shops[0].get("place_id", "")
+                    nombre = shops[0].get("name", nombre)
+            if not place_id:
+                t_result = f"No encontre '{nombre}' para consultar su horario."
+            else:
+                hours = await get_place_opening_hours(place_id)
+                if not hours:
+                    t_result = "No pude obtener el horario en este momento."
+                else:
+                    estado = "abierto ahora" if hours.get("open_now") else "cerrado ahora" if hours.get("open_now") is False else "estado desconocido"
+                    weekly = hours.get("weekly") or []
+                    t_result = f"{nombre}: {estado}."
+                    if weekly:
+                        t_result += "\n" + "\n".join(weekly[:7])
         elif t_name == "calcular_fecha":
             t_result = calcular_fecha_exacta(t_input.get("descripcion", ""))
         elif t_name == "buscar_gastos":

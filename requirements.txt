@@ -3,3 +3,5 @@ uvicorn==0.34.0
 httpx==0.28.1
 anthropic==0.45.0
 python-dotenv==1.0.1
+timezonefinder==6.5.7
+pytz==2024.2
