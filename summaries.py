@@ -415,6 +415,9 @@ async def send_daily_summary(http, access_token: str, now: datetime):
         except Exception:
             pass
         lines.append("")
+    else:
+        lines.append("🌡️ _Clima no disponible_")
+        lines.append("")
     if now.weekday() == 0:
         try:
             async with httpx.AsyncClient() as http_week:
@@ -605,9 +608,15 @@ async def send_daily_summary(http, access_token: str, now: datetime):
     # Sección "📬 Emails importantes": resumen breve de mails NO-factura
     if gmail_summary:
         try:
+            _sp = user_prefs.get("service_providers") or {}
+            _provider_names = ", ".join(_sp.values()) if _sp else "ninguno"
             mails_resp = await claude_create(
                 model="claude-haiku-4-5-20251001", max_tokens=300,
-                system="Sos Knot. Del siguiente resumen de Gmail, extraé SOLO los emails importantes que NO son facturas/servicios (turnos, citas, comunicaciones personales, recordatorios externos, novedades relevantes). Devolvé hasta 4 lineas, una por mail, formato breve: '- Asunto / De quién / contexto'. Si no hay nada importante distinto a facturas, respondé exactamente 'NADA'.",
+                system=f"""Sos Knot. Tenés el resumen de Gmail del usuario.
+TAREA: identificar emails que NO sean de servicios o facturas.
+EXCLUIR OBLIGATORIAMENTE (responde NADA si solo hay estos): cualquier mail de {_provider_names}, y cualquier mail sobre facturas, vencimientos, comprobantes, cobros, pagos, AFIP, ARCA, impuestos, aunque sea de un remitente desconocido.
+INCLUIR SOLO: turnos médicos, mensajes personales que requieren respuesta, alertas urgentes no-financieras.
+Devolvé hasta 4 lineas, una por mail: '- Asunto / De quién / contexto'. Si no hay NADA de este tipo, respondé exactamente: NADA""",
                 messages=[{"role": "user", "content": gmail_summary}]
             )
             mails_text = mails_resp.content[0].text.strip()
