@@ -5306,12 +5306,26 @@ async def process_single_item(phone: str, item: dict):
                 await _reply(respuesta)
 
         elif tipo == "RECORDATORIO":
-            parsed = await parse_recordatorio(text)
-            success, error = await create_recordatorio(parsed)
-            if success:
-                await _reply(format_recordatorio(parsed))
+            parsed_list = await parse_recordatorio(text)
+            created = []
+            for parsed in parsed_list:
+                success, _err = await create_recordatorio(parsed)
+                if success:
+                    created.append(parsed)
+            if len(created) == 1:
+                await _reply(format_recordatorio(created[0]))
+            elif len(created) > 1:
+                lines = ["🔔 Recordatorios configurados:"]
+                for p in created:
+                    try:
+                        dt = datetime.strptime(p["fire_at"], "%Y-%m-%dT%H:%M")
+                        fecha = dt.strftime("%d/%m") if dt.date() != now_argentina().date() else "hoy"
+                        lines.append(f"- {p.get('emoji','🔔')} {p['summary']} — {fecha} a las {dt.strftime('%H:%M')}")
+                    except Exception:
+                        lines.append(f"- {p.get('summary', 'Recordatorio')}")
+                await _reply("\n".join(lines))
             else:
-                await _reply(f"No pude crear el recordatorio: {error[:100]}")
+                await _reply("No pude crear el recordatorio. Intenta de nuevo.")
 
         elif tipo == "CANCELAR_RECORDATORIO":
             success, msg = await cancelar_recordatorio(text)
@@ -5442,20 +5456,24 @@ async def health():
     return {"status": "ok", "bot": "knot"}
 
 # ── MODULO RECORDATORIOS ───────────────────────────────────────────────────────
-async def parse_recordatorio(text: str) -> dict:
+async def parse_recordatorio(text: str) -> list:
+    """Devuelve siempre una lista de dicts, aunque sea un solo recordatorio."""
     now = now_argentina()
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=300,
-        system="Extrae info del recordatorio. Responde SOLO JSON valido sin markdown.",
+        model="claude-sonnet-4-20250514", max_tokens=500,
+        system="Extrae info del/los recordatorio/s. Responde SOLO JSON valido sin markdown. Siempre devuelve un array, aunque sea uno solo.",
         messages=[{"role": "user", "content": f"""Ahora son las {now.strftime("%Y-%m-%d %H:%M")} en Argentina.
 Mensaje: {text}
-Responde:
-{{"summary": "descripcion","fire_at": "YYYY-MM-DDTHH:MM","emoji": "emoji"}}"""}]
+Responde SIEMPRE como array JSON (aunque sea un solo recordatorio):
+[{{"summary": "descripcion", "fire_at": "YYYY-MM-DDTHH:MM", "emoji": "emoji"}}]"""}]
     )
     raw = response.content[0].text.strip()
     if raw.startswith("```"):
         raw = raw.strip("`").lstrip("json").strip()
-    return json.loads(raw)
+    parsed = json.loads(raw)
+    if isinstance(parsed, dict):
+        return [parsed]
+    return parsed
 
 async def create_recordatorio(data: dict) -> tuple[bool, str]:
     access_token = await get_gcal_access_token()
