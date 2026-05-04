@@ -6129,7 +6129,12 @@ async def _cron_job_inner():
     _is_sunday = now.weekday() == 6
     _nocturno_check_hour = semanal_hour if _is_sunday else nocturno_hour
     _nocturno_check_enabled = semanal_enabled if _is_sunday else nocturno_enabled
-    if _nocturno_check_enabled and now.hour == _nocturno_check_hour and now.minute == 0:
+    _noc_sched_min = _nocturno_check_hour * 60
+    _noc_curr_min = now.hour * 60 + now.minute
+    _last_nocturno = _last_summary_sent.get("nocturno")
+    _sent_nocturno_today = bool(_last_nocturno and _last_nocturno.date() == now.date())
+    if _nocturno_check_enabled and 0 <= (_noc_curr_min - _noc_sched_min) <= 3 and not _sent_nocturno_today:
+        _last_summary_sent["nocturno"] = now
         try:
             access_token_noc = await get_gcal_access_token()
             async with httpx.AsyncClient() as http_noc:

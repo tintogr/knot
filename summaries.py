@@ -123,7 +123,8 @@ async def get_weather(days: int = 2) -> dict | None:
             _weather_cache["fetched_at"] = datetime.now()
             _weather_cache["key"] = cache_key
             return result
-    except Exception:
+    except Exception as _e:
+        print(f"[weather] error: {type(_e).__name__}: {_e}")
         return None
 
 
@@ -294,7 +295,7 @@ async def get_important_emails() -> str | None:
             r = await http.get(
                 "https://gmail.googleapis.com/gmail/v1/users/me/messages",
                 headers=headers,
-                params={"q": base_query, "maxResults": 15}
+                params={"q": base_query, "maxResults": 25}
             )
             if r.status_code != 200:
                 return None
@@ -302,7 +303,7 @@ async def get_important_emails() -> str | None:
             if not messages:
                 return None
             mail_lines = []
-            for msg in messages[:12]:
+            for msg in messages[:20]:
                 msg_r = await http.get(
                     f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg['id']}",
                     headers=headers,
@@ -328,7 +329,7 @@ Ignorá: newsletters, notificaciones automáticas de apps, publicidad, confirmac
 Para cada email relevante, devolvé UNA línea con este formato exacto:
 - *Asunto* (De: nombre corto): resumen de 1 oración de qué dice o qué acción requiere.
 Ejemplo: - *mueble juani* (De: Martín): pregunta si podés pasar a buscarlo esta tarde.
-Máximo 4 emails. Si no hay nada relevante respondé exactamente: NADA""",
+Máximo 6 emails. Si no hay nada relevante respondé exactamente: NADA""",
                 messages=[{"role": "user", "content": mail_text}]
             )
             result = resp.content[0].text.strip()
