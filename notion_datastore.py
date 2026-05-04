@@ -1423,6 +1423,18 @@ class NotionDataStore:
         except Exception:
             return False
 
+    async def ensure_db_number_field(self, db_name: str, field_name: str) -> bool:
+        """Add a number field to a Notion DB if it doesn't already exist."""
+        try:
+            r = await self._http.patch(
+                f"{NOTION_API}/databases/{self._db(db_name)}",
+                headers=self._headers_cache,
+                json={"properties": {field_name: {"number": {"format": "number"}}}},
+            )
+            return r.status_code == 200
+        except Exception:
+            return False
+
     async def create_finance_invoice(
         self, provider: str, amount: float, period: str, due_date: str = "", category: str = "Recurrente"
     ) -> tuple[bool, str]:

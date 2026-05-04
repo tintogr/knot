@@ -45,6 +45,9 @@ async def startup_event():
     await load_payment_methods()
     await _ds.ensure_db_select_field("finances", "Estado", ["Impaga", "Pagada"])
     await _ds.ensure_db_text_field("config", "Last Summary Date")
+    await _ds.ensure_db_number_field("config", "Latitude")
+    await _ds.ensure_db_number_field("config", "Longitude")
+    await _ds.ensure_db_text_field("config", "City")
     asyncio.create_task(_run_once_migrations())
     asyncio.create_task(_cron_loop())
 
