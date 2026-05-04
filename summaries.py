@@ -52,8 +52,8 @@ async def get_weather(days: int = 2) -> dict | None:
             lat = user_prefs.get("saved_lat")
             lon = user_prefs.get("saved_lon")
         if lat is None or lon is None:
-            print(f"[weather] skipped: lat/lon missing (source={current_location.get('source')})")
-            return None
+            lat, lon = -38.9516, -68.0591  # Neuquén como fallback
+            print(f"[weather] using hardcoded Neuquén coords (source={current_location.get('source')})")
 
         # Cache check: si tenemos data fresca para coords aprox iguales, usarla
         cache_key = f"{round(lat, 2)},{round(lon, 2)}"
