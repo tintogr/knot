@@ -304,8 +304,9 @@ async def get_important_emails() -> str | None:
                 return None
             mail_lines = []
             for msg in messages[:20]:
+                msg_id = msg["id"]
                 msg_r = await http.get(
-                    f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg['id']}",
+                    f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}",
                     headers=headers,
                     params={"format": "metadata", "metadataHeaders": ["Subject", "From", "Date"]}
                 )
@@ -316,19 +317,24 @@ async def get_important_emails() -> str | None:
                 snippet = msg_meta.get("snippet", "")[:200]
                 subject = hdrs.get("Subject", "")
                 sender = hdrs.get("From", "")
+                gmail_link = f"https://mail.google.com/mail/u/0/#all/{msg_id}"
                 if subject or snippet:
-                    mail_lines.append(f"De: {sender}\nAsunto: {subject}\nPreview: {snippet}")
+                    mail_lines.append(f"De: {sender}\nAsunto: {subject}\nPreview: {snippet}\nLink: {gmail_link}")
             if not mail_lines:
                 return None
             mail_text = "\n---\n".join(mail_lines)
             resp = await claude_create(
-                model="claude-haiku-4-5-20251001", max_tokens=350,
+                model="claude-haiku-4-5-20251001", max_tokens=500,
                 system="""Sos Knot. Revisas la bandeja de entrada del usuario.
-Identifica SOLO los emails que requieren atención o son relevantes: turnos médicos, mensajes de personas conocidas que esperan respuesta, notificaciones importantes de cuentas/servicios no financieros, alertas urgentes.
-Ignorá: newsletters, notificaciones automáticas de apps, publicidad, confirmaciones sin acción requerida.
-Para cada email relevante, devolvé UNA línea con este formato exacto:
+Incluí un email si cumple CUALQUIERA de estas condiciones: lo envió una persona real (no un sistema automático), requiere respuesta o acción, menciona un turno, reunión o fecha, es sobre un proyecto o trabajo en curso, es una consulta, pedido o pregunta directa.
+Ignorá: newsletters, notificaciones automáticas de apps, publicidad, confirmaciones de compra sin acción, alertas de sistemas.
+Para cada email relevante, devolvé DOS líneas con este formato exacto:
 - *Asunto* (De: nombre corto): resumen de 1 oración de qué dice o qué acción requiere.
-Ejemplo: - *mueble juani* (De: Martín): pregunta si podés pasar a buscarlo esta tarde.
+  LINK_DEL_EMAIL
+Donde LINK_DEL_EMAIL es el valor del campo "Link:" del email, copiado exactamente.
+Ejemplo:
+- *mueble juani* (De: Martín): pregunta si podés pasar a buscarlo esta tarde.
+  https://mail.google.com/mail/u/0/#all/18f3a2b1c4d5e6f7
 Máximo 6 emails. Si no hay nada relevante respondé exactamente: NADA""",
                 messages=[{"role": "user", "content": mail_text}]
             )
