@@ -3,6 +3,8 @@ import json
 import asyncio
 import base64
 import time
+import hmac
+import hashlib
 import httpx
 from datetime import date, datetime, timedelta, timezone
 from calendar import monthrange
@@ -74,6 +76,15 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     dlon = radians(lon2 - lon1)
     a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
     return R * 2 * atan2(sqrt(a), sqrt(1-a))
+
+def _allowed_phones() -> set[str]:
+    """Números de WhatsApp autorizados a usar el bot."""
+    phones = {MY_NUMBER}
+    extra = os.environ.get("ALLOWED_PHONES", "")
+    if extra:
+        phones.update(p.strip() for p in extra.split(",") if p.strip())
+    return phones
+
 
 def get_current_location() -> tuple[float, float]:
     """Devuelve lat, lon actual (dinamica si hay OwnTracks, sino default)."""
@@ -260,6 +271,113 @@ def _is_likely_closed_hours(lat: float, lon: float) -> bool:
     return h >= 20 or h < 7
 
 
+# Mapeo de tipos Google Places → tags OSM para Overpass
+_OVERPASS_OSM_MAP: dict[str, list[tuple[str, str]]] = {
+    "supermarket":       [("shop", "supermarket")],
+    "convenience":       [("shop", "convenience")],
+    "bakery":            [("shop", "bakery")],
+    "greengrocer":       [("shop", "greengrocer")],
+    "farm":              [("shop", "farm")],
+    "pharmacy":          [("amenity", "pharmacy")],
+    "drugstore":         [("amenity", "pharmacy")],
+    "hardware_store":    [("shop", "hardware")],
+    "pet_store":         [("shop", "pet")],
+    "clothing_store":    [("shop", "clothes")],
+    "book_store":        [("shop", "books")],
+    "electronics_store": [("shop", "electronics")],
+    "furniture_store":   [("shop", "furniture")],
+    "liquor_store":      [("shop", "alcohol")],
+    "florist":           [("shop", "florist")],
+    "gym":               [("leisure", "fitness_centre")],
+    "restaurant":        [("amenity", "restaurant")],
+    "cafe":              [("amenity", "cafe")],
+    "bar":               [("amenity", "bar")],
+    "bank":              [("amenity", "bank")],
+    "atm":               [("amenity", "atm")],
+    "gas_station":       [("amenity", "fuel")],
+}
+
+OVERPASS_FALLBACK_THRESHOLD = 5
+
+
+async def search_overpass(lat: float, lon: float, radius: int = 500, shop_types: list = None, name_filter: str = None) -> list[dict]:
+    """Busca comercios via OpenStreetMap/Overpass API. Completamente gratis, sin API key."""
+    try:
+        parts = []
+        if name_filter:
+            safe = name_filter.replace('"', "").replace("'", "")
+            for kind in ("node", "way"):
+                parts.append(f'{kind}["name"~"{safe}",i](around:{radius},{lat},{lon});')
+        else:
+            osm_tags: list[tuple[str, str]] = []
+            for st in (shop_types or ["supermarket"]):
+                osm_tags.extend(_OVERPASS_OSM_MAP.get(st, [("shop", st)]))
+            seen: set[tuple[str, str]] = set()
+            for key, val in osm_tags:
+                if (key, val) not in seen:
+                    seen.add((key, val))
+                    parts.append(f'node["{key}"="{val}"](around:{radius},{lat},{lon});')
+
+        if not parts:
+            return []
+
+        query = f"[out:json][timeout:10];({''.join(parts)});out center;"
+        async with httpx.AsyncClient(timeout=12) as http:
+            r = await http.post("https://overpass-api.de/api/interpreter", data={"data": query})
+            if r.status_code != 200:
+                print(f"[Overpass] Error {r.status_code}: {r.text[:200]}")
+                return []
+
+        shops = []
+        for el in r.json().get("elements", []):
+            elat = el.get("lat") or el.get("center", {}).get("lat")
+            elon = el.get("lon") or el.get("center", {}).get("lon")
+            if elat is None or elon is None:
+                continue
+            tags = el.get("tags", {})
+            name = tags.get("name", "")
+            if not name:
+                continue
+            dist_m = round(haversine_km(lat, lon, elat, elon) * 1000)
+            addr_parts = [tags.get("addr:street", ""), tags.get("addr:housenumber", ""), tags.get("addr:city", "")]
+            address = " ".join(p for p in addr_parts if p)
+            osm_type = tags.get("shop") or tags.get("amenity") or tags.get("leisure") or ""
+            shops.append({
+                "name": name,
+                "type": osm_type,
+                "distance_m": dist_m,
+                "lat": elat,
+                "lon": elon,
+                "address": address,
+                "place_id": "",
+                "maps_link": f"https://www.google.com/maps/search/?api=1&query={elat},{elon}",
+                "osm_opening_hours": tags.get("opening_hours"),
+            })
+
+        shops.sort(key=lambda x: x["distance_m"])
+        return shops
+
+    except Exception as e:
+        print(f"[Overpass] Error buscando comercios: {e}")
+        return []
+
+
+async def search_nearby_shops_hybrid(lat: float, lon: float, radius: int = 500, shop_types: list = None, name_filter: str = None) -> list[dict]:
+    """Busca comercios: Overpass (gratis) primero, Google Places como fallback si < 5 resultados."""
+    results = await search_overpass(lat, lon, radius, shop_types, name_filter)
+    if len(results) >= OVERPASS_FALLBACK_THRESHOLD:
+        return results
+    gplaces = await search_nearby_shops(lat, lon, radius, shop_types, name_filter)
+    if not results:
+        return gplaces
+    existing = {r["name"].lower() for r in results}
+    for g in gplaces:
+        if g["name"].lower() not in existing:
+            results.append(g)
+    results.sort(key=lambda x: x["distance_m"])
+    return results
+
+
 async def search_nearby_shops(lat: float, lon: float, radius: int = 500, shop_types: list = None, name_filter: str = None) -> list[dict]:
     """Busca comercios cercanos usando Places API v1 con field mask Basic Data (gratis).
 
@@ -426,7 +544,7 @@ async def check_shopping_proximity():
         likely_closed = _is_likely_closed_hours(lat, lon)
         for store_type, item_names in by_store.items():
             osm_types = store_type_map.get(store_type, ["supermarket"])
-            shops = await search_nearby_shops(lat, lon, shop_types=osm_types)
+            shops = await search_nearby_shops_hybrid(lat, lon, shop_types=osm_types)
             if shops:
                 return {
                     "store_type": store_type,
@@ -2700,7 +2818,7 @@ La idea es que el usuario descubra capacidades de Knot a medida que las necesita
             lat, lon = get_current_location()
             nombre = t_input.get("nombre", "")
             radio = t_input.get("radio_metros", 1000)
-            shops = await search_nearby_shops(lat, lon, radius=radio, name_filter=nombre)
+            shops = await search_nearby_shops_hybrid(lat, lon, radius=radio, name_filter=nombre)
             if shops:
                 lines = []
                 for s in shops[:5]:
@@ -2720,7 +2838,7 @@ La idea es que el usuario descubra capacidades de Knot a medida que las necesita
             if not place_id and nombre:
                 # Si no tenemos place_id, lo buscamos primero
                 lat, lon = get_current_location()
-                shops = await search_nearby_shops(lat, lon, radius=2000, name_filter=nombre)
+                shops = await search_nearby_shops_hybrid(lat, lon, radius=2000, name_filter=nombre)
                 if shops:
                     place_id = shops[0].get("place_id", "")
                     nombre = shops[0].get("name", nombre)
@@ -5389,11 +5507,22 @@ async def enqueue_message(message: dict):
 
 @app.post("/webhook")
 async def webhook(request: Request, background_tasks: BackgroundTasks):
-    body = await request.json()
+    raw = await request.body()
+    app_secret = os.environ.get("WHATSAPP_APP_SECRET", "")
+    if app_secret:
+        sig_header = request.headers.get("X-Hub-Signature-256", "")
+        expected = "sha256=" + hmac.new(app_secret.encode(), raw, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig_header, expected):
+            return {"ok": False, "error": "invalid signature"}
     try:
+        body = json.loads(raw)
         messages = body["entry"][0]["changes"][0]["value"].get("messages")
         if messages:
-            background_tasks.add_task(enqueue_message, messages[0])
+            msg = messages[0]
+            sender = msg.get("from", "")
+            if sender and sender not in _allowed_phones():
+                return {"ok": True}
+            background_tasks.add_task(enqueue_message, msg)
     except Exception:
         pass
     return {"ok": True}
@@ -6075,7 +6204,12 @@ async def _cron_loop():
 
 # ── CRON JOB ───────────────────────────────────────────────────────────────────
 @app.get("/cron")
-async def cron_job():
+async def cron_job(request: Request):
+    cron_secret = os.environ.get("CRON_SECRET", "")
+    if cron_secret:
+        token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+        if not hmac.compare_digest(token, cron_secret):
+            return {"ok": False, "error": "unauthorized"}
     global _cron_job_running
     if _cron_job_running:
         return {"ok": False, "reason": "already running"}
@@ -6399,6 +6533,154 @@ async def _run_once_migrations():
         print(f"[Migration] Error: {e}")
 
 
+_OSM_DAY = {"Mo": 0, "Tu": 1, "We": 2, "Th": 3, "Fr": 4, "Sa": 5, "Su": 6}
+
+def _parse_osm_hours(raw: str) -> dict | None:
+    """Parsea opening_hours de OSM a {str(weekday): [open, close] | None}.
+
+    Soporta: '24/7', 'Mo-Fr 09:00-20:00; Sa 09:00-13:00', 'off'.
+    Retorna None si el formato no es reconocible.
+    """
+    if not raw:
+        return None
+    raw = raw.strip()
+    if raw == "24/7":
+        return {str(d): ["00:00", "24:00"] for d in range(7)}
+
+    result: dict[str, list | None] = {}
+    for rule in raw.split(";"):
+        rule = rule.strip()
+        if not rule:
+            continue
+        parts = rule.split(" ", 1)
+        day_part = parts[0]
+        time_part = parts[1].strip() if len(parts) > 1 else "off"
+
+        # Expandir rango de días: "Mo-Fr" → [0,1,2,3,4]
+        days = []
+        for seg in day_part.split(","):
+            seg = seg.strip()
+            if "-" in seg:
+                a, b = seg.split("-", 1)
+                d1, d2 = _OSM_DAY.get(a.strip()), _OSM_DAY.get(b.strip())
+                if d1 is not None and d2 is not None:
+                    days.extend(range(d1, d2 + 1))
+            elif seg in _OSM_DAY:
+                days.append(_OSM_DAY[seg])
+
+        if not days:
+            return None  # Formato desconocido, no intentar parsear más
+
+        if time_part == "off":
+            for d in days:
+                result[str(d)] = None
+        else:
+            times = time_part.split("-", 1)
+            if len(times) == 2:
+                for d in days:
+                    result[str(d)] = [times[0].strip(), times[1].strip()]
+
+    return result if result else None
+
+
+def _parse_gplaces_hours(weekly: list) -> dict | None:
+    """Parsea regularOpeningHours.weekdayDescriptions de Google Places.
+
+    Formato de entrada: ['Monday: 9:00 AM – 6:00 PM', 'Tuesday: Closed', ...]
+    """
+    if not weekly:
+        return None
+    day_names = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+
+    def to24(t: str) -> str:
+        t = t.strip()
+        try:
+            from datetime import datetime as _dt
+            return _dt.strptime(t, "%I:%M %p").strftime("%H:%M")
+        except Exception:
+            return t
+
+    result: dict[str, list | None] = {}
+    for line in weekly:
+        if ":" not in line:
+            continue
+        day_str, rest = line.split(":", 1)
+        day_idx = next((i for i, n in enumerate(day_names) if n == day_str.strip().lower()), None)
+        if day_idx is None:
+            continue
+        rest = rest.strip()
+        if rest.lower() == "closed":
+            result[str(day_idx)] = None
+        else:
+            # "9:00 AM – 6:00 PM" (–  puede ser em dash o guión)
+            for sep in [" – ", " - ", "–", "-"]:
+                if sep in rest:
+                    open_t, close_t = rest.split(sep, 1)
+                    result[str(day_idx)] = [to24(open_t), to24(close_t)]
+                    break
+
+    return result if result else None
+
+
+def _is_shop_open_now(hours_json: str) -> bool | None:
+    """Dado el JSON de horarios guardado, devuelve True/False/None.
+
+    None significa que no hay info suficiente → no filtrar.
+    """
+    if not hours_json:
+        return None
+    try:
+        hours = json.loads(hours_json)
+    except Exception:
+        return None
+    now = now_argentina()
+    day_key = str(now.weekday())  # 0=lunes
+    day_hours = hours.get(day_key)
+    if day_hours is None and day_key not in hours:
+        return None  # Día sin info
+    if day_hours is None:
+        return False  # Explícitamente cerrado
+    open_str, close_str = day_hours
+    try:
+        open_h, open_m = map(int, open_str.split(":"))
+        close_h, close_m = map(int, close_str.split(":"))
+        now_mins = now.hour * 60 + now.minute
+        open_mins = open_h * 60 + open_m
+        close_mins = close_h * 60 + close_m
+        if close_mins == 24 * 60:
+            close_mins = 23 * 60 + 59
+        return open_mins <= now_mins <= close_mins
+    except Exception:
+        return None
+
+
+async def _fetch_shop_opening_hours(shop_name: str, lat: float, lon: float, place_id: str = "") -> str | None:
+    """Consulta horarios de un comercio una única vez. Intenta Overpass primero, luego Google Places.
+
+    Retorna JSON string listo para guardar en Notion, o None si no hay datos.
+    """
+    # 1. Buscar en OSM
+    results = await search_overpass(lat, lon, radius=500, name_filter=shop_name)
+    for r in results[:3]:
+        osm_raw = r.get("osm_opening_hours")
+        if osm_raw:
+            parsed = _parse_osm_hours(osm_raw)
+            if parsed:
+                print(f"[Hours] Horarios de OSM para '{shop_name}': {osm_raw}")
+                return json.dumps(parsed)
+
+    # 2. Fallback a Google Places (una sola vez)
+    if place_id:
+        gp = await get_place_opening_hours(place_id)
+        if gp and gp.get("weekly"):
+            parsed = _parse_gplaces_hours(gp["weekly"])
+            if parsed:
+                print(f"[Hours] Horarios de Google Places para '{shop_name}'")
+                return json.dumps(parsed)
+
+    return None
+
+
 async def load_geo_reminders():
     """Carga geo-reminders activos de Notion a memoria."""
     global geo_reminders_cache
@@ -6409,6 +6691,7 @@ async def load_geo_reminders():
                 "page_id": r.id, "name": r.name, "type": r.reminder_type,
                 "shop_name": r.shop_name or "", "lat": r.lat, "lon": r.lon,
                 "radius": r.radius, "recurrent": r.recurrent,
+                "opening_hours": r.opening_hours,
             }
             for r in items
         ]
@@ -6417,17 +6700,25 @@ async def load_geo_reminders():
         print(f"[GeoReminders] Error cargando: {e}")
 
 async def create_geo_reminder(description: str, rtype: str, lat: float = None, lon: float = None,
-                               shop_name: str = None, radius: int = 20, recurrent: bool = False) -> tuple[bool, str]:
+                               shop_name: str = None, radius: int = 20, recurrent: bool = False,
+                               place_id: str = "") -> tuple[bool, str]:
     """Crea un geo-reminder en Notion y lo agrega al cache en memoria."""
+    opening_hours_json = None
+    if rtype == "shop" and shop_name:
+        cur_lat, cur_lon = get_current_location()
+        if cur_lat and cur_lon:
+            opening_hours_json = await _fetch_shop_opening_hours(shop_name, cur_lat, cur_lon, place_id)
     try:
         item = await _ds.create_geo_reminder({
             "name": description, "type": rtype, "lat": lat, "lon": lon,
             "shop_name": shop_name, "radius": radius, "recurrent": recurrent,
+            "opening_hours": opening_hours_json,
         })
         geo_reminders_cache.append({
             "page_id": item.id, "name": description, "type": rtype,
             "shop_name": shop_name or "", "lat": lat, "lon": lon,
             "radius": radius, "recurrent": recurrent,
+            "opening_hours": opening_hours_json,
         })
         return True, item.id
     except Exception as e:
@@ -6455,8 +6746,12 @@ async def check_geo_reminders(lat: float, lon: float) -> list[dict]:
         elif reminder["type"] == "shop":
             shop_name = reminder.get("shop_name", "")
             if shop_name:
+                # Si tenemos horarios guardados y está cerrado, skip silencioso
+                is_open = _is_shop_open_now(reminder.get("opening_hours"))
+                if is_open is False:
+                    continue
                 trigger_radius = reminder.get("radius", 20)
-                shops = await search_nearby_shops(lat, lon, radius=500, name_filter=shop_name)
+                shops = await search_nearby_shops_hybrid(lat, lon, radius=500, name_filter=shop_name)
                 close_shops = [s for s in shops if s["distance_m"] <= trigger_radius]
                 if close_shops:
                     reminder["_matched_shops"] = close_shops[:3]
@@ -6479,6 +6774,12 @@ async def save_location_to_notion(lat: float, lon: float, loc_name: str = None):
 @app.post("/location")
 async def receive_location(request: Request):
     """Recibe updates de OwnTracks (o cualquier fuente de ubicacion)."""
+    location_secret = os.environ.get("LOCATION_SECRET", "")
+    if location_secret:
+        token = (request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+                 or request.query_params.get("token", ""))
+        if not hmac.compare_digest(token, location_secret):
+            return {"ok": False, "error": "unauthorized"}
     try:
         body = await request.json()
         msg_type = body.get("_type", "location")
@@ -6616,6 +6917,11 @@ async def receive_location(request: Request):
 @app.post("/location/places")
 async def manage_known_places(request: Request):
     """Agregar/listar lugares conocidos. POST con {action: add/list/remove, name, lat, lon, radius}."""
+    location_secret = os.environ.get("LOCATION_SECRET", "")
+    if location_secret:
+        token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+        if not hmac.compare_digest(token, location_secret):
+            return {"ok": False, "error": "unauthorized"}
     try:
         body = await request.json()
         action = body.get("action", "list")
