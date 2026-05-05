@@ -144,6 +144,7 @@ except ImportError:
         radius: int = 300
         recurrent: bool = False
         active: bool = True
+        opening_hours: str = None
 
     @dataclass
     class UserConfig:
@@ -1924,6 +1925,7 @@ class NotionDataStore:
             radius=int(_get_number(props, "Radius") or 300),
             recurrent=_get_checkbox(props, "Recurrent"),
             active=_get_checkbox(props, "Active"),
+            opening_hours=_get_text(props, "Opening Hours") or None,
         )
 
     async def get_active_geo_reminders(self) -> list[GeoReminder]:
@@ -1953,6 +1955,8 @@ class NotionDataStore:
             props["Longitude"] = {"number": data["lon"]}
         if data.get("shop_name"):
             props["Shop Name"] = {"rich_text": [{"text": {"content": data["shop_name"]}}]}
+        if data.get("opening_hours"):
+            props["Opening Hours"] = {"rich_text": [{"text": {"content": data["opening_hours"]}}]}
 
         page = await self._create_page("geo_reminders", props)
         return self._parse_geo_reminder(page)
