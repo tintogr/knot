@@ -78,12 +78,11 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return R * 2 * atan2(sqrt(a), sqrt(1-a))
 
 def _allowed_phones() -> set[str]:
-    """Números de WhatsApp autorizados a usar el bot."""
-    phones = {MY_NUMBER}
+    """Números de WhatsApp autorizados. Vacío = sin restricción."""
     extra = os.environ.get("ALLOWED_PHONES", "")
-    if extra:
-        phones.update(p.strip() for p in extra.split(",") if p.strip())
-    return phones
+    if not extra:
+        return set()
+    return {p.strip() for p in extra.split(",") if p.strip()}
 
 
 def get_current_location() -> tuple[float, float]:
@@ -5521,8 +5520,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             msg = messages[0]
             sender = msg.get("from", "")
             allowed = _allowed_phones()
-            print(f"WEBHOOK sender={sender!r} allowed={allowed!r} match={sender in allowed}", flush=True)
-            if sender and sender not in allowed:
+            if allowed and sender and sender not in allowed:
                 return {"ok": True}
             background_tasks.add_task(enqueue_message, msg)
     except Exception:
