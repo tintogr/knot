@@ -75,7 +75,7 @@ async def get_weather(days: int = 2) -> dict | None:
                 }
             )
             if r.status_code != 200:
-                # Si hay rate limit (429) y tenemos cache aunque vencido, usarlo igual
+                print(f"[weather] open-meteo error {r.status_code}: {r.text[:200]}")
                 if _weather_cache["data"] and _weather_cache["key"] == cache_key:
                     return _weather_cache["data"]
                 return None
