@@ -1,4 +1,5 @@
 import json
+import os
 import httpx
 from datetime import datetime, timedelta
 
@@ -63,17 +64,19 @@ async def get_weather(days: int = 2) -> dict | None:
                 return _weather_cache["data"]
 
 
+        openmeteo_key = os.environ.get("OPENMETEO_API_KEY", "")
+        base_url = "https://customer-api.open-meteo.com/v1/forecast" if openmeteo_key else "https://api.open-meteo.com/v1/forecast"
+        params = {
+            "latitude": lat, "longitude": lon,
+            "current": "temperature_2m,apparent_temperature,precipitation,windspeed_10m,weathercode",
+            "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,windspeed_10m_max,weathercode",
+            "timezone": "America/Argentina/Buenos_Aires",
+            "forecast_days": max(days, 7)
+        }
+        if openmeteo_key:
+            params["apikey"] = openmeteo_key
         async with httpx.AsyncClient(timeout=10) as http:
-            r = await http.get(
-                "https://api.open-meteo.com/v1/forecast",
-                params={
-                    "latitude": lat, "longitude": lon,
-                    "current": "temperature_2m,apparent_temperature,precipitation,windspeed_10m,weathercode",
-                    "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,windspeed_10m_max,weathercode",
-                    "timezone": "America/Argentina/Buenos_Aires",
-                    "forecast_days": max(days, 7)
-                }
-            )
+            r = await http.get(base_url, params=params)
             if r.status_code != 200:
                 print(f"[weather] open-meteo error {r.status_code}: {r.text[:200]}")
                 if _weather_cache["data"] and _weather_cache["key"] == cache_key:
