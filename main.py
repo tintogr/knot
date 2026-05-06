@@ -5520,7 +5520,9 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         if messages:
             msg = messages[0]
             sender = msg.get("from", "")
-            if sender and sender not in _allowed_phones():
+            allowed = _allowed_phones()
+            print(f"WEBHOOK sender={sender!r} allowed={allowed!r} match={sender in allowed}", flush=True)
+            if sender and sender not in allowed:
                 return {"ok": True}
             background_tasks.add_task(enqueue_message, msg)
     except Exception:
