@@ -43,6 +43,69 @@ def wind_description(kmh: float) -> str:
 _weather_cache: dict = {"data": None, "fetched_at": None, "key": None}
 _WEATHER_CACHE_TTL_MIN = 30
 
+_WTTR_EMOJI = {
+    "sunny": "☀️", "clear": "☀️", "partly cloudy": "⛅", "cloudy": "☁️",
+    "overcast": "☁️", "mist": "🌫️", "fog": "🌫️", "rain": "🌧️",
+    "drizzle": "🌦️", "snow": "❄️", "sleet": "🌨️", "thunder": "⛈️", "blizzard": "🌨️",
+}
+
+async def _get_weather_wttr(http: httpx.AsyncClient, lat: float, lon: float) -> dict | None:
+    try:
+        r = await http.get(f"https://wttr.in/{lat},{lon}?format=j1&lang=es")
+        if r.status_code != 200:
+            print(f"[weather] wttr.in error {r.status_code}")
+            return None
+        data = r.json()
+        cur = data["current_condition"][0]
+        hoy = data["weather"][0]
+        man = data["weather"][1] if len(data["weather"]) > 1 else hoy
+        def _emoji(desc: str) -> str:
+            dl = desc.lower()
+            for k, v in _WTTR_EMOJI.items():
+                if k in dl:
+                    return v
+            return "🌡️"
+        desc = cur["weatherDesc"][0]["value"]
+        desc_man = man["hourly"][4]["weatherDesc"][0]["value"] if man.get("hourly") else desc
+        viento = round(float(cur["windspeedKmph"]))
+        viento_man = round(float(man.get("hourly", [{}])[4].get("windspeedKmph", viento)) if man.get("hourly") else viento)
+        forecast_days = []
+        for w in data["weather"][:7]:
+            fd = w["hourly"][4]["weatherDesc"][0]["value"] if w.get("hourly") else ""
+            forecast_days.append({
+                "date": w.get("date", ""),
+                "max": int(w["maxtempC"]),
+                "min": int(w["mintempC"]),
+                "lluvia": float(w["hourly"][4].get("precipMM", 0)) if w.get("hourly") else 0,
+                "desc": fd,
+                "emoji": _emoji(fd),
+            })
+        return {
+            "temp":           int(cur["temp_C"]),
+            "sensacion":      int(cur["FeelsLikeC"]),
+            "lluvia":         float(cur.get("precipMM", 0)),
+            "viento":         viento,
+            "desc":           desc,
+            "emoji":          _emoji(desc),
+            "wind_desc":      wind_description(viento),
+            "hoy_max":        int(hoy["maxtempC"]),
+            "hoy_min":        int(hoy["mintempC"]),
+            "hoy_lluvia":     float(hoy["hourly"][4].get("precipMM", 0)) if hoy.get("hourly") else 0,
+            "hoy_desc":       desc,
+            "hoy_emoji":      _emoji(desc),
+            "manana_max":     int(man["maxtempC"]),
+            "manana_min":     int(man["mintempC"]),
+            "manana_lluvia":  float(man["hourly"][4].get("precipMM", 0)) if man.get("hourly") else 0,
+            "manana_viento":  viento_man,
+            "manana_desc":    desc_man,
+            "manana_emoji":   _emoji(desc_man),
+            "manana_wind_desc": wind_description(viento_man),
+            "forecast_days":  forecast_days,
+        }
+    except Exception as e:
+        print(f"[weather] wttr.in parse error: {e}")
+        return None
+
 
 async def get_weather(days: int = 2) -> dict | None:
     try:
@@ -81,7 +144,13 @@ async def get_weather(days: int = 2) -> dict | None:
                 print(f"[weather] open-meteo error {r.status_code}: {r.text[:200]}")
                 if _weather_cache["data"] and _weather_cache["key"] == cache_key:
                     return _weather_cache["data"]
-                return None
+                # Fallback a wttr.in
+                result = await _get_weather_wttr(http, lat, lon)
+                if result:
+                    _weather_cache["data"] = result
+                    _weather_cache["fetched_at"] = datetime.now()
+                    _weather_cache["key"] = cache_key
+                return result
             data = r.json()
             c = data["current"]
             d = data["daily"]
