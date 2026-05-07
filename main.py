@@ -321,10 +321,18 @@ async def search_overpass(lat: float, lon: float, radius: int = 500, shop_types:
             return []
 
         query = f"[out:json][timeout:10];({''.join(parts)});out center;"
+        _overpass_endpoints = [
+            "https://overpass-api.de/api/interpreter",
+            "https://overpass.kumi.systems/api/interpreter",
+        ]
         async with httpx.AsyncClient(timeout=12) as http:
-            r = await http.post("https://overpass-api.de/api/interpreter", data={"data": query})
-            if r.status_code != 200:
-                print(f"[Overpass] Error {r.status_code}: {r.text[:200]}")
+            r = None
+            for _ep in _overpass_endpoints:
+                r = await http.post(_ep, data={"data": query})
+                if r.status_code == 200:
+                    break
+                print(f"[Overpass] Error {r.status_code} en {_ep}: {r.text[:100]}")
+            if not r or r.status_code != 200:
                 return []
 
         shops = []
@@ -437,7 +445,7 @@ async def search_nearby_shops(lat: float, lon: float, radius: int = 500, shop_ty
                 )
 
             if r.status_code != 200:
-                print(f"[Places] Error {r.status_code}: {r.text[:200]}")
+                print(f"[Places] Error {r.status_code}: {r.text[:500]}")
                 return []
 
             places_list = r.json().get("places", [])
