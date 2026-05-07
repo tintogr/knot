@@ -3179,6 +3179,7 @@ Tu tarea: gestionar eventos del calendario del usuario.
 - Si falta info esencial -> pregunta de forma natural y breve.
 - Podes consultar el calendario primero si necesitas verificar algo.
 - Si el usuario manda una imagen (flyer, screenshot de turno, invitacion), extrae la info y crea el evento.
+- Si el usuario manda una imagen con una lista de horarios/clases/turnos y pide corregir o actualizar eventos existentes, los horarios de la IMAGEN son los nuevos horarios correctos. No preguntes cuáles son los nuevos horarios — ya están en la imagen. Extraélos directamente y edita los eventos correspondientes.
 REFERENCIAS RELATIVAS A OTROS EVENTOS ("después de funcional", "antes del trabajo", "después de la reunión"): si el usuario no da una fecha explícita pero hace referencia a otro evento, primero consultá el calendario para encontrar la próxima ocurrencia de ese evento y calculá la fecha/hora en base a eso. NUNCA asumas "mañana" ni ninguna fecha sin verificar.
 MADRUGADA (00:00-05:00): si el usuario dice "mañana" o "hoy" en ese horario, preguntale si se refiere al día de hoy después de dormir o al día siguiente del calendario — porque a esa hora la gente suele hablar del día que viene subjetivamente.
 IMPORTANTE: No inventes datos. Usa zona horaria Argentina (UTC-3).
