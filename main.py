@@ -232,6 +232,11 @@ async def extract_coords_from_maps_url(url: str) -> tuple[float, float] | None:
 _places_daily_calls: dict = {"date": None, "count": 0}
 PLACES_DAILY_CAP = 300
 
+# Cap separado para horarios (unica operacion que cuesta dinero ~$0.017/call)
+_hours_daily: dict = {"date": None, "count": 0}
+HOURS_DAILY_CAP = 10
+_hours_cache: dict = {}  # place_id -> {"data": ..., "fetched_at": datetime}
+
 # Field masks: solo cobran lo que pedimos
 _FIELDS_BASIC = "places.displayName,places.location,places.id,places.primaryType,places.formattedAddress"
 _FIELDS_HOURS = "places.id,places.currentOpeningHours.openNow,places.regularOpeningHours.weekdayDescriptions"
@@ -484,14 +489,27 @@ async def search_nearby_shops(lat: float, lon: float, radius: int = 500, shop_ty
 async def get_place_opening_hours(place_id: str) -> dict | None:
     """Consulta horarios de un Place especifico. SOLO usar on-demand cuando el usuario lo pide.
 
-    Cuesta ~$0.003 por call (Contact Data). Nunca llamar en loops automaticos.
+    Cuesta ~$0.017 por call. Cap: 10 llamadas/dia. Cache 24h por place_id.
     Devuelve {"open_now": bool, "weekly": [...]} o None.
     """
     api_key = os.environ.get("GOOGLE_PLACES_KEY", "")
     if not api_key or not place_id:
         return None
-    if not _places_budget_check():
-        return None
+
+    # Cache 24h por place_id
+    cached = _hours_cache.get(place_id)
+    if cached and (datetime.now() - cached["fetched_at"]).total_seconds() < 86400:
+        return cached["data"]
+
+    # Cap diario para horarios
+    today = now_argentina().date().isoformat()
+    if _hours_daily["date"] != today:
+        _hours_daily["date"] = today
+        _hours_daily["count"] = 0
+    if _hours_daily["count"] >= HOURS_DAILY_CAP:
+        print(f"[Places/Hours] CAP DIARIO ALCANZADO ({HOURS_DAILY_CAP} calls). Bloqueando hasta mañana.")
+        return cached["data"] if cached else None
+    _hours_daily["count"] += 1
     headers = {
         "X-Goog-Api-Key": api_key,
         "X-Goog-FieldMask": "id,currentOpeningHours.openNow,regularOpeningHours.weekdayDescriptions",
@@ -507,10 +525,12 @@ async def get_place_opening_hours(place_id: str) -> dict | None:
             data = r.json()
             current = data.get("currentOpeningHours", {})
             regular = data.get("regularOpeningHours", {})
-            return {
+            result = {
                 "open_now": current.get("openNow"),
                 "weekly": regular.get("weekdayDescriptions", []),
             }
+            _hours_cache[place_id] = {"data": result, "fetched_at": datetime.now()}
+            return result
     except Exception:
         return None
 
