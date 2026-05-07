@@ -3370,9 +3370,13 @@ EVENTOS RECURRENTES:
                     if update_r.status_code == 200:
                         new_summary = patch_body.get("summary", event_name)
                         last_event_touched[phone] = {"event_id": event_id, "summary": new_summary}
-                        t_result = "Evento '" + event_name + "' actualizado correctamente."
-                        new_time = t_input.get("new_time") or (target_event.get("start", {}).get("dateTime", "")[:16][11:] if "dateTime" in target_event.get("start", {}) else None)
+                        old_time_str = target_event.get("start", {}).get("dateTime", "")[:16][11:] if "dateTime" in target_event.get("start", {}) else ""
+                        new_time = t_input.get("new_time") or old_time_str or None
                         new_date = t_input.get("new_date") or (target_event.get("start", {}).get("dateTime", "")[:10] if "dateTime" in target_event.get("start", {}) else None)
+                        if t_input.get("new_time") and old_time_str and t_input["new_time"] != old_time_str:
+                            t_result = f"Evento '{event_name}' actualizado: {old_time_str} → {t_input['new_time']}."
+                        else:
+                            t_result = f"Evento '{event_name}' actualizado correctamente."
                         if new_time and new_date:
                             eventos_tocados.append({"summary": new_summary, "date": new_date, "time": new_time})
                     else:
@@ -4404,9 +4408,9 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
     if state_type == "ask_payment_method":
         page_id = state.get("page_id")
         name = state.get("name", "gasto")
-        del pending_state[phone]
         t = text.strip().lower()
         if t in ("no", "no se", "no sé", "ns", "skip", "omitir"):
+            del pending_state[phone]
             await send_message(phone, "Dale, sin método de pago.")
             return True
         # Buscar match en payment_methods_cache
@@ -4425,6 +4429,7 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
                 matched = pm
                 break
         if matched:
+            del pending_state[phone]
             try:
                 await _ds.update_expense(page_id, {"payment_method_id": matched.id})
                 asyncio.create_task(_ds.increment_payment_method_uses(matched.id, matched.uses))
@@ -4434,7 +4439,10 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
             except Exception:
                 await send_message(phone, "No pude guardar el método de pago.")
         else:
-            await send_message(phone, f"No reconocí ese método. Probá con: {', '.join((p.name or p.bank or '') for p in payment_methods_cache[:8])}")
+            # No matcheó: mantener estado para que pueda reintentar
+            opts_str = ", ".join((p.name or p.bank or "") for p in payment_methods_cache[:8])
+            await send_message(phone, f"No reconocí ese método. Probá con: {opts_str}")
+            return True
 
         # Si el mensaje contiene MAS que solo el método (ej: corrección de emoji o categoría),
         # procesar el resto via corregir_gasto
