@@ -5769,6 +5769,19 @@ async def process_single_item(phone: str, item: dict):
                 if handled:
                     return
 
+        # Botones interactivos con ID conocido sin pending_state activo → expirados, no clasificar
+        _KNOWN_BUTTON_IDS = {
+            "rem_15", "rem_30", "rem_60", "rem_1d", "rem_no",
+            "snooze_5", "snooze_15", "snooze_no",
+            "confirm_delete_yes", "confirm_delete_no",
+            "recurrence_yes", "recurrence_no",
+            "recipe_save_yes", "recipe_save_no",
+            "payment_yes", "payment_no",
+        }
+        if text.strip() in _KNOWN_BUTTON_IDS:
+            await _reply("Ese botón ya expiró. ¿Qué necesitás?")
+            return
+
         if user_prefs.get("_config_page_id") is None:
             await load_user_config(phone)
 
