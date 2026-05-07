@@ -6233,10 +6233,21 @@ async def _cron_loop():
     await asyncio.sleep(60)  # Espera inicial para que el servidor termine de arrancar
     while True:
         try:
-            await cron_job()
+            await _run_cron_safe()
         except Exception:
             pass
         await asyncio.sleep(60)
+
+async def _run_cron_safe():
+    """Ejecuta el cron interno sin pasar por la capa HTTP/auth."""
+    global _cron_job_running
+    if _cron_job_running:
+        return
+    _cron_job_running = True
+    try:
+        await _cron_job_inner()
+    finally:
+        _cron_job_running = False
 
 # ── CRON JOB ───────────────────────────────────────────────────────────────────
 @app.get("/cron")
@@ -6258,6 +6269,7 @@ async def cron_job(request: Request):
 async def _cron_job_inner():
     await load_user_config(MY_NUMBER)
     now = now_argentina()
+    print(f"[cron] tick {now.strftime('%H:%M:%S')}")
     fired = []
 
     effective_hour   = user_prefs.get("daily_summary_hour")
