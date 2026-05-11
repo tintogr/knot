@@ -4414,21 +4414,34 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
             del pending_state[phone]
             await send_message(phone, "Dale, sin método de pago.")
             return True
-        # Buscar match en payment_methods_cache
-        matched = None
-        for pm in payment_methods_cache:
+        # Buscar match en payment_methods_cache con scoring para desambiguar
+        _MOD_SYNONYMS = {
+            "débito": "debit", "debito": "debit",
+            "crédito": "credit", "credito": "credit",
+            "transferencia": "transfer",
+            "efectivo": "cash",
+            "qr": "qr",
+        }
+        def _pm_score(pm):
+            score = 0
             if pm.last4 and pm.last4 in t:
-                matched = pm
-                break
+                score += 10
             if pm.name and pm.name.lower() in t:
-                matched = pm
-                break
+                score += 8
             if pm.bank and pm.bank.lower() in t:
-                matched = pm
-                break
-            if pm.modality and pm.modality.lower() in t:
-                matched = pm
-                break
+                score += 3
+            if pm.modality:
+                mod_lower = pm.modality.lower()
+                if mod_lower in t:
+                    score += 5
+                for word, mod in _MOD_SYNONYMS.items():
+                    if word in t and mod == mod_lower:
+                        score += 5
+                        break
+            return score
+        scores = [(pm, _pm_score(pm)) for pm in payment_methods_cache]
+        best = max(scores, key=lambda x: x[1], default=(None, 0))
+        matched = best[0] if best[1] >= 3 else None
         if matched:
             del pending_state[phone]
             try:
@@ -5182,8 +5195,12 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
             ctype = card_data.get("type", "").strip()
             if bank:
                 label = f"{bank} {ctype}".strip()
-                pending_state[phone] = {"type": "unknown_card_owner", "last4": last4, "bank": bank, "card_type": ctype, "label": label}
-                await send_message(phone, f"✅ *{label}* (****{last4}). ¿De quién es? (ej: _\"mía\"_, _\"Sofi\"_) o «no» para omitir.")
+                name = f"{label} ****{last4}" if last4 else label
+                page_id = await _ds.create_payment_method(name=name, modality=ctype, bank=bank, last4=last4, owner=None)
+                if page_id:
+                    from notion_datastore import PaymentMethod as _PM
+                    payment_methods_cache.append(_PM(id=page_id, name=name, modality=ctype, bank=bank, last4=last4, owner=None, is_default=False))
+                await send_message(phone, f"✅ Guardé *{label}* (****{last4}) en tus medios de pago.")
         except Exception:
             await send_message(phone, f"No pude interpretar. Podés agregarla con: _\"agregá [banco] [débito/crédito] terminada en {last4}\"_")
         return True

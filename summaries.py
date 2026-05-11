@@ -704,7 +704,21 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                     await _ds.create_factura_task(provider, amount, due_date, period, finance_page_id=page_id)
                     # Trigger #2: proveedor nuevo en Gmail (no estaba en service_providers ni tenía pagos previos)
                     known_providers = (user_prefs.get("service_providers") or {})
-                    is_in_providers = any(provider.lower() == k.lower() or provider.lower() == v.lower() for k, v in known_providers.items())
+                    def _norm(s):
+                        import unicodedata
+                        return ''.join(c for c in unicodedata.normalize('NFD', s.lower()) if unicodedata.category(c) != 'Mn')
+                    pnorm = _norm(provider)
+                    def _providers_overlap(a, b):
+                        """True si a y b comparten palabras significativas o uno contiene al otro."""
+                        if a in b or b in a:
+                            return True
+                        words_a = {w for w in a.split() if len(w) > 3}
+                        words_b = {w for w in b.split() if len(w) > 3}
+                        return bool(words_a & words_b)
+                    is_in_providers = any(
+                        _providers_overlap(pnorm, _norm(k)) or _providers_overlap(pnorm, _norm(v))
+                        for k, v in known_providers.items()
+                    )
                     if not is_in_providers and not historial:
                         queue = user_prefs.setdefault("pending_hints_queue", [])
                         # Evitar duplicados en queue
