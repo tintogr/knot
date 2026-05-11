@@ -4440,7 +4440,14 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
             except Exception:
                 await send_message(phone, "No pude guardar el método de pago.")
         else:
-            # No matcheó: mantener estado para que pueda reintentar
+            # Si el texto parece un nuevo gasto u otra acción, abandonar silenciosamente
+            import re as _re
+            _has_amount = bool(_re.search(r'\d{4,}|\d+\s*(mil|usd|ars|pesos)', t))
+            _many_words = len(t.split()) >= 4
+            if _has_amount or _many_words:
+                del pending_state[phone]
+                return False  # procesar como mensaje nuevo
+            # Solo reintentar si el texto es corto y parece un método de pago
             opts_str = ", ".join((p.name or p.bank or "") for p in payment_methods_cache[:8])
             await send_message(phone, f"No reconocí ese método. Probá con: {opts_str}")
             return True
