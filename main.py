@@ -1309,12 +1309,28 @@ Emoji: elegi el mas especifico segun el contexto real."""
                     seen.add(key)
                     opts.append(pm.name or pm.bank)
             opts_str = ", ".join(opts[:8]) if opts else "Efectivo, BBVA, Mercado Pago, Transferencia"
-            pending_state[phone] = {
-                "type": "ask_payment_method",
-                "page_id": _page_id,
-                "name": _data.get("name", "gasto"),
-            }
-            reply += f"\n\n💳 ¿Con qué pagaste? ({opts_str})"
+            _is_usd = bool(_data.get("value_usd")) or "usd" in (_data.get("name") or "").lower()
+            _new_entry = {"page_id": _page_id, "name": _data.get("name", "gasto"), "is_usd": _is_usd}
+            _existing = pending_state.get(phone, {})
+            if _existing.get("type") == "ask_payment_method":
+                # Acumular en la lista existente en vez de sobreescribir
+                _expenses = _existing.setdefault("expenses", [{"page_id": _existing["page_id"], "name": _existing["name"], "is_usd": _existing.get("is_usd", False)}])
+                _expenses.append(_new_entry)
+                _existing["page_id"] = _page_id
+                _existing["name"] = _data.get("name", "gasto")
+                _existing["is_usd"] = _is_usd
+            else:
+                pending_state[phone] = {
+                    "type": "ask_payment_method",
+                    "page_id": _page_id,
+                    "name": _data.get("name", "gasto"),
+                    "is_usd": _is_usd,
+                    "expenses": [_new_entry],
+                }
+            if _is_usd:
+                reply += f"\n\n💵 ¿Lo pagaste en dólares cash o transferencia?"
+            else:
+                reply += f"\n\n💳 ¿Con qué pagaste? ({opts_str})"
 
     # Known shop detection: si el EGRESO es de un comercio no reconocido, buscar y confirmar
     if len(created_entries) == 1:
@@ -4407,13 +4423,33 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
         return False
 
     if state_type == "ask_payment_method":
-        page_id = state.get("page_id")
-        name = state.get("name", "gasto")
         t = text.strip().lower()
         if t in ("no", "no se", "no sé", "ns", "skip", "omitir"):
             del pending_state[phone]
             await send_message(phone, "Dale, sin método de pago.")
             return True
+
+        # Determinar a qué gasto aplica esta respuesta
+        # Si el usuario menciona un nombre de gasto explícitamente (ej: "las sillas con X"), usar ese
+        _expenses = state.get("expenses") or [{"page_id": state.get("page_id"), "name": state.get("name", "gasto"), "is_usd": state.get("is_usd", False)}]
+        _target = None
+        for _exp in _expenses:
+            _exp_name = (_exp.get("name") or "").lower()
+            if _exp_name and len(_exp_name) > 2 and _exp_name in t:
+                _target = _exp
+                break
+        if _target is None:
+            _target = _expenses[-1]  # default: el más reciente
+        page_id = _target.get("page_id") or state.get("page_id")
+        name = _target.get("name") or state.get("name", "gasto")
+        is_usd = _target.get("is_usd") or state.get("is_usd", False)
+
+        # Para gastos USD: "efectivo" o "cash" → registrar sin método de pago formal
+        if is_usd and any(w in t for w in ("efectivo", "cash", "billete", "dolares", "dólares")):
+            del pending_state[phone]
+            await send_message(phone, f"💵 *{name}* pagado en efectivo USD.")
+            return True
+
         # Buscar match en payment_methods_cache con scoring para desambiguar
         _MOD_SYNONYMS = {
             "débito": "debit", "debito": "debit",
@@ -4443,7 +4479,12 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
         best = max(scores, key=lambda x: x[1], default=(None, 0))
         matched = best[0] if best[1] >= 3 else None
         if matched:
-            del pending_state[phone]
+            # Remover el gasto resuelto de la lista; si quedan más, mantener estado
+            _remaining = [e for e in _expenses if e.get("page_id") != page_id]
+            if _remaining:
+                pending_state[phone] = dict(state, expenses=_remaining, page_id=_remaining[-1]["page_id"], name=_remaining[-1]["name"], is_usd=_remaining[-1].get("is_usd", False))
+            else:
+                del pending_state[phone]
             try:
                 await _ds.update_expense(page_id, {"payment_method_id": matched.id})
                 asyncio.create_task(_ds.increment_payment_method_uses(matched.id, matched.uses))
