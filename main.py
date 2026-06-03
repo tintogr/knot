@@ -5070,8 +5070,18 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
     if state_type == "confirm_factura_paid":
         task_page_id = state.get("task_page_id")
         task_name = state.get("task_name", "la factura")
+        t_lower = text.strip().lower()
+        _affirm_task = t_lower in ("si", "sí", "dale", "ok", "yes", "correcto", "s", "sip")
+        _deny_task   = t_lower in ("no", "nope", "nel", "nah")
+        if not _affirm_task and not _deny_task:
+            import re as _re
+            _has_amount = bool(_re.search(r'\d{4,}|\d+\s*(mil|usd|ars|pesos)', t_lower))
+            _many_words = len(text.strip().split()) >= 4
+            if _has_amount or _many_words:
+                del pending_state[phone]
+                return False
         del pending_state[phone]
-        if text.strip().lower() in ["si", "dale", "ok", "yes", "correcto", "s"]:
+        if _affirm_task:
             ok = await mark_factura_task_paid(task_page_id)
             if ok:
                 await send_message(phone, f"✅ *{task_name}* marcada como pagada en Tasks")
@@ -5087,8 +5097,20 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
         invoice_amount = state.get("invoice_amount")
         paid_amount = state.get("paid_amount")
         remaining = state.get("remaining", [])
+        t_stripped = text.strip()
+        t_lower = t_stripped.lower()
+        _affirm = t_stripped == "mismatch_yes" or t_lower in ("si", "sí", "yes", "dale", "ok", "sip", "claro", "obvio")
+        _deny   = t_stripped == "mismatch_no"  or t_lower in ("no", "nope", "nel", "nah")
+        # Si no es ni confirmación ni negación clara → parece un gasto u otro mensaje nuevo
+        if not _affirm and not _deny:
+            import re as _re
+            _has_amount = bool(_re.search(r'\d{4,}|\d+\s*(mil|usd|ars|pesos)', t_lower))
+            _many_words = len(t_stripped.split()) >= 4
+            if _has_amount or _many_words:
+                del pending_state[phone]
+                return False
         del pending_state[phone]
-        if text.strip() == "mismatch_yes":
+        if _affirm:
             # Pedir nota explicativa y marcar como pagada
             pending_state[phone] = {
                 "type": "factura_mismatch_note",
@@ -5154,10 +5176,18 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
         conf_id     = state.get("conf_id")
         paid_amount = state.get("paid_amount")
         payment_method = state.get("payment_method")
-        del pending_state[phone]
         t_lower = text.strip().lower()
         affirm = t_lower in ("si", "sí", "yes", "dale", "ok", "sip", "claro", "obvio")
         deny   = t_lower in ("no", "nope", "nel", "nah")
+        # Si no es una respuesta clara → probablemente es un gasto nuevo; abandonar y reprocesar
+        if not affirm and not deny:
+            import re as _re
+            _has_amount = bool(_re.search(r'\d{4,}|\d+\s*(mil|usd|ars|pesos)', t_lower))
+            _many_words = len(text.strip().split()) >= 4
+            if _has_amount or _many_words:
+                del pending_state[phone]
+                return False
+        del pending_state[phone]
 
         if situation == "diff_moderate":
             provider_name = state.get("provider_name", "la factura")
