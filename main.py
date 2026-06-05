@@ -1196,19 +1196,28 @@ Emoji: elegi el mas especifico segun el contexto real."""
                         reply += f"\n\n⚠️ La factura de *{impaga.name}* era ${inv_amount:,.0f} pero pagaste ${paid_amount:,.0f}. ¿Fue un pago parcial? (sí/no)"
 
                 elif len(candidatos) > 1:
-                    # Múltiples facturas — pregunta cuál
-                    options = "\n".join(f"• {c.name} (${c.value_ars:,.0f})" for c in candidatos[:3])
-                    conf_id = await _add_invoice_confirmation(
-                        "multiple_invoices", candidatos[0].name,
-                        [c.id for c in candidatos[:3]], page_id, paid_amount, None
-                    )
-                    pending_state[phone] = {
-                        "type": "factura_confirm", "situation": "multiple_invoices",
-                        "conf_id": conf_id,
-                        "candidates": [{"id": c.id, "name": c.name, "amount": c.value_ars} for c in candidatos[:3]],
-                        "paid_amount": paid_amount, "payment_method": payment_method,
-                    }
-                    reply += f"\n\n💡 Tenés varias facturas pendientes:\n{options}\n¿A cuál corresponde este pago?"
+                    # Múltiples facturas — filtrar $0 (entradas corruptas), luego preguntar cuál
+                    valid_candidatos = [c for c in candidatos if (c.value_ars or 0) > 0]
+                    if not valid_candidatos:
+                        valid_candidatos = candidatos  # fallback si todas son $0
+                    if len(valid_candidatos) == 1:
+                        # Después del filtro quedó una sola → marcar directamente
+                        impaga = valid_candidatos[0]
+                        await _auto_mark_invoice_paid(impaga, paid_amount, payment_method)
+                        reply += f"\n\n✅ *{impaga.name}* marcada como pagada."
+                    else:
+                        options = "\n".join(f"• {c.name} (${c.value_ars:,.0f})" for c in valid_candidatos[:3])
+                        conf_id = await _add_invoice_confirmation(
+                            "multiple_invoices", valid_candidatos[0].name,
+                            [c.id for c in valid_candidatos[:3]], page_id, paid_amount, None
+                        )
+                        pending_state[phone] = {
+                            "type": "factura_confirm", "situation": "multiple_invoices",
+                            "conf_id": conf_id,
+                            "candidates": [{"id": c.id, "name": c.name, "amount": c.value_ars} for c in valid_candidatos[:3]],
+                            "paid_amount": paid_amount, "payment_method": payment_method,
+                        }
+                        reply += f"\n\n💡 Tenés varias facturas pendientes:\n{options}\n¿A cuál corresponde este pago?"
 
                 else:
                     expires_at = (now_argentina() + timedelta(seconds=60)).replace(tzinfo=None).isoformat()
@@ -1319,6 +1328,9 @@ Emoji: elegi el mas especifico segun el contexto real."""
                 _existing["page_id"] = _page_id
                 _existing["name"] = _data.get("name", "gasto")
                 _existing["is_usd"] = _is_usd
+            elif _existing.get("type") == "factura_confirm":
+                # Hay una confirmación de factura pendiente más importante — no pisar con método de pago
+                pass
             else:
                 pending_state[phone] = {
                     "type": "ask_payment_method",
@@ -5179,8 +5191,10 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
         t_lower = text.strip().lower()
         affirm = t_lower in ("si", "sí", "yes", "dale", "ok", "sip", "claro", "obvio")
         deny   = t_lower in ("no", "nope", "nel", "nah")
-        # Si no es una respuesta clara → probablemente es un gasto nuevo; abandonar y reprocesar
-        if not affirm and not deny:
+
+        # Para diff_moderate y diff_large: si no es sí/no y parece nuevo gasto → abandonar y reprocesar
+        # Para multiple_invoices: espera texto libre ("la de junio", etc.) → NO abandonar
+        if situation in ("diff_moderate", "diff_large") and not affirm and not deny:
             import re as _re
             _has_amount = bool(_re.search(r'\d{4,}|\d+\s*(mil|usd|ars|pesos)', t_lower))
             _many_words = len(text.strip().split()) >= 4
@@ -5218,10 +5232,32 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
 
         if situation == "multiple_invoices":
             candidates = state.get("candidates") or []
-            # Intentar matchear la respuesta del usuario con algún candidato
+            # Mapeo de meses en español/número para matching fuzzy
+            _MES_MAP = {
+                "enero": ["01", "ene"], "febrero": ["02", "feb"], "marzo": ["03", "mar"],
+                "abril": ["04", "abr"], "mayo": ["05"], "junio": ["06", "jun"],
+                "julio": ["07", "jul"], "agosto": ["08", "ago"], "septiembre": ["09", "sep"],
+                "octubre": ["10", "oct"], "noviembre": ["11", "nov"], "diciembre": ["12", "dic"],
+            }
+            def _period_match(cname: str, user_text: str) -> bool:
+                cn = cname.lower()
+                if cn in user_text or user_text in cn:
+                    return True
+                # Match por nombre de mes
+                for mes, aliases in _MES_MAP.items():
+                    if mes in user_text:
+                        if mes in cn or any(a in cn for a in aliases):
+                            return True
+                # Match por número de mes (ej: "06" → junio)
+                import re as _re2
+                for m in _re2.findall(r'\b\d{2}\b', user_text):
+                    if m in cn:
+                        return True
+                return False
+
             matched = None
             for c in candidates:
-                if c["name"].lower() in t_lower or str(int(c["amount"] or 0)) in t_lower:
+                if _period_match(c["name"], t_lower) or str(int(c["amount"] or 0)) in t_lower:
                     matched = c
                     break
             if not matched and affirm and candidates:
@@ -5240,7 +5276,8 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
                 await send_message(phone, msg)
             else:
                 await _remove_invoice_confirmation(conf_id)
-                await send_message(phone, "Ok, dejé todas las facturas como pendientes.")
+                names = ", ".join(f"*{c['name']}*" for c in candidates)
+                await send_message(phone, f"No pude identificar cuál. Las opciones eran: {names}. Las dejo pendientes.")
             return True
 
     if state_type == "unknown_card_register":
