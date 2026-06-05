@@ -1442,22 +1442,49 @@ class NotionDataStore:
         """Create an Impaga finance entry. Returns (success, page_id). Deduplicates by provider+period."""
         import re
         from datetime import date as _date, timezone
-        new_digits = set(re.findall(r"\d+", period or ""))
+        # Solo considerar dígitos significativos (mes y día, no el año solo)
+        # "2026-06" → {"06"}, "Junio 2026" → {"06"} via _month_number_from_period
+        # Esto evita que el año "2026" matchee con cualquier entry del mismo año
+        _MES_ES = {
+            "enero": "01", "febrero": "02", "marzo": "03", "abril": "04",
+            "mayo": "05", "junio": "06", "julio": "07", "agosto": "08",
+            "septiembre": "09", "octubre": "10", "noviembre": "11", "diciembre": "12",
+        }
+        period_lower = (period or "").lower()
+        # Extraer mes del período: "2026-06" → "06", "Junio 2026" → "06", "03/2026" → "03"
+        period_month = None
+        m = re.search(r'\b(\d{2})\b', period or "")
+        if m and m.group(1) not in ("20", "19"):  # evitar confundir con año parcial
+            period_month = m.group(1)
+        for mes_name, mes_num in _MES_ES.items():
+            if mes_name in period_lower:
+                period_month = mes_num
+                break
         today = _date.today()
         # Check both impaga AND pagada records — avoid recreating an already-paid invoice
         for existing in [await self.get_impaga_facturas(provider=provider),
                          await self.get_finance_history_by_provider(provider, limit=10)]:
             for e in existing:
-                if new_digits and new_digits & set(re.findall(r"\d+", e.name)):
-                    return False, "duplicate"
-                # Fallback: si hay un registro del mismo proveedor en los últimos 60 días, deduplicar
-                if e.date:
-                    try:
-                        entry_date = e.date if isinstance(e.date, _date) else _date.fromisoformat(str(e.date)[:10])
-                        if (today - entry_date).days <= 60:
-                            return False, "duplicate"
-                    except Exception:
-                        pass
+                if period_month:
+                    # Match exacto por mes: solo duplicado si el mismo mes aparece en el nombre
+                    existing_lower = (e.name or "").lower()
+                    existing_month = None
+                    em = re.search(r'(\d{2})[/-](\d{4})|(\d{4})[/-](\d{2})', e.name or "")
+                    if em:
+                        # "03/2026" o "2026-06"
+                        existing_month = em.group(1) or em.group(4)
+                    for mes_name, mes_num in _MES_ES.items():
+                        if mes_name in existing_lower:
+                            existing_month = mes_num
+                            break
+                    if existing_month and existing_month == period_month:
+                        return False, "duplicate"
+                else:
+                    # Sin mes identificable: fallback a comparación por dígitos (excluyendo año de 4 dígitos)
+                    new_digits = {d for d in re.findall(r"\d+", period or "") if len(d) != 4}
+                    old_digits = {d for d in re.findall(r"\d+", e.name or "") if len(d) != 4}
+                    if new_digits and new_digits & old_digits:
+                        return False, "duplicate"
         now = datetime.now(timezone.utc) - timedelta(hours=3)
         entry = await self.create_expense({
             "name": f"Factura {provider} — {period}",
