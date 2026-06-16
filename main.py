@@ -860,6 +860,12 @@ Hoy: {hoy_str(now)}. Calendario: {semana_str(now)}.
 Tasa dolar blue: ${exchange_rate:,.0f}/USD
 {profile_gastos_ctx}{providers_ctx}{cards_ctx}{known_shops_ctx}
 Tu tarea: registrar gastos e ingresos NUEVOS del usuario.
+El usuario es {user_prefs.get("greeting_name") or "el titular de la cuenta"}.
+COMPROBANTES DE TRANSFERENCIA (CRITICO para la direccion in_out):
+- Un comprobante de transferencia/pago tiene un REMITENTE (De / Origen / Titular que envia / "Desde") y un DESTINATARIO (Para / Destino / "A").
+- Si el REMITENTE es el usuario (su nombre, CUIT/CUIL o cuenta) -> es un EGRESO: el usuario ESTA PAGANDO. NO es un ingreso.
+- Solo es INGRESO si el DESTINATARIO es el usuario y el remitente es un tercero (cliente, empleador).
+- NO asumas que toda transferencia recibida/vista es un ingreso. Mira SIEMPRE quien envia y quien recibe. Ejemplo: comprobante "De: {user_prefs.get("greeting_name") or "el usuario"} / Para: Consorcio/Inmobiliaria/persona" -> EGRESO (pago de expensas, alquiler, etc.), categoria segun el concepto (Depto/Recurrente), NUNCA Sueldo.
 IMPORTANTE: Si el mensaje habla de corregir, editar, cambiar o actualizar algo ya registrado -> NO uses la tool, respondé que no podés hacer correcciones desde acá.
 - Si el mensaje tiene descripcion Y monto -> usa la tool registrar_gasto directamente.
 - Si hay una imagen (ticket, screenshot de pedido, factura) -> lee TODOS los items, suma los montos vos mismo, y registra el total. No le pidas al usuario que sume.
@@ -4259,27 +4265,52 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
     if state_type == "ask_payment_method":
         page_id = state.get("page_id")
         name = state.get("name", "gasto")
-        del pending_state[phone]
         t = text.strip().lower()
-        if t in ("no", "no se", "no sé", "ns", "skip", "omitir"):
+        if t in ("no", "no se", "no sé", "ns", "skip", "omitir", "ninguno", "dejalo"):
+            del pending_state[phone]
             await send_message(phone, "Dale, sin método de pago.")
             return True
-        # Buscar match en payment_methods_cache
+        # Buscar match rapido por substring en payment_methods_cache
         matched = None
         for pm in payment_methods_cache:
             if pm.last4 and pm.last4 in t:
-                matched = pm
-                break
+                matched = pm; break
             if pm.name and pm.name.lower() in t:
-                matched = pm
-                break
+                matched = pm; break
             if pm.bank and pm.bank.lower() in t:
-                matched = pm
-                break
+                matched = pm; break
             if pm.modality and pm.modality.lower() in t:
-                matched = pm
-                break
+                matched = pm; break
+
+        # Si no hubo match rapido, desambiguar con IA: ¿es un metodo, otra intencion, o skip?
+        decision = "OTHER"
+        if not matched:
+            pm_list = "\n".join(
+                f"{i}: {p.name or ''} {('('+p.bank+')') if p.bank else ''} {('****'+p.last4) if p.last4 else ''} {p.modality or ''}".strip()
+                for i, p in enumerate(payment_methods_cache)
+            )
+            try:
+                dresp = await claude_create(
+                    model=HAIKU_MODEL, max_tokens=10,
+                    system=(
+                        "El usuario respondio a la pregunta '¿con que pagaste?' sobre un gasto recien registrado.\n"
+                        "Metodos de pago disponibles (indice: descripcion):\n" + pm_list + "\n\n"
+                        "Decidi que es el mensaje del usuario y responde SOLO una palabra:\n"
+                        "- El numero de indice del metodo si el mensaje indica uno de los metodos de la lista (aunque sea con sinonimos: 'mp'=Mercado Pago, 'efectivo'=cash, 'transferencia', 'credito', 'debito', el banco, etc).\n"
+                        "- SKIP si dice que no sabe o no importa.\n"
+                        "- OTHER si el mensaje NO es una respuesta sobre el metodo de pago (es otra orden, otra pregunta, otro gasto, un recordatorio, etc).\n"
+                        "Respuesta (solo el numero, SKIP, u OTHER):"
+                    ),
+                    messages=[{"role": "user", "content": text.strip()}]
+                )
+                decision = dresp.content[0].text.strip().upper()
+            except Exception:
+                decision = "OTHER"
+            if decision.isdigit() and int(decision) < len(payment_methods_cache):
+                matched = payment_methods_cache[int(decision)]
+
         if matched:
+            del pending_state[phone]
             try:
                 await _ds.update_expense(page_id, {"payment_method_id": matched.id})
                 asyncio.create_task(_ds.increment_payment_method_uses(matched.id, matched.uses))
@@ -4288,19 +4319,22 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
                 await send_message(phone, f"💳 *{name}* pagado con *{label}*.")
             except Exception:
                 await send_message(phone, "No pude guardar el método de pago.")
-        else:
-            await send_message(phone, f"No reconocí ese método. Probá con: {', '.join((p.name or p.bank or '') for p in payment_methods_cache[:8])}")
+            return True
 
-        # Si el mensaje contiene MAS que solo el método (ej: corrección de emoji o categoría),
-        # procesar el resto via corregir_gasto
-        if len(text.strip()) > 30 or any(w in t for w in ("emoji", "emogi", "categoría", "categoria", "nombre", "nota", "notas", "ponle", "cambia", "corrige", "corregí", "no era", "está mal", "esta mal")):
-            try:
-                last_touched[phone] = {"page_id": page_id, "name": name}
-                _, corr_msg = await corregir_gasto(text, phone=phone)
-                if corr_msg:
-                    await send_message(phone, corr_msg)
-            except Exception:
-                pass
+        if decision == "SKIP":
+            del pending_state[phone]
+            await send_message(phone, "Dale, sin método de pago.")
+            return True
+
+        if decision == "OTHER":
+            # No es una respuesta sobre el metodo: abandonar la pregunta SIN perder el mensaje.
+            # Se re-rutea como mensaje nuevo (el gasto ya quedo registrado, solo sin metodo).
+            del pending_state[phone]
+            return False
+
+        # Genuino intento de responder pero no reconocido: mantener el estado y reofrecer opciones
+        opts = ", ".join(filter(None, ((p.name or p.bank or "") for p in payment_methods_cache[:8])))
+        await send_message(phone, f"No reconocí ese método. Probá con: {opts} (o decime 'ninguno').")
         return True
 
     if state_type == "confirm_known_shop":
