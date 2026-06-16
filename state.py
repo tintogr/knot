@@ -35,6 +35,11 @@ MY_NUMBER   = os.environ.get("MY_WA_NUMBER", "54298154894334")
 
 DAILY_SUMMARY_HOUR = int(os.environ.get("DAILY_SUMMARY_HOUR", "8"))
 
+# ── Modelos de Claude (único punto de cambio cuando Anthropic retira uno) ──────
+# Se pueden overridear por env var sin tocar código.
+SONNET_MODEL = os.environ.get("SONNET_MODEL", "claude-sonnet-4-6")
+HAIKU_MODEL  = os.environ.get("HAIKU_MODEL",  "claude-haiku-4-5-20251001")
+
 USER_LAT = os.environ.get("USER_LAT")
 USER_LON = os.environ.get("USER_LON")
 
@@ -137,6 +142,7 @@ anthropic = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 async def claude_create(**kwargs):
     """Wrapper con reintentos automaticos para errores 529 (API sobrecargada)."""
+    kwargs.setdefault("model", SONNET_MODEL)
     last_err = None
     for attempt in range(3):
         try:
