@@ -265,7 +265,7 @@ Mails:
                     except Exception:
                         pass
             resp = await claude_create(
-                model="claude-sonnet-4-20250514", max_tokens=400,
+                model="claude-sonnet-4-6", max_tokens=400,
                 messages=[{"role": "user", "content": content}]
             )
             result = resp.content[0].text.strip()
@@ -476,7 +476,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
         try:
             clima_ctx = f"Temp actual: {w['temp']}C (sensacion {w['sensacion']}C). Max: {w['hoy_max']}C, min: {w['hoy_min']}C. Condicion: {w['desc']}. Viento: {w['viento']}km/h. Lluvia esperada: {w['hoy_lluvia']}mm."
             narrativa_resp = await claude_create(
-                model="claude-sonnet-4-20250514", max_tokens=60,
+                model="claude-sonnet-4-6", max_tokens=60,
                 system="Genera UNA sola linea (max 15 palabras) describiendo como va a estar el dia para alguien en Neuquen. Tono casual rioplatense. Sin emoji. Sin repetir datos numericos. Ejemplos: 'Arrancas fresco pero al mediodia pega fuerte. Sin lluvia.' o 'Dia gris y ventoso, lleva campera.' o 'Lindo dia para estar afuera, fresco pero agradable.'",
                 messages=[{"role": "user", "content": clima_ctx}]
             )
@@ -691,7 +691,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
         try:
             extras_prompt = "\n".join(f"- {e}" for e in extras)
             extra_resp = await claude_create(
-                model="claude-sonnet-4-20250514", max_tokens=300,
+                model="claude-sonnet-4-6", max_tokens=300,
                 system=f"Sos Knot. Hoy es {now.strftime('%A %d/%m/%Y')}. Genera contenido breve (max 3 lineas por item) para los siguientes extras del Resumen Diario. Usas espanol rioplatense, tono natural y calido.",
                 messages=[{"role": "user", "content": f"Genera estos extras para el resumen matutino:\n{extras_prompt}"}]
             )
@@ -783,7 +783,7 @@ async def send_resumen_nocturno_regular(http, access_token: str, now: datetime):
 
     try:
         resp = await claude_create(
-            model="claude-sonnet-4-20250514", max_tokens=300,
+            model="claude-sonnet-4-6", max_tokens=300,
             system=f"""Sos Knot. {context}
 Genera un resumen nocturno breve y natural en espanol rioplatense. Inclui:
 1. Saludo de buenas noches con clima de esta noche y de manana.
@@ -881,7 +881,7 @@ async def send_resumen_nocturno_dominical(http, access_token: str, now: datetime
                 for fd in w["forecast_days"][1:7]
             )
             clima_resp = await claude_create(
-                model="claude-sonnet-4-20250514", max_tokens=80,
+                model="claude-sonnet-4-6", max_tokens=80,
                 system="Resume el pronostico semanal en 2 lineas maximas, lenguaje natural rioplatense, destacando lo mas relevante (frio, lluvia, calor).",
                 messages=[{"role": "user", "content": forecast_txt}]
             )

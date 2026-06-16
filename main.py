@@ -876,7 +876,7 @@ Clientes posibles: LBL, OPERA, ALPATACO, Juan Martin, Depto, Work, Santi Vales, 
 Emoji: elegi el mas especifico segun el contexto real."""
 
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=1000,
+        model="claude-sonnet-4-6", max_tokens=1000,
         system=system,
         messages=[{"role": "user", "content": content}],
         tools=tools
@@ -1289,7 +1289,7 @@ async def check_and_apply_category(name: str, predicted_cats: list[str]) -> tupl
 async def corregir_gasto(text: str, phone: str = None) -> tuple[bool, str]:
     now = now_argentina()
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=300,
+        model="claude-sonnet-4-6", max_tokens=300,
         system="Extrae que gasto corregir y que cambiar. Si el mensaje no menciona un nombre concreto, usa null en search_term. Responde SOLO JSON.",
         messages=[{"role": "user", "content": f"""Hoy: {now.strftime("%Y-%m-%d")}
 Mensaje: {text}
@@ -1411,7 +1411,7 @@ Responde:
 
 async def eliminar_gasto(text: str, phone: str = None) -> tuple[bool, str]:
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=100,
+        model="claude-sonnet-4-6", max_tokens=100,
         system="Extrae el nombre de la entrada de Notion a eliminar. Responde SOLO JSON.",
         messages=[{"role": "user", "content": f'Mensaje: {text}\nResponde: {{"search_term": "nombre de la entrada a eliminar"}}'}]
     )
@@ -1442,7 +1442,7 @@ async def eliminar_gasto(text: str, phone: str = None) -> tuple[bool, str]:
 
 async def eliminar_shopping(text: str) -> tuple[bool, str]:
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=100,
+        model="claude-sonnet-4-6", max_tokens=100,
         system="Extrae el nombre del item de la lista de compras a eliminar. Responde SOLO JSON.",
         messages=[{"role": "user", "content": f"Mensaje: {text}\nResponde: {{\"search_term\": \"nombre del item\"}}"}]
     )
@@ -1463,7 +1463,7 @@ async def eliminar_shopping(text: str) -> tuple[bool, str]:
 
 async def corregir_shopping(text: str) -> tuple[bool, str]:
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=200,
+        model="claude-sonnet-4-6", max_tokens=200,
         system="Extrae el item de la lista de compras a corregir y los campos a actualizar. Responde SOLO JSON.",
         messages=[{"role": "user", "content": f'Mensaje: {text}\nResponde: {{"search_term": "nombre del item", "updates": {{"notes": "nueva cantidad/nota o null", "category": "nueva categoria o null"}}}}'}]
     )
@@ -1532,7 +1532,7 @@ async def cancelar_recordatorio(text: str) -> tuple[bool, str]:
     summaries = [(e["id"], e.get("summary", ""), e.get("start", {}).get("dateTime", "")) for e in temp_events]
     options_str = "\n".join(f'{i+1}. {s} — {t}' for i, (_, s, t) in enumerate(summaries))
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=10,
+        model="claude-sonnet-4-6", max_tokens=10,
         system="Respondé SOLO con el número de la opción más probable. Sin texto extra.",
         messages=[{"role": "user", "content": f"Mensaje del usuario: {text}\n\nRecordatorios pendientes:\n{options_str}\n\n¿Cuál quiere cancelar? Respondé solo el número."}]
     )
@@ -1567,7 +1567,7 @@ Valores para "estado": Excelente, Bien, Regular, Necesita atencion"""
 
 async def parse_planta(text: str, exchange_rate: float) -> dict:
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=600,
+        model="claude-sonnet-4-6", max_tokens=600,
         system=PLANTA_SYSTEM,
         messages=[{"role": "user", "content": f"""Hoy: {now_argentina().strftime("%Y-%m-%d")}. Dolar: ${exchange_rate:,.0f}
 Mensaje: {text}
@@ -1617,7 +1617,7 @@ def format_planta(data: dict) -> str:
 
 async def editar_planta(text: str) -> tuple[bool, str]:
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=200,
+        model="claude-sonnet-4-6", max_tokens=200,
         system="Extrae el nombre de la planta a editar y los campos a actualizar. Responde SOLO JSON.",
         messages=[{"role": "user", "content": (
             f"Mensaje: {text}\n"
@@ -1662,7 +1662,7 @@ async def editar_planta(text: str) -> tuple[bool, str]:
 
 async def eliminar_planta(text: str, phone: str = None) -> tuple[bool, str]:
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=100,
+        model="claude-sonnet-4-6", max_tokens=100,
         system="Extrae el nombre de la planta a eliminar. Responde SOLO JSON.",
         messages=[{"role": "user", "content": f'Mensaje: {text}\nResponde: {{"search_term": "nombre de la planta"}}'}]
     )
@@ -1723,7 +1723,7 @@ Extrae la info del evento de la imagen si la hay, o del texto.
 Responde:
 {{"summary":"titulo","date":"YYYY-MM-DD","time":"HH:MM o null","duration_minutes":60,"location":"lugar o null","description":"desc o null","emoji":"emoji"}}"""})
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=300,
+        model="claude-sonnet-4-6", max_tokens=300,
         system="Extrae info de un evento. Responde SOLO JSON valido sin markdown. Usa zona horaria Argentina (UTC-3).",
         messages=[{"role": "user", "content": user_content}]
     )
@@ -1737,7 +1737,7 @@ Responde:
 async def needs_clarification(phone: str, text: str, context: str) -> str | None:
     try:
         resp = await claude_create(
-            model="claude-sonnet-4-20250514", max_tokens=100,
+            model="claude-sonnet-4-6", max_tokens=100,
             system=f"""Sos Knot. Evalua si el mensaje del usuario es suficientemente claro para ejecutar la accion indicada.
 Contexto: {context}
 Si el mensaje es claro -> responde solo: CLEAR
@@ -1770,7 +1770,7 @@ async def classify(text: str, has_image: bool, image_b64: str = None, image_type
         ) + "\n\nTeniendo en cuenta ese contexto, clasifica el siguiente mensaje:"
     content.append({"type": "text", "text": history_ctx + "\n" + prompt_text if history_ctx else prompt_text})
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=10,
+        model="claude-sonnet-4-6", max_tokens=10,
         system="""Responde SOLO una palabra: GASTO, CORREGIR_GASTO, ELIMINAR_GASTO, PLANTA, EDITAR_PLANTA, ELIMINAR_PLANTA, EVENTO, EDITAR_EVENTO, ELIMINAR_EVENTO, RECORDATORIO, CANCELAR_RECORDATORIO, SHOPPING, CORREGIR_SHOPPING, ELIMINAR_SHOPPING, REUNION, EDITAR_REUNION, ELIMINAR_REUNION, SALUD, ACTIVIDAD_FISICA, GEO_REMINDER, CONFIGURAR, RESUMEN_DIARIO, LISTA o CHAT.
 
 GASTO: registrar un pago, compra o ingreso NUEVO. El usuario describe algo que acaba de pagar o comprar ahora. NUNCA cuando usa "corregir", "cambiar", "editar", "actualizar", "la descripcion", "las notas", "el nombre" de algo ya registrado.
@@ -1970,7 +1970,7 @@ async def infer_service_providers() -> dict:
             if not mail_summaries:
                 return {}
             resp = await claude_create(
-                model="claude-sonnet-4-20250514", max_tokens=300,
+                model="claude-sonnet-4-6", max_tokens=300,
                 system="""Analiza estos mails de facturas/servicios e identifica que empresa provee que servicio.
 Responde SOLO JSON con este formato:
 {"electricidad": "Nombre empresa", "gas": "Nombre empresa", "internet": "Nombre empresa", "agua": "Nombre empresa", "telefono": "Nombre empresa"}
@@ -2419,7 +2419,7 @@ La idea es que el usuario descubra capacidades de Knot a medida que las necesita
 
     try:
         response = await claude_create(
-            model="claude-sonnet-4-20250514", max_tokens=1000,
+            model="claude-sonnet-4-6", max_tokens=1000,
             system=system,
             messages=messages,
             tools=tools
@@ -2900,7 +2900,7 @@ La idea es que el usuario descubra capacidades de Knot a medida que las necesita
     for _round in range(4):
         try:
             next_response = await claude_create(
-                model="claude-sonnet-4-20250514", max_tokens=800,
+                model="claude-sonnet-4-6", max_tokens=800,
                 system=system,
                 messages=messages,
                 tools=tools
@@ -3065,7 +3065,7 @@ EVENTOS RECURRENTES:
 
     try:
         response = await claude_create(
-            model="claude-sonnet-4-20250514", max_tokens=1000,
+            model="claude-sonnet-4-6", max_tokens=1000,
             system=system, messages=messages, tools=tools
         )
     except Exception:
@@ -3321,7 +3321,7 @@ EVENTOS RECURRENTES:
     for _round in range(8):
         try:
             next_response = await claude_create(
-                model="claude-sonnet-4-20250514", max_tokens=1500,
+                model="claude-sonnet-4-6", max_tokens=1500,
                 system=system, messages=messages, tools=tools
             )
         except Exception:
@@ -3523,7 +3523,7 @@ async def handle_reunion(text: str, image_b64: str = None, image_type: str = Non
     content_parts.append({"type": "text", "text": prompt_reunion})
 
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=600,
+        model="claude-sonnet-4-6", max_tokens=600,
         system="Extrae info de notas de reunion. Responde SOLO JSON valido sin markdown.",
         messages=[{"role": "user", "content": content_parts}]
     )
@@ -3591,7 +3591,7 @@ async def handle_reunion(text: str, image_b64: str = None, image_type: str = Non
 
 async def editar_reunion(text: str) -> tuple[bool, str]:
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=250,
+        model="claude-sonnet-4-6", max_tokens=250,
         system="Extrae el nombre de la reunión a editar y los campos a actualizar. Responde SOLO JSON.",
         messages=[{"role": "user", "content": (
             f"Mensaje: {text}\n"
@@ -3622,7 +3622,7 @@ async def editar_reunion(text: str) -> tuple[bool, str]:
 
 async def eliminar_reunion(text: str, phone: str = None) -> tuple[bool, str]:
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=100,
+        model="claude-sonnet-4-6", max_tokens=100,
         system="Extrae el nombre de la reunión a eliminar. Responde SOLO JSON.",
         messages=[{"role": "user", "content": f'Mensaje: {text}\nResponde: {{"search_term": "nombre de la reunion"}}'}]
     )
@@ -3802,7 +3802,7 @@ REGLAS:
   Y dejá que el usuario elija. NO uses ninguna tool en ese caso, solo respondé el mensaje."""
 
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=1500,
+        model="claude-sonnet-4-6", max_tokens=1500,
         system=system,
         messages=get_history(phone) + [{"role": "user", "content": content}],
         tools=tools
@@ -3906,7 +3906,7 @@ REGLAS:
         return None
 
     final = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=600,
+        model="claude-sonnet-4-6", max_tokens=600,
         system=system,
         messages=get_history(phone) + [
             {"role": "user", "content": content},
@@ -4487,7 +4487,7 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
             return True
         try:
             resp = await claude_create(
-                model="claude-sonnet-4-20250514", max_tokens=100,
+                model="claude-sonnet-4-6", max_tokens=100,
                 system="Extrae los recordatorios que pide el usuario. Convierte a minutos. Max 2. Responde SOLO JSON sin markdown: {\"minutes\": [30, 60]} o {\"minutes\": [15]}. Si dice 'la noche anterior' usa 720 (12hs). Si dice '1 dia antes' usa 1440. Si dice '2 horas' usa 120.",
                 messages=[{"role": "user", "content": text}]
             )
@@ -4591,7 +4591,7 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
         try:
             ing_names = [i.get("name", "") for i in ingredients]
             corr_resp = await claude_create(
-                model="claude-sonnet-4-20250514", max_tokens=600,
+                model="claude-sonnet-4-6", max_tokens=600,
                 system="Responde SOLO JSON valido sin markdown.",
                 messages=[{"role": "user", "content": f"""Receta: "{recipe_name}"
 Lista actual de ingredientes: {json.dumps(ing_names, ensure_ascii=False)}
@@ -5156,7 +5156,7 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
         del pending_state[phone]
         try:
             resp = await claude_create(
-                model="claude-sonnet-4-20250514", max_tokens=200,
+                model="claude-sonnet-4-6", max_tokens=200,
                 system="Aplica las correcciones del usuario al JSON de proveedores. Responde SOLO JSON.",
                 messages=[{"role": "user", "content": f"Proveedores actuales: {json.dumps(proposed, ensure_ascii=False)}\nCorrecciones: {text}\nResponde el JSON corregido."}]
             )
@@ -5403,7 +5403,7 @@ async def handle_geo_reminder(phone: str, text: str) -> str:
     now = now_argentina()
     lat, lon = get_current_location()
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=300,
+        model="claude-sonnet-4-6", max_tokens=300,
         system=f"""Extrae info de un recordatorio geolocalizacion. Hoy: {now.strftime("%Y-%m-%d")}.
 Responde SOLO JSON valido sin markdown:
 {{"description": "que recordar (solo la tarea, ej: 'agarrar los planos', 'comprar leche')",
@@ -5697,7 +5697,7 @@ async def process_single_item(phone: str, item: dict):
             if not shopping_text.strip() and image_b64:
                 try:
                     extr = await claude_create(
-                        model="claude-sonnet-4-20250514", max_tokens=1200,
+                        model="claude-sonnet-4-6", max_tokens=1200,
                         system="Transcribi TODO el contenido de la imagen exactamente como esta escrito. Si es una receta: copia el titulo, luego todas las secciones tal como aparecen. No omitas nada.",
                         messages=[{"role": "user", "content": [
                             {"type": "image", "source": {"type": "base64", "media_type": image_type or "image/jpeg", "data": image_b64}},
@@ -5766,7 +5766,7 @@ async def process_single_item(phone: str, item: dict):
                 if "Ingredientes:" in respuesta and "Preparacion:" in respuesta:
                     try:
                         ext_response = await claude_create(
-                            model="claude-sonnet-4-20250514", max_tokens=400,
+                            model="claude-sonnet-4-6", max_tokens=400,
                             system="Responde SOLO JSON valido sin markdown.",
                             messages=[{"role": "user", "content": f"""Del siguiente texto de receta, extrae el nombre y TODOS los ingredientes.
 Texto: {respuesta[:2000]}
@@ -5826,7 +5826,7 @@ async def parse_recordatorio(text: str) -> list:
     """Devuelve siempre una lista de dicts, aunque sea un solo recordatorio."""
     now = now_argentina()
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=500,
+        model="claude-sonnet-4-6", max_tokens=500,
         system="Extrae info del/los recordatorio/s. Responde SOLO JSON valido sin markdown. Siempre devuelve un array, aunque sea uno solo.",
         messages=[{"role": "user", "content": f"""Ahora son las {now.strftime("%Y-%m-%d %H:%M")} en Argentina.
 Mensaje: {text}
@@ -5968,7 +5968,7 @@ REGLAS:
 - Respondé con números concretos, no con listas genéricas."""
 
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=1500,
+        model="claude-sonnet-4-6", max_tokens=1500,
         system=system,
         messages=get_history(phone) + [{"role": "user", "content": content}],
         tools=tools
@@ -6047,7 +6047,7 @@ REGLAS:
         return None
 
     final = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=800,
+        model="claude-sonnet-4-6", max_tokens=800,
         system=system,
         messages=get_history(phone) + [
             {"role": "user", "content": content},
@@ -6322,7 +6322,7 @@ async def _execute_lista_add(list_name: str, db_id: str, count: int | None, crit
 
     if not items and (count or criteria):
         gen = await claude_create(
-            model="claude-sonnet-4-20250514", max_tokens=600,
+            model="claude-sonnet-4-6", max_tokens=600,
             system=f"Generás items concretos para una colección de '{list_name}'. Responde SOLO JSON array, sin markdown.",
             messages=[{"role": "user", "content": f"Generá {count or 3} items{' ' + criteria if criteria else ''}. Formato: {item_prompt}"}]
         )
@@ -6594,7 +6594,7 @@ async def receive_location(request: Request):
                     shop_detail += f"\n🗺️ {shop['maps_link']}"
                     try:
                         msg_resp = await claude_create(
-                            model="claude-sonnet-4-20250514", max_tokens=150,
+                            model="claude-sonnet-4-6", max_tokens=150,
                             system="Sos Knot. Genera un mensaje breve y natural en espanol rioplatense avisando que el usuario esta cerca de una tienda donde puede comprar cosas que necesita. No seas pesado, se casual y util. Max 2 lineas de texto, sin repetir la info del comercio que ya se muestra aparte.",
                             messages=[{"role": "user", "content": f"El usuario esta cerca de {shop['name']} (a {shop['distance_m']}m). Necesita comprar: {items_str}."}]
                         )
@@ -6669,7 +6669,7 @@ async def get_ingredients_and_enrich(recipe_name: str, recipe_text: str = None) 
     else:
         context = f'Receta: "{recipe_name}"\n\nInferi los ingredientes tipicos/estandar completos de esta receta.'
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=800,
+        model="claude-sonnet-4-6", max_tokens=800,
         system="Responde SOLO JSON valido sin markdown ni texto extra.",
         messages=[{"role": "user", "content": f"""{context}
 
@@ -6696,7 +6696,7 @@ async def enrich_items_with_claude(items: list[str]) -> list[dict]:
     if not items:
         return []
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=1500,
+        model="claude-sonnet-4-6", max_tokens=1500,
         system="Enriquece una lista de items. Responde SOLO JSON valido sin markdown.",
         messages=[{"role": "user", "content": f"""Items: {json.dumps(items, ensure_ascii=False)}
 
@@ -6746,7 +6746,7 @@ async def save_recipe_to_notion(recipe_name: str, source: str = "Knot", ingredie
     try:
         try:
             props_response = await claude_create(
-                model="claude-sonnet-4-20250514", max_tokens=200,
+                model="claude-sonnet-4-6", max_tokens=200,
                 system="Responde SOLO JSON valido sin markdown.",
                 messages=[{"role": "user", "content": f'''Receta: "{recipe_name}"
 Texto: {(recipe_text or "")[:500]}
@@ -6788,7 +6788,7 @@ Responde SOLO este JSON:
         if recipe_text:
             try:
                 fmt_resp = await claude_create(
-                    model="claude-sonnet-4-20250514", max_tokens=1500,
+                    model="claude-sonnet-4-6", max_tokens=1500,
                     system="Formatea la siguiente receta para guardarla en Notion. Usa este formato:\n- Titulo de seccion como ## (Ingredientes, Procedimiento, Notas)\n- Listas con - para ingredientes y pasos numerados con 1. 2. 3.\n- **negrita** para cantidades importantes\n- Responde SOLO el texto formateado, sin comentarios adicionales.",
                     messages=[{"role": "user", "content": f"Receta: {recipe_name}\n\nTexto original:\n{recipe_text[:3000]}"}]
                 )
@@ -6844,7 +6844,7 @@ Responde SOLO este JSON:
 async def parse_shopping_intent(text: str) -> dict:
     safe_text = text.replace('"', "'").replace('\r', ' ').replace('\n', ' ')[:2000]
     response = await claude_create(
-        model="claude-sonnet-4-20250514", max_tokens=800,
+        model="claude-sonnet-4-6", max_tokens=800,
         system="Analiza mensajes sobre lista de compras. Responde SOLO JSON valido sin markdown.",
         messages=[{"role": "user", "content": f"""Mensaje: {safe_text}
 
@@ -6928,7 +6928,7 @@ async def handle_shopping(text: str, phone: str = None) -> str:
                     if text and len(text) > 100:
                         try:
                             proc_resp = await claude_create(
-                                model="claude-sonnet-4-20250514", max_tokens=600,
+                                model="claude-sonnet-4-6", max_tokens=600,
                                 system="Extrae SOLO la seccion de preparacion/procedimiento de la receta. Sin titulo, sin lista de ingredientes. Solo los pasos de preparacion en texto limpio.",
                                 messages=[{"role": "user", "content": text[:2000]}]
                             )
