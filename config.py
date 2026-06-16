@@ -2,7 +2,7 @@ import json
 from notion_datastore import UserConfig
 from state import (
     _ds, user_prefs, current_location, _last_summary_sent,
-    MY_NUMBER, DAILY_SUMMARY_HOUR, claude_create,
+    MY_NUMBER, DAILY_SUMMARY_HOUR, claude_create, SONNET_MODEL,
 )
 
 
@@ -103,7 +103,7 @@ async def save_user_config(wa_number: str):
 
 async def handle_configurar(text: str) -> str:
     response = await claude_create(
-        model="claude-sonnet-4-6", max_tokens=300,
+        model=SONNET_MODEL, max_tokens=300,
         system="Extrae que configuracion cambiar. Responde SOLO JSON.",
         messages=[{"role": "user", "content": f"""Mensaje: {text}
 Responde:

@@ -6,7 +6,7 @@ from state import (
     _ds, QueryFilter, DateRange,
     MY_NUMBER, user_prefs, current_location, geo_reminders_cache,
     now_argentina, claude_create, add_to_history, DIAS_SEMANA,
-    pending_state,
+    pending_state, SONNET_MODEL, HAIKU_MODEL,
 )
 from wa_utils import send_message, send_interactive_buttons
 from gcal import get_gcal_access_token
@@ -265,7 +265,7 @@ Mails:
                     except Exception:
                         pass
             resp = await claude_create(
-                model="claude-sonnet-4-6", max_tokens=400,
+                model=SONNET_MODEL, max_tokens=400,
                 messages=[{"role": "user", "content": content}]
             )
             result = resp.content[0].text.strip()
@@ -324,7 +324,7 @@ async def get_important_emails() -> str | None:
                 return None
             mail_text = "\n---\n".join(mail_lines)
             resp = await claude_create(
-                model="claude-haiku-4-5-20251001", max_tokens=500,
+                model=HAIKU_MODEL, max_tokens=500,
                 system="""Sos Knot. Revisas la bandeja de entrada del usuario.
 Incluí un email si cumple CUALQUIERA de estas condiciones: lo envió una persona real (no un sistema automático), requiere respuesta o acción, menciona un turno, reunión o fecha, es sobre un proyecto o trabajo en curso, es una consulta, pedido o pregunta directa.
 Ignorá: newsletters, notificaciones automáticas de apps, publicidad, confirmaciones de compra sin acción, alertas de sistemas.
@@ -360,7 +360,7 @@ async def build_geo_context(lat: float, lon: float) -> str:
         if geo_items:
             context_parts.append(f"Geo-reminders activos: {', '.join(geo_items)}")
         resp = await claude_create(
-            model="claude-haiku-4-5-20251001", max_tokens=80,
+            model=HAIKU_MODEL, max_tokens=80,
             system="""Sos Knot. El usuario va a un evento cercano a estas coordenadas. Tenés su lista de compras y geo-reminders.
 Decide si hay algo de la lista que pueda resolverse de camino (dietéticas, farmacias, kioscos, supermercados en esa zona general).
 Si hay algo concreto, respondé en 1 linea max, español rioplatense, natural, sin markdown.
@@ -476,7 +476,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
         try:
             clima_ctx = f"Temp actual: {w['temp']}C (sensacion {w['sensacion']}C). Max: {w['hoy_max']}C, min: {w['hoy_min']}C. Condicion: {w['desc']}. Viento: {w['viento']}km/h. Lluvia esperada: {w['hoy_lluvia']}mm."
             narrativa_resp = await claude_create(
-                model="claude-sonnet-4-6", max_tokens=60,
+                model=SONNET_MODEL, max_tokens=60,
                 system="Genera UNA sola linea (max 15 palabras) describiendo como va a estar el dia para alguien en Neuquen. Tono casual rioplatense. Sin emoji. Sin repetir datos numericos. Ejemplos: 'Arrancas fresco pero al mediodia pega fuerte. Sin lluvia.' o 'Dia gris y ventoso, lleva campera.' o 'Lindo dia para estar afuera, fresco pero agradable.'",
                 messages=[{"role": "user", "content": clima_ctx}]
             )
@@ -597,7 +597,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
             period_str = now.strftime("%B %Y")
             try:
                 extract_resp = await claude_create(
-                    model="claude-haiku-4-5-20251001", max_tokens=400,
+                    model=HAIKU_MODEL, max_tokens=400,
                     system="Extrae facturas/servicios del resumen de Gmail. Responde SOLO JSON array. Si no hay facturas, responde []. Formato: [{\"provider\": \"nombre\", \"amount\": numero_o_null, \"due_date\": \"YYYY-MM-DD_o_null\", \"period\": \"Mes YYYY\", \"category\": \"Recurrente\"}]",
                     messages=[{"role": "user", "content": gmail_summary}]
                 )
@@ -691,7 +691,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
         try:
             extras_prompt = "\n".join(f"- {e}" for e in extras)
             extra_resp = await claude_create(
-                model="claude-sonnet-4-6", max_tokens=300,
+                model=SONNET_MODEL, max_tokens=300,
                 system=f"Sos Knot. Hoy es {now.strftime('%A %d/%m/%Y')}. Genera contenido breve (max 3 lineas por item) para los siguientes extras del Resumen Diario. Usas espanol rioplatense, tono natural y calido.",
                 messages=[{"role": "user", "content": f"Genera estos extras para el resumen matutino:\n{extras_prompt}"}]
             )
@@ -783,7 +783,7 @@ async def send_resumen_nocturno_regular(http, access_token: str, now: datetime):
 
     try:
         resp = await claude_create(
-            model="claude-sonnet-4-6", max_tokens=300,
+            model=SONNET_MODEL, max_tokens=300,
             system=f"""Sos Knot. {context}
 Genera un resumen nocturno breve y natural en espanol rioplatense. Inclui:
 1. Saludo de buenas noches con clima de esta noche y de manana.
@@ -881,7 +881,7 @@ async def send_resumen_nocturno_dominical(http, access_token: str, now: datetime
                 for fd in w["forecast_days"][1:7]
             )
             clima_resp = await claude_create(
-                model="claude-sonnet-4-6", max_tokens=80,
+                model=SONNET_MODEL, max_tokens=80,
                 system="Resume el pronostico semanal en 2 lineas maximas, lenguaje natural rioplatense, destacando lo mas relevante (frio, lluvia, calor).",
                 messages=[{"role": "user", "content": forecast_txt}]
             )
