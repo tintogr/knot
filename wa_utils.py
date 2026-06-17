@@ -1,10 +1,10 @@
 import httpx
-from state import WA_API, WA_TOKEN
+from state import WA_API, WA_TOKEN, record_message_text
 
 
 async def send_message(to: str, text: str):
     async with httpx.AsyncClient() as http:
-        await http.post(WA_API, headers={
+        r = await http.post(WA_API, headers={
             "Authorization": f"Bearer {WA_TOKEN}",
             "Content-Type": "application/json"
         }, json={
@@ -13,6 +13,14 @@ async def send_message(to: str, text: str):
             "type": "text",
             "text": {"body": text}
         })
+        # Registrar el wamid saliente para poder resolver cuando el usuario
+        # responda/cite este mensaje mas adelante.
+        try:
+            mid = (r.json().get("messages") or [{}])[0].get("id")
+            if mid:
+                record_message_text(mid, text)
+        except Exception:
+            pass
 
 
 async def send_interactive_buttons(to: str, body: str, buttons: list[dict], header: str = None):
@@ -34,10 +42,16 @@ async def send_interactive_buttons(to: str, body: str, buttons: list[dict], head
     if header:
         payload["interactive"]["header"] = {"type": "text", "text": header}
     async with httpx.AsyncClient() as http:
-        await http.post(WA_API, headers={
+        r = await http.post(WA_API, headers={
             "Authorization": f"Bearer {WA_TOKEN}",
             "Content-Type": "application/json"
         }, json=payload)
+        try:
+            mid = (r.json().get("messages") or [{}])[0].get("id")
+            if mid:
+                record_message_text(mid, body)
+        except Exception:
+            pass
 
 
 async def send_reaction(to: str, message_id: str, emoji: str):

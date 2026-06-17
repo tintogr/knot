@@ -129,6 +129,19 @@ message_buffer: dict[str, list] = {}
 
 chat_history: dict[str, list] = {}
 
+# Mapa wamid -> texto del mensaje (entrantes y salientes), para resolver
+# replies/citas de WhatsApp (message.context.id apunta al mensaje citado).
+recent_message_texts: dict[str, str] = {}
+_RECENT_MSG_CAP = 400
+
+def record_message_text(msg_id: str, text: str):
+    """Guarda el texto de un mensaje por su wamid para poder resolver citas."""
+    if not msg_id or not text:
+        return
+    if len(recent_message_texts) > _RECENT_MSG_CAP:
+        recent_message_texts.clear()
+    recent_message_texts[msg_id] = text[:1000]
+
 _last_summary_sent: dict[str, datetime | None] = {"daily": None, "nocturno": None}
 
 # ── Helpers de tiempo ─────────────────────────────────────────────────────────

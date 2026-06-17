@@ -19,6 +19,7 @@ from state import (
     user_prefs, current_location, geo_reminders_cache, payment_methods_cache,
     last_event_touched, pending_state, message_buffer,
     chat_history, _last_summary_sent,
+    recent_message_texts, record_message_text,
     now_argentina,
     claude_create, hoy_str, semana_str, get_history, add_to_history,
 )
@@ -5545,11 +5546,13 @@ def _merge_items(items: list) -> dict:
     """Combina múltiples mensajes en uno solo para procesar como unidad."""
     texts = [i["text"] for i in items if i["text"]]
     images = [(i["image_b64"], i["image_type"]) for i in items if i["image_b64"]]
+    quoted = next((i.get("quoted_text") for i in items if i.get("quoted_text")), None)
     return {
         "text": "\n".join(texts),
         "image_b64": images[0][0] if images else None,
         "image_type": images[0][1] if images else None,
         "extra_images": images[1:] if len(images) > 1 else [],
+        "quoted_text": quoted,
     }
 
 
@@ -5581,6 +5584,9 @@ async def enqueue_message(message: dict):
         msg_type = message["type"]
         text = ""
         image_b64 = image_type = None
+        # Cita/reply de WhatsApp: context.id apunta al wamid del mensaje citado.
+        quoted_id = (message.get("context") or {}).get("id")
+        quoted_text = recent_message_texts.get(quoted_id) if quoted_id else None
 
         if msg_type != "reaction" and msg_id:
             await send_reaction(phone, msg_id, "✅")
@@ -5678,7 +5684,12 @@ async def enqueue_message(message: dict):
             )
             return
 
-        item = {"text": text, "image_b64": image_b64, "image_type": image_type, "extra_images": []}
+        # Registrar el texto entrante para poder resolver futuras citas a este mensaje.
+        if msg_id and text:
+            record_message_text(msg_id, text)
+
+        item = {"text": text, "image_b64": image_b64, "image_type": image_type,
+                "extra_images": [], "quoted_text": quoted_text}
 
         # pending_state activo: respuesta inmediata sin buffer
         if phone in pending_state:
@@ -5899,6 +5910,7 @@ async def process_single_item(phone: str, item: dict):
     image_b64 = item.get("image_b64")
     image_type = item.get("image_type")
     extra_images = item.get("extra_images", [])
+    quoted_text = item.get("quoted_text")
 
     if not text and not image_b64:
         return
@@ -5941,6 +5953,12 @@ async def process_single_item(phone: str, item: dict):
         if text.strip() in _KNOWN_BUTTON_IDS:
             await _reply("Ese botón ya expiró. ¿Qué necesitás?")
             return
+
+        # Si el usuario respondió/citó un mensaje anterior, inyectar ese mensaje
+        # como contexto explícito para que el clasificador y los agentes sepan a qué se refiere.
+        if quoted_text and text:
+            text = (f'[El usuario está respondiendo a este mensaje anterior: "{quoted_text[:400]}"]\n'
+                    f'Su respuesta: {text}')
 
         if user_prefs.get("_config_page_id") is None:
             await load_user_config(phone)
