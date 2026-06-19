@@ -1439,52 +1439,72 @@ class NotionDataStore:
     async def create_finance_invoice(
         self, provider: str, amount: float, period: str, due_date: str = "", category: str = "Recurrente"
     ) -> tuple[bool, str]:
-        """Create an Impaga finance entry. Returns (success, page_id). Deduplicates by provider+period."""
-        import re
+        """Create an Impaga finance entry. Returns (success, page_id).
+
+        Deduplica por PROVEEDOR (canonizado por tokens, no por substring exacto) +
+        PERÍODO (mes). Así variantes del nombre ("CALF Energía", "CALF (Luz)",
+        "CALF Energía Eléctrica") cuentan como el mismo proveedor y no se duplican.
+        """
+        import re, unicodedata
         from datetime import date as _date, timezone
-        # Solo considerar dígitos significativos (mes y día, no el año solo)
-        # "2026-06" → {"06"}, "Junio 2026" → {"06"} via _month_number_from_period
-        # Esto evita que el año "2026" matchee con cualquier entry del mismo año
         _MES_ES = {
             "enero": "01", "febrero": "02", "marzo": "03", "abril": "04",
             "mayo": "05", "junio": "06", "julio": "07", "agosto": "08",
             "septiembre": "09", "octubre": "10", "noviembre": "11", "diciembre": "12",
         }
-        period_lower = (period or "").lower()
-        # Extraer mes del período: "2026-06" → "06", "Junio 2026" → "06", "03/2026" → "03"
-        period_month = None
-        m = re.search(r'\b(\d{2})\b', period or "")
-        if m and m.group(1) not in ("20", "19"):  # evitar confundir con año parcial
-            period_month = m.group(1)
-        for mes_name, mes_num in _MES_ES.items():
-            if mes_name in period_lower:
-                period_month = mes_num
-                break
+        _STOP = {"factura", "periodo", "período", "mensual", "boleta", "comprobante", "servicio"}
+
+        def _norm(s: str) -> str:
+            s = ''.join(c for c in unicodedata.normalize('NFD', (s or '').lower())
+                        if unicodedata.category(c) != 'Mn')
+            return re.sub(r'[^a-z0-9]+', ' ', s).strip()
+
+        def _sig_list(s: str) -> list:
+            return [t for t in _norm(s).split() if len(t) >= 4 and t not in _STOP]
+
+        def _month_of(text: str):
+            tl = (text or "").lower()
+            em = re.search(r'(\d{2})[/-]\d{4}|\d{4}[/-](\d{2})', text or "")
+            mo = (em.group(1) or em.group(2)) if em else None
+            for mes_name, mes_num in _MES_ES.items():
+                if mes_name in tl:
+                    mo = mes_num
+                    break
+            if not mo:
+                m2 = re.search(r'\b(\d{2})\b', text or "")
+                if m2 and m2.group(1) not in ("20", "19"):
+                    mo = m2.group(1)
+            return mo
+
+        period_month = _month_of(period)
+        prov_list = _sig_list(provider)
+        prov_tokens = set(prov_list)
+        # Token raíz para la búsqueda amplia en Notion (primer token identificatorio:
+        # "calf", "calfibra", "camuzzi", "epas"...). Atrapa todas las variantes.
+        core = prov_list[0] if prov_list else _norm(provider).replace(" ", "")[:5]
         today = _date.today()
-        # Check both impaga AND pagada records — avoid recreating an already-paid invoice
-        for existing in [await self.get_impaga_facturas(provider=provider),
-                         await self.get_finance_history_by_provider(provider, limit=10)]:
-            for e in existing:
-                if period_month:
-                    # Match exacto por mes: solo duplicado si el mismo mes aparece en el nombre
-                    existing_lower = (e.name or "").lower()
-                    existing_month = None
-                    em = re.search(r'(\d{2})[/-](\d{4})|(\d{4})[/-](\d{2})', e.name or "")
-                    if em:
-                        # "03/2026" o "2026-06"
-                        existing_month = em.group(1) or em.group(4)
-                    for mes_name, mes_num in _MES_ES.items():
-                        if mes_name in existing_lower:
-                            existing_month = mes_num
-                            break
-                    if existing_month and existing_month == period_month:
-                        return False, "duplicate"
-                else:
-                    # Sin mes identificable: fallback a comparación por dígitos (excluyendo año de 4 dígitos)
-                    new_digits = {d for d in re.findall(r"\d+", period or "") if len(d) != 4}
-                    old_digits = {d for d in re.findall(r"\d+", e.name or "") if len(d) != 4}
-                    if new_digits and new_digits & old_digits:
-                        return False, "duplicate"
+
+        # Candidatos: TODAS las impagas (pocas) + historial pagado por token raíz.
+        candidates = []
+        candidates += await self.get_impaga_facturas()
+        if core:
+            candidates += await self.get_finance_history_by_provider(core, limit=15)
+        for e in candidates:
+            ename = e.name or ""
+            # ¿Mismo proveedor? Comparten al menos un token significativo EXACTO
+            # (así "calf" no matchea con "calfibra", pero "calf energia" sí con "calf luz").
+            if not (prov_tokens & set(_sig_list(ename))):
+                continue
+            emonth = _month_of(ename)
+            if period_month and emonth:
+                if emonth == period_month:
+                    return False, "duplicate"
+            else:
+                # Sin mes identificable: fallback por dígitos (excluyendo el año de 4 dígitos)
+                new_digits = {d for d in re.findall(r"\d+", period or "") if len(d) != 4}
+                old_digits = {d for d in re.findall(r"\d+", ename) if len(d) != 4}
+                if new_digits and new_digits & old_digits:
+                    return False, "duplicate"
         now = datetime.now(timezone.utc) - timedelta(hours=3)
         entry = await self.create_expense({
             "name": f"Factura {provider} — {period}",
