@@ -346,6 +346,121 @@ Mails:
         return None
 
 
+def _walk_email_parts(parts):
+    """Itera recursivamente todas las parts de un mail (los adjuntos pueden estar anidados)."""
+    for p in parts or []:
+        yield p
+        yield from _walk_email_parts(p.get("parts"))
+
+
+async def get_invoices_from_gmail(now: datetime) -> list[dict]:
+    """Extrae facturas de servicios ABRIENDO los PDF adjuntos con visión y
+    devuelve datos estructurados y exactos (monto = total a pagar del PDF),
+    con el proveedor CANONIZADO contra los proveedores conocidos del usuario.
+
+    Reemplaza el viejo flujo (resumen de texto -> Haiku), que perdía montos y
+    duplicaba facturas por variantes del nombre del proveedor.
+    """
+    providers = user_prefs.get("service_providers", {})  # {tipo: nombre}
+    provider_names = [v for v in providers.values() if v]
+    if provider_names:
+        providers_query = " OR ".join(f'"{n}"' for n in provider_names[:6])
+        base_query = f"newer_than:40d ({providers_query} OR factura OR comprobante OR vencimiento)"
+    else:
+        base_query = "newer_than:40d (factura OR comprobante OR boleta OR vencimiento)"
+    access_token = await get_gcal_access_token()
+    if not access_token:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=25) as http:
+            headers = {"Authorization": f"Bearer {access_token}"}
+            r = await http.get(
+                "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+                headers=headers, params={"q": base_query, "maxResults": 20}
+            )
+            if r.status_code != 200:
+                return []
+            messages = r.json().get("messages", [])
+            if not messages:
+                return []
+            pdf_blocks = []
+            email_ctx = []
+            n_pdfs = 0
+            for msg in messages[:12]:
+                full_r = await http.get(
+                    f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg['id']}",
+                    headers=headers, params={"format": "full"}
+                )
+                if full_r.status_code != 200:
+                    continue
+                body = full_r.json()
+                payload = body.get("payload", {})
+                hdrs = {h["name"]: h["value"] for h in payload.get("headers", [])}
+                subject = hdrs.get("Subject", "")
+                sender = hdrs.get("From", "")
+                snippet = body.get("snippet", "")[:200]
+                email_ctx.append(f"- De: {sender} | Asunto: {subject} | Preview: {snippet}")
+                if n_pdfs >= 5:
+                    continue
+                for part in _walk_email_parts(payload.get("parts")):
+                    mime = part.get("mimeType", "")
+                    filename = (part.get("filename", "") or "")
+                    is_pdf = mime == "application/pdf" or filename.lower().endswith(".pdf")
+                    if not is_pdf:
+                        continue
+                    att_id = part.get("body", {}).get("attachmentId")
+                    if not att_id:
+                        continue
+                    try:
+                        att_r = await http.get(
+                            f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg['id']}/attachments/{att_id}",
+                            headers=headers
+                        )
+                        if att_r.status_code == 200:
+                            pdf_b64 = att_r.json().get("data", "").replace("-", "+").replace("_", "/")
+                            if pdf_b64:
+                                pdf_blocks.append({"type": "document", "source": {
+                                    "type": "base64", "media_type": "application/pdf", "data": pdf_b64}})
+                                n_pdfs += 1
+                                break
+                    except Exception:
+                        pass
+                if n_pdfs >= 5:
+                    break
+            if not email_ctx and not pdf_blocks:
+                return []
+            canon = ", ".join(f'"{v}"' for v in provider_names) or "(ninguno configurado todavía)"
+            today = now.strftime("%Y-%m-%d")
+            instr = f"""Sos el extractor de facturas de servicios de Knot. Hoy es {today}.
+Te paso los mails de facturas del último mes y, cuando hay, los PDF adjuntos (esos PDF son la factura REAL).
+
+MONTO (clave): usá el "TOTAL A PAGAR" final del PDF. NO sumes renglones ni uses subtotales. Si una factura tiene descuentos o "devolución de anticipo", el total ya los contempla. Si solo hay texto del mail (sin PDF) y el total no aparece claro, poné amount=null.
+
+CANONIZACIÓN del proveedor: para cada factura usá SIEMPRE uno de estos nombres canónicos si corresponde, sin importar cómo figure (ej: "CALF ENERGÍA", "Cooperativa CALF", "Electricidad", "CALF (Luz)" → todos el mismo canónico de luz):
+Proveedores conocidos: {canon}
+Si es un proveedor nuevo que no está en la lista, elegí un nombre corto y consistente.
+
+Devolvé SOLO un JSON array (sin markdown). Un objeto por factura DISTINTA (no repitas la misma factura):
+{{"provider":"<canónico>","amount":<número o null>,"period":"<Mes YYYY>","due_date":"YYYY-MM-DD o null","category":"Recurrente"}}
+Si no hay ninguna factura, devolvé []."""
+            content = [{"type": "text", "text": instr + "\n\nMails:\n" + "\n".join(email_ctx)}] + pdf_blocks
+            resp = await claude_create(
+                model=SONNET_MODEL, max_tokens=700,
+                messages=[{"role": "user", "content": content}]
+            )
+            raw = resp.content[0].text.strip().strip("`")
+            if raw.lower().startswith("json"):
+                raw = raw[4:].strip()
+            try:
+                data = json.loads(raw) if raw.startswith("[") else []
+            except Exception:
+                data = []
+            return [d for d in data if isinstance(d, dict) and d.get("provider")]
+    except Exception as _e:
+        print(f"[invoices] error: {type(_e).__name__}: {_e}")
+        return []
+
+
 async def get_important_emails() -> str | None:
     """Busca emails importantes que NO son facturas ni servicios.
     Usa una query de Gmail independiente, excluyendo proveedores conocidos."""
@@ -662,22 +777,12 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                 pass
 
     mismatch_followups = []
-    gmail_summary = None
     try:
-        gmail_summary = await get_gmail_summary()
-        if gmail_summary:
-            period_str = now.strftime("%B %Y")
-            try:
-                extract_resp = await claude_create(
-                    model=HAIKU_MODEL, max_tokens=400,
-                    system="Extrae facturas/servicios del resumen de Gmail. Responde SOLO JSON array. Si no hay facturas, responde []. Formato: [{\"provider\": \"nombre\", \"amount\": numero_o_null, \"due_date\": \"YYYY-MM-DD_o_null\", \"period\": \"Mes YYYY\", \"category\": \"Recurrente\"}]",
-                    messages=[{"role": "user", "content": gmail_summary}]
-                )
-                raw = extract_resp.content[0].text.strip().strip("`").lstrip("json").strip()
-                invoices = json.loads(raw) if raw.startswith("[") else []
-            except Exception:
-                invoices = []
-
+        period_str = now.strftime("%B %Y")
+        # Leer las facturas ABRIENDO los PDF adjuntos (monto exacto + proveedor
+        # canonizado), en vez de re-parsear un resumen de texto de 5 líneas.
+        invoices = await get_invoices_from_gmail(now)
+        if invoices:
             mismatch_followups = []
             for inv in invoices:
                 provider = inv.get("provider", "")
