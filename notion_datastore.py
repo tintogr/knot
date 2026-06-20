@@ -1445,6 +1445,13 @@ class NotionDataStore:
         PERÍODO (mes). Así variantes del nombre ("CALF Energía", "CALF (Luz)",
         "CALF Energía Eléctrica") cuentan como el mismo proveedor y no se duplican.
         """
+        # Sin monto no es una factura accionable (ej: aviso "abono vencido" sin importe).
+        # Evita crear entradas basura en $0 que después aparecen como pendientes.
+        try:
+            if not amount or float(amount) <= 0:
+                return False, "no_amount"
+        except (TypeError, ValueError):
+            return False, "no_amount"
         import re, unicodedata
         from datetime import date as _date, timezone
         _MES_ES = {
