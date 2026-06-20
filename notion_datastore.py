@@ -1489,18 +1489,39 @@ class NotionDataStore:
         candidates += await self.get_impaga_facturas()
         if core:
             candidates += await self.get_finance_history_by_provider(core, limit=15)
+        def _entry_date(e):
+            d = getattr(e, "date", None)
+            if not d:
+                return None
+            try:
+                return d if isinstance(d, _date) else _date.fromisoformat(str(d)[:10])
+            except Exception:
+                return None
+
         for e in candidates:
             ename = e.name or ""
             # ¿Mismo proveedor? Comparten al menos un token significativo EXACTO
             # (así "calf" no matchea con "calfibra", pero "calf energia" sí con "calf luz").
             if not (prov_tokens & set(_sig_list(ename))):
                 continue
+            # Mes de la entrada existente: del nombre o, si no está, del campo Date.
+            # (Las entradas reales pagadas se llaman "Expensas", "Calf Energía" sin el
+            #  mes en el nombre — el mes vive en Date. Sin esto se duplicaban.)
             emonth = _month_of(ename)
-            if period_month and emonth:
-                if emonth == period_month:
-                    return False, "duplicate"
-            else:
-                # Sin mes identificable: fallback por dígitos (excluyendo el año de 4 dígitos)
+            ed = _entry_date(e)
+            if not emonth and ed:
+                emonth = f"{ed.month:02d}"
+            # 1) mismo proveedor + mismo mes → duplicado
+            if period_month and emonth and emonth == period_month:
+                return False, "duplicate"
+            # 2) mismo proveedor + mismo monto (±2%) en una entrada reciente (≤45 días)
+            #    → es la misma factura ya cargada (pagada o no), no la repitas.
+            if amount and getattr(e, "value_ars", 0):
+                if abs(e.value_ars - amount) / max(amount, 1) <= 0.02:
+                    if ed is None or (today - ed).days <= 45:
+                        return False, "duplicate"
+            # 3) sin mes ni monto comparables: fallback por dígitos (excluyendo el año)
+            if not (period_month and emonth):
                 new_digits = {d for d in re.findall(r"\d+", period or "") if len(d) != 4}
                 old_digits = {d for d in re.findall(r"\d+", ename) if len(d) != 4}
                 if new_digits and new_digits & old_digits:
