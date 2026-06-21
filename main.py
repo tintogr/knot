@@ -46,6 +46,7 @@ async def startup_event():
     await load_user_config(MY_NUMBER)
     await load_geo_reminders()
     await load_payment_methods()
+    await _ds.load_services()
     await _ds.ensure_db_select_field("finances", "Estado", ["Impaga", "Pagada"])
     await _ds.ensure_db_text_field("config", "Last Summary Date")
     await _ds.ensure_db_number_field("config", "Latitude")

@@ -429,16 +429,22 @@ async def get_invoices_from_gmail(now: datetime) -> list[dict]:
                     break
             if not email_ctx and not pdf_blocks:
                 return []
-            canon = ", ".join(f'"{v}"' for v in provider_names) or "(ninguno configurado todavía)"
+            # Catálogo de servicios con aliases (fuente de verdad para canonizar).
+            svc_lines = []
+            for svc in getattr(_ds, "_services", []) or []:
+                al = ", ".join(svc.get("aliases", []))
+                svc_lines.append(f'- {svc.get("empresa") or svc.get("servicio")} (servicio: {svc.get("servicio")}; aliases: {al})')
+            canon = "\n".join(svc_lines) if svc_lines else ", ".join(f'"{v}"' for v in provider_names) or "(ninguno configurado todavía)"
             today = now.strftime("%Y-%m-%d")
             instr = f"""Sos el extractor de facturas de servicios de Knot. Hoy es {today}.
 Te paso los mails de facturas del último mes y, cuando hay, los PDF adjuntos (esos PDF son la factura REAL).
 
 MONTO (clave): usá el "TOTAL A PAGAR" final del PDF. NO sumes renglones ni uses subtotales. Si una factura tiene descuentos o "devolución de anticipo", el total ya los contempla. Si solo hay texto del mail (sin PDF) y el total no aparece claro, poné amount=null.
 
-CANONIZACIÓN del proveedor: para cada factura usá SIEMPRE uno de estos nombres canónicos si corresponde, sin importar cómo figure (ej: "CALF ENERGÍA", "Cooperativa CALF", "Electricidad", "CALF (Luz)" → todos el mismo canónico de luz):
-Proveedores conocidos: {canon}
-Si es un proveedor nuevo que no está en la lista, elegí un nombre corto y consistente.
+CANONIZACIÓN del proveedor: tenés este catálogo de servicios conocidos con sus aliases. Si la factura matchea cualquier alias/empresa, devolvé como "provider" el nombre de la EMPRESA del catálogo (no inventes variantes). Ej: una factura de "Interfast" o del "Consorcio ARIES VI" → provider de Expensas.
+Catálogo:
+{canon}
+Si es un proveedor nuevo que no está en el catálogo, elegí un nombre corto y consistente.
 
 Devolvé SOLO un JSON array (sin markdown). Un objeto por factura DISTINTA (no repitas la misma factura):
 {{"provider":"<canónico>","amount":<número o null>,"period":"<Mes YYYY>","due_date":"YYYY-MM-DD o null","category":"Recurrente"}}

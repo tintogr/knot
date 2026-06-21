@@ -467,9 +467,74 @@ class NotionDataStore:
             "Content-Type": "application/json",
         }
         self._http = httpx.AsyncClient(timeout=15)
+        self._services: list = []  # cache de la DB Servicios (cargada en startup)
 
     async def aclose(self):
         await self._http.aclose()
+
+    async def load_services(self) -> list:
+        """Carga la DB Servicios a self._services. Cada item tiene:
+        servicio, empresa, aliases[], categoria, frecuencia, vence_dia,
+        llega_por_mail, activo. Es la fuente de verdad para identificar
+        facturas y pagos (ej: alias 'interfast' -> servicio Expensas)."""
+        try:
+            pages = await self._query_db("services", page_size=50)
+        except Exception:
+            return self._services
+        out = []
+        for p in pages:
+            props = p.get("properties", {})
+
+            def _title(n):
+                return "".join(x.get("plain_text", "") for x in props.get(n, {}).get("title", [])).strip()
+
+            def _txt(n):
+                return "".join(x.get("plain_text", "") for x in props.get(n, {}).get("rich_text", [])).strip()
+
+            def _sel(n):
+                s = props.get(n, {}).get("select")
+                return s.get("name") if s else None
+
+            servicio = _title("Servicio")
+            if not servicio:
+                continue
+            aliases = [a.strip().lower() for a in _txt("Aliases").split(",") if a.strip()]
+            out.append({
+                "servicio": servicio,
+                "empresa": _txt("Empresa"),
+                "aliases": aliases,
+                "categoria": _sel("Categoría") or "Recurrente",
+                "frecuencia": _sel("Frecuencia"),
+                "vence_dia": props.get("Vence dia", {}).get("number"),
+                "llega_por_mail": bool(props.get("Llega por mail", {}).get("checkbox")),
+                "activo": bool(props.get("Activo", {}).get("checkbox")),
+            })
+        self._services = out
+        return out
+
+    def service_of(self, text: str):
+        """Devuelve el servicio (dict) cuyo alias/empresa/nombre aparece en `text`,
+        o None. Permite canonizar: 'pagué interfast' o 'Factura Interfast' -> Expensas."""
+        import unicodedata as _ud, re as _re
+
+        def _n(s):
+            s = ''.join(c for c in _ud.normalize('NFD', (s or '').lower()) if _ud.category(c) != 'Mn')
+            return _re.sub(r'[^a-z0-9]+', ' ', s)
+
+        t = _n(text)
+        if not t.strip():
+            return None
+        for svc in self._services:
+            terms = list(svc.get("aliases", []))
+            if svc.get("servicio"):
+                terms.append(svc["servicio"])
+            if svc.get("empresa"):
+                terms.append(svc["empresa"])
+            for term in terms:
+                tn = _n(term).strip()
+                if tn and len(tn) >= 3 and _re.search(r'\b' + _re.escape(tn) + r'\b', t):
+                    return svc
+        return None
 
     # ── Internal HTTP helpers ──────────────────────────────────────────────
 
@@ -1488,16 +1553,27 @@ class NotionDataStore:
         prov_tokens = set(prov_list)
         today = _date.today()
 
+        # Servicio canónico del proveedor (vía aliases de la DB Servicios), si matchea.
+        svc_new = self.service_of(provider)
+
         # Candidatos: TODAS las impagas (pocas) + historial pagado buscando por CADA
-        # token significativo del proveedor. Buscar por cada token (no solo el primero)
-        # atrapa entradas cuyo nombre no comparte la palabra-cabecera: ej. proveedor
-        # "Interfast Expensas" encuentra la entrada real llamada solo "Expensas".
+        # token significativo del proveedor, MÁS el nombre del servicio/empresa canónica.
+        # Así "Interfast Expensas" (o solo "Interfast") encuentra la entrada "Expensas".
         candidates = []
         candidates += await self.get_impaga_facturas()
-        _query_tokens = prov_list or [_norm(provider).replace(" ", "")[:5]]
+        _query_tokens = list(prov_list)
+        if svc_new:
+            _query_tokens.append(svc_new.get("servicio", ""))
+            if svc_new.get("empresa"):
+                _query_tokens.append(svc_new["empresa"].split()[0])
+        if not _query_tokens:
+            _query_tokens = [_norm(provider).replace(" ", "")[:5]]
+        _seen_q = set()
         for tok in _query_tokens:
-            if tok:
-                candidates += await self.get_finance_history_by_provider(tok, limit=12)
+            tn = _norm(tok).strip()
+            if tn and len(tn) >= 4 and tn not in _seen_q:
+                _seen_q.add(tn)
+                candidates += await self.get_finance_history_by_provider(tn, limit=10)
         def _entry_date(e):
             d = getattr(e, "date", None)
             if not d:
@@ -1509,9 +1585,16 @@ class NotionDataStore:
 
         for e in candidates:
             ename = e.name or ""
-            # ¿Mismo proveedor? Comparten al menos un token significativo EXACTO
-            # (así "calf" no matchea con "calfibra", pero "calf energia" sí con "calf luz").
-            if not (prov_tokens & set(_sig_list(ename))):
+            # ¿Mismo proveedor? Dos vías:
+            #  a) comparten un token significativo EXACTO ("calf energia" ~ "calf luz",
+            #     pero "calf" NO matchea "calfibra"); o
+            #  b) ambos mapean al MISMO servicio vía aliases ("Interfast" ~ "Expensas").
+            same_provider = bool(prov_tokens & set(_sig_list(ename)))
+            if not same_provider and svc_new:
+                svc_e = self.service_of(ename)
+                if svc_e and svc_e.get("servicio") == svc_new.get("servicio"):
+                    same_provider = True
+            if not same_provider:
                 continue
             # Mes de la entrada existente: del nombre o, si no está, del campo Date.
             # (Las entradas reales pagadas se llaman "Expensas", "Calf Energía" sin el

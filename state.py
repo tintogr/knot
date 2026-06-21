@@ -27,6 +27,7 @@ HEALTH_RECORDS_DB_ID = os.environ.get("NOTION_HEALTH_RECORDS_DB_ID", "5f9cde7223
 MEDICATIONS_DB_ID    = os.environ.get("NOTION_MEDICATIONS_DB_ID",    "d16f6826e18d4e4c9e6768a9ebd07507")
 FITNESS_DB_ID           = os.environ.get("NOTION_FITNESS_DB_ID",           "c6eb4ddbfe0245bdb5bfcb2b5e33a6e5")
 PAYMENT_METHODS_DB_ID   = os.environ.get("NOTION_PAYMENT_METHODS_DB_ID",   "33a84df32b904d9785d3a298d08db439")
+SERVICES_DB_ID          = os.environ.get("NOTION_SERVICES_DB_ID",          "922e0822baee4d1bba19e778e0e177d4")
 
 WA_TOKEN    = os.environ["WHATSAPP_TOKEN"]
 WA_PHONE_ID = os.environ["WHATSAPP_PHONE_ID"]
@@ -69,6 +70,7 @@ _ds = NotionDataStore(
         "medications":       MEDICATIONS_DB_ID,
         "fitness":           FITNESS_DB_ID,
         "payment_methods":   PAYMENT_METHODS_DB_ID,
+        "services":          SERVICES_DB_ID,
     },
 )
 
