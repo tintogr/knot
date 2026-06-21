@@ -1486,16 +1486,18 @@ class NotionDataStore:
         period_month = _month_of(period)
         prov_list = _sig_list(provider)
         prov_tokens = set(prov_list)
-        # Token raíz para la búsqueda amplia en Notion (primer token identificatorio:
-        # "calf", "calfibra", "camuzzi", "epas"...). Atrapa todas las variantes.
-        core = prov_list[0] if prov_list else _norm(provider).replace(" ", "")[:5]
         today = _date.today()
 
-        # Candidatos: TODAS las impagas (pocas) + historial pagado por token raíz.
+        # Candidatos: TODAS las impagas (pocas) + historial pagado buscando por CADA
+        # token significativo del proveedor. Buscar por cada token (no solo el primero)
+        # atrapa entradas cuyo nombre no comparte la palabra-cabecera: ej. proveedor
+        # "Interfast Expensas" encuentra la entrada real llamada solo "Expensas".
         candidates = []
         candidates += await self.get_impaga_facturas()
-        if core:
-            candidates += await self.get_finance_history_by_provider(core, limit=15)
+        _query_tokens = prov_list or [_norm(provider).replace(" ", "")[:5]]
+        for tok in _query_tokens:
+            if tok:
+                candidates += await self.get_finance_history_by_provider(tok, limit=12)
         def _entry_date(e):
             d = getattr(e, "date", None)
             if not d:
