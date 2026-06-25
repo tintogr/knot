@@ -3165,7 +3165,8 @@ async def handle_evento_agent(phone: str, text: str, image_b64=None, image_type=
                 "type": "object",
                 "properties": {
                     "search_term": {"type": "string", "description": "Nombre o keyword del evento"},
-                    "target_date": {"type": ["string", "null"], "description": "YYYY-MM-DD si menciona fecha"},
+                    "target_date": {"type": ["string", "null"], "description": "YYYY-MM-DD SOLO si el usuario falta UNA fecha puntual ('el jueves 25 no voy')"},
+                    "weekday": {"type": ["string", "null"], "description": "Día de la semana en español (lunes..domingo) cuando el usuario deja de ir un día recurrente de forma permanente ('no voy más los jueves', 'ya no los martes'). Borra SOLO la serie recurrente de ese día. NO uses target_date en este caso."},
                     "delete_all": {"type": "boolean", "description": "True para borrar todos los de esa fecha"}
                 },
                 "required": ["search_term"]
@@ -3211,7 +3212,9 @@ REGLA CRITICA DE FECHAS: antes de crear o editar cualquier evento cuya fecha ven
 Tu tarea: gestionar eventos del calendario del usuario.
 - Si el mensaje tiene titulo Y fecha claros -> usa crear_evento.
 - Si quiere modificar un evento -> usa editar_evento.
-- Si quiere borrar -> usa eliminar_evento. SIEMPRE incluye target_date cuando el usuario menciona un dia especifico ("el lunes", "ya no voy el martes", "al final el jueves no"). Sin target_date vas a borrar el evento equivocado.
+- Si quiere borrar -> usa eliminar_evento. DISTINGUÍ dos casos y llamá UNA sola vez:
+   • Falta puntual ("el jueves 25 no voy", "esta semana no") -> pasá target_date con esa fecha (UNA sola).
+   • Deja de ir un día recurrente para siempre ("no voy más los jueves", "ya no los martes", "sacá los viernes") -> pasá weekday con el día (NO target_date, NO una llamada por cada fecha). Borra solo esa serie recurrente con una única confirmación.
 - Si falta info esencial -> pregunta de forma natural y breve.
 - Podes consultar el calendario primero si necesitas verificar algo.
 - Si el usuario manda una imagen (flyer, screenshot de turno, invitacion), extrae la info y crea el evento.
@@ -3445,29 +3448,71 @@ EVENTOS RECURRENTES:
                         t_result = "No encontre eventos con '" + search_term + "'."
                     else:
                         events = [e for e in r.json()["items"] if "[TEMP]" not in (e.get("description") or "")]
-                        to_delete = events if delete_all else events[:1]
-                        # Chequeo de alto impacto: evento recurrente sin fecha especifica
-                        has_recurring = any(e.get("recurrence") or e.get("recurringEventId") for e in to_delete)
-                        if has_recurring and not target_date:
-                            ev_names = ", ".join(set(e.get("summary","Evento") for e in to_delete))
-                            descripcion = f"Eliminar *todas* las instancias de _{ev_names}_ (evento recurrente)"
-                            high_impact_pending = {"action": "delete_recurring", "events": [{"id": e["id"], "summary": e.get("summary","Evento")} for e in to_delete], "descripcion": descripcion}
-                            t_result = f"CONFIRMACION_REQUERIDA: {descripcion}"
-                        else:
-                            ev = to_delete[0]
-                            ev_name = ev.get("summary", "Evento")
-                            expires_at = (now_argentina() + timedelta(minutes=5)).replace(tzinfo=None).isoformat()
-                            pending_state[phone] = {
-                                "type": "confirm_delete", "action": "event",
-                                "page_id": ev["id"], "name": ev_name,
-                                "expires_at": expires_at,
-                                "extra_events": [{"id": e["id"], "summary": e.get("summary", "Evento")} for e in to_delete[1:]],
-                            }
-                            await send_interactive_buttons(phone, f"¿Eliminás *{ev_name}*?", [
-                                {"id": "confirm_delete_yes", "title": "Sí, eliminalo"},
-                                {"id": "confirm_delete_no", "title": "No, cancelar"},
-                            ])
-                            t_result = f"Pedí confirmación al usuario para eliminar {ev_name}."
+
+                        # Caso "no voy más los <día>": borrar SOLO la serie recurrente de ese día,
+                        # con UNA sola confirmación (no una por cada fecha futura).
+                        weekday = t_input.get("weekday")
+                        _wd_handled = False
+                        if weekday:
+                            _DIAS_WD = {"lunes": 0, "martes": 1, "miercoles": 2, "miércoles": 2,
+                                        "jueves": 3, "viernes": 4, "sabado": 5, "sábado": 5, "domingo": 6}
+                            _wd = _DIAS_WD.get(weekday.strip().lower())
+                            if _wd is not None:
+                                _series = {}  # recurringEventId -> summary (una entrada por serie)
+                                for e in events:
+                                    s = e.get("start", {}).get("dateTime") or e.get("start", {}).get("date") or ""
+                                    rid = e.get("recurringEventId")
+                                    if not s or not rid:
+                                        continue
+                                    try:
+                                        if datetime.strptime(s[:10], "%Y-%m-%d").weekday() == _wd:
+                                            _series.setdefault(rid, e.get("summary", "Evento"))
+                                    except Exception:
+                                        pass
+                                if _series:
+                                    _items = list(_series.items())
+                                    _first_id, _first_name = _items[0]
+                                    pending_state[phone] = {
+                                        "type": "confirm_delete", "action": "event",
+                                        "page_id": _first_id, "name": f"{_first_name} de los {weekday}",
+                                        "expires_at": (now_argentina() + timedelta(minutes=5)).replace(tzinfo=None).isoformat(),
+                                        "extra_events": [{"id": i, "summary": n} for i, n in _items[1:]],
+                                    }
+                                    await send_interactive_buttons(
+                                        phone,
+                                        f"¿Borro *todos* los {_first_name} de los {weekday}? (serie recurrente)",
+                                        [{"id": "confirm_delete_yes", "title": "Sí, borralos"},
+                                         {"id": "confirm_delete_no", "title": "No, cancelar"}],
+                                    )
+                                    t_result = f"Pedí UNA confirmación para borrar la serie recurrente de {_first_name} de los {weekday}."
+                                else:
+                                    t_result = f"No encontré una serie recurrente de '{search_term}' los {weekday}."
+                                _wd_handled = True
+
+                        if not _wd_handled:
+                            to_delete = events if delete_all else events[:1]
+                            # Chequeo de alto impacto: evento recurrente sin fecha especifica
+                            has_recurring = any(e.get("recurrence") or e.get("recurringEventId") for e in to_delete)
+                            if has_recurring and not target_date:
+                                ev_names = ", ".join(set(e.get("summary","Evento") for e in to_delete))
+                                descripcion = f"Eliminar *todas* las instancias de _{ev_names}_ (evento recurrente)"
+                                high_impact_pending = {"action": "delete_recurring", "events": [{"id": e["id"], "summary": e.get("summary","Evento")} for e in to_delete], "descripcion": descripcion}
+                                t_result = f"CONFIRMACION_REQUERIDA: {descripcion}"
+                            else:
+                                ev = to_delete[0]
+                                ev_name = ev.get("summary", "Evento")
+                                expires_at = (now_argentina() + timedelta(minutes=5)).replace(tzinfo=None).isoformat()
+                                pending_state[phone] = {
+                                    "type": "confirm_delete", "action": "event",
+                                    "page_id": ev["id"], "name": ev_name,
+                                    "expires_at": expires_at,
+                                    "extra_events": [{"id": e["id"], "summary": e.get("summary", "Evento")} for e in to_delete[1:]],
+                                }
+                                await send_interactive_buttons(phone, f"¿Eliminás *{ev_name}*?", [
+                                    {"id": "confirm_delete_yes", "title": "Sí, eliminalo"},
+                                    {"id": "confirm_delete_no", "title": "No, cancelar"},
+                                ])
+                                t_result = f"Pedí confirmación al usuario para eliminar {ev_name}."
 
         elif t_name == "calcular_fecha":
             t_result = calcular_fecha_exacta(t_input.get("descripcion", ""))
@@ -4146,6 +4191,15 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
                             headers={"Authorization": f"Bearer {access_token}"}
                         )
                         ok = r.status_code == 204
+                        # Borrar también los eventos/series adicionales si los hay
+                        for _ex in (state.get("extra_events") or []):
+                            try:
+                                await http.delete(
+                                    f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{_ex['id']}",
+                                    headers={"Authorization": f"Bearer {access_token}"}
+                                )
+                            except Exception:
+                                pass
                 if ok:
                     msg = f"*{name}* eliminado del calendario."
                     # Después de eliminar, mostrar como queda el día
