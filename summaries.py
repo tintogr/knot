@@ -516,6 +516,20 @@ async def get_important_emails() -> str | None:
             if not mail_lines:
                 return None
             mail_text = "\n---\n".join(mail_lines)
+            # Servicios conocidos: sus recordatorios de pago/abono se gestionan aparte,
+            # no deben aparecer en "emails importantes" (el usuario ya los paga).
+            _services = getattr(_ds, "_services", []) or []
+            _svc_terms = []
+            for _s in _services:
+                if _s.get("empresa"):
+                    _svc_terms.append(_s["empresa"])
+                elif _s.get("servicio"):
+                    _svc_terms.append(_s["servicio"])
+                _svc_terms += _s.get("aliases", [])
+            _svc_ctx = ""
+            if _svc_terms:
+                _svc_ctx = ("\n\nSERVICIOS CONOCIDOS (no los muestres): " + ", ".join(_svc_terms[:40]) +
+                            ".\nSi un email es un recordatorio de pago, 'abono vencido', vencimiento o factura de alguno de estos servicios, IGNORALO — ya se gestionan aparte y probablemente ya estén pagados. No son emails importantes.")
             resp = await claude_create(
                 model=HAIKU_MODEL, max_tokens=500,
                 system="""Sos Knot. Revisas la bandeja de entrada del usuario.
@@ -528,7 +542,7 @@ Donde LINK_DEL_EMAIL es el valor del campo "Link:" del email, copiado exactament
 Ejemplo:
 - *mueble juani* (De: Martín): pregunta si podés pasar a buscarlo esta tarde.
   https://mail.google.com/mail/u/0/#all/18f3a2b1c4d5e6f7
-Máximo 6 emails. Si no hay nada relevante respondé exactamente: NADA""",
+Máximo 6 emails. Si no hay nada relevante respondé exactamente: NADA""" + _svc_ctx,
                 messages=[{"role": "user", "content": mail_text}]
             )
             result = resp.content[0].text.strip()
