@@ -1008,6 +1008,23 @@ _recent_creations: dict = {}
 DUP_WINDOW_MIN = 10
 
 
+def _canonical_service_name(name: str) -> str | None:
+    """Si el nombre del gasto es SOLO la empresa o un alias de un servicio fijo
+    ('ARCA'), devuelve el nombre del servicio ('Monotributo'). Nombres mas
+    descriptivos ('Electricidad - Calf Energía') se dejan como estan."""
+    import unicodedata as _ud, re as _re
+
+    def _n(s):
+        s = "".join(c for c in _ud.normalize("NFD", (s or "").lower()) if _ud.category(c) != "Mn")
+        return _re.sub(r"[^a-z0-9]+", " ", s).strip()
+
+    svc = _ds.service_of(name or "")
+    if not svc or not svc.get("servicio"):
+        return None
+    terms = {_n(t) for t in [svc.get("empresa")] + list(svc.get("aliases") or []) if t}
+    return svc["servicio"] if _n(name) in terms else None
+
+
 def _prune_recent_creations(now=None):
     now = now or now_argentina()
     for _k, _ts in list(_recent_creations.items()):
@@ -1072,6 +1089,19 @@ async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=N
     if providers:
         prov_lines = [f"  - {k}: {v}" for k, v in providers.items()]
         providers_ctx = "\nProveedores de servicios configurados (usar para resolver nombres):\n" + "\n".join(prov_lines) + "\nSi el gasto menciona un proveedor conocido, usa el nombre canonico (ej: 'electricidad' → 'Electricidad - {nombre proveedor}').\n"
+    # DB Servicios: fuente de verdad para saber que "pague ARCA 56379" es el Monotributo.
+    _svc_lines = []
+    for _svc in (getattr(_ds, "_services", None) or []):
+        _quien = ", ".join(filter(None, [_svc.get("empresa")] + list(_svc.get("aliases") or [])))
+        if _svc.get("servicio") and _quien:
+            _svc_lines.append(f"  - {_svc['servicio']} <- {_quien}")
+    if _svc_lines:
+        providers_ctx += (
+            "\nServicios fijos del usuario (nombre a usar <- empresa/aliases):\n" + "\n".join(_svc_lines)
+            + "\nSi el gasto es un pago a una de esas empresas, usá ese nombre como name "
+              "(ej: una factura o pago de ARCA es 'Monotributo'). Si no estás seguro de a cuál "
+              "corresponde, registralo igual y preguntá en el texto.\n"
+        )
     pm_lines = []
     for pm in payment_methods_cache:
         parts = [f"  - {pm.name} ({pm.modality}"]
@@ -1153,6 +1183,11 @@ Emoji: elegi el mas especifico segun el contexto real."""
         # respuesta tiraba KeyError: el usuario veia "Error" con el gasto ya creado.
         if not data.get("date"):
             data["date"] = now.strftime("%Y-%m-%d")
+        _canon = _canonical_service_name(data.get("name", ""))
+        if _canon:
+            if not data.get("notas"):
+                data["notas"] = f"Pago a {data['name']}"
+            data["name"] = _canon
         final_cats, cat_note = await check_and_apply_category(data.get("name", ""), data.get("categoria", []))
         data["categoria"] = final_cats
 
@@ -6326,7 +6361,21 @@ async def process_single_item(phone: str, item: dict):
         exchange_rate = await get_exchange_rate()
 
         if tipo == "GASTO":
-            reply = await handle_gasto_agent(phone, text, image_b64, image_type, exchange_rate, extra_images=extra_images)
+            _antes = dict(_recent_creations)
+            try:
+                reply = await handle_gasto_agent(phone, text, image_b64, image_type, exchange_rate, extra_images=extra_images)
+            except Exception as _e:
+                # Si algo falla DESPUES de guardar, un "Error: ..." seco hace creer que no
+                # se cargo nada y el usuario reenvia. Decir que quedo guardado.
+                _nuevos = [k for k, ts in _recent_creations.items() if _antes.get(k) != ts]
+                if not _nuevos:
+                    raise
+                print(f"[gasto_agent] fallo despues de guardar: {type(_e).__name__}: {_e}")
+                _lista = "\n".join(f"✅ {n[:1].upper() + n[1:]} — ${a:,.0f}" for n, a, _ in _nuevos)
+                reply = (f"Tuve un problema técnico al terminar, pero esto *sí quedó guardado*:\n{_lista}\n\n"
+                         f"No hace falta que lo reenvíes.")
+                add_to_history(phone, "user", text or "(imagen)")
+                add_to_history(phone, "assistant", reply)
             await _reply(reply)
 
         elif tipo == "DEUDA":
