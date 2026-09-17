@@ -1009,9 +1009,11 @@ DUP_WINDOW_MIN = 10
 
 
 def _canonical_service_name(name: str) -> str | None:
-    """Si el nombre del gasto es SOLO la empresa o un alias de un servicio fijo
-    ('ARCA'), devuelve el nombre del servicio ('Monotributo'). Nombres mas
-    descriptivos ('Electricidad - Calf Energía') se dejan como estan."""
+    """Si el nombre del gasto es SOLO la empresa o un alias de un impuesto ('ARCA'),
+    devuelve el nombre del servicio ('Monotributo'). Solo para Categoria=Impuestos:
+    el organismo no dice que se pago. Para el resto la empresa ya lo dice y renombrar
+    rompia el formato habitual (Movistar -> 'Teléfono', CALF -> 'Luz') o erraba con
+    alias genericos ('Pronto Pago' -> 'Internet', 'Apple' -> 'iCloud')."""
     import unicodedata as _ud, re as _re
 
     def _n(s):
@@ -1019,7 +1021,7 @@ def _canonical_service_name(name: str) -> str | None:
         return _re.sub(r"[^a-z0-9]+", " ", s).strip()
 
     svc = _ds.service_of(name or "")
-    if not svc or not svc.get("servicio"):
+    if not svc or not svc.get("servicio") or svc.get("categoria") != "Impuestos":
         return None
     terms = {_n(t) for t in [svc.get("empresa")] + list(svc.get("aliases") or []) if t}
     return svc["servicio"] if _n(name) in terms else None
@@ -1098,9 +1100,12 @@ async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=N
     if _svc_lines:
         providers_ctx += (
             "\nServicios fijos del usuario (nombre a usar <- empresa/aliases):\n" + "\n".join(_svc_lines)
-            + "\nSi el gasto es un pago a una de esas empresas, usá ese nombre como name "
-              "(ej: una factura o pago de ARCA es 'Monotributo'). Si no estás seguro de a cuál "
-              "corresponde, registralo igual y preguntá en el texto.\n"
+            + "\nUsá esta lista para saber QUÉ se pagó. Si el nombre de la empresa no lo dice "
+              "(ARCA/AFIP -> 'Monotributo'), usá el nombre del servicio. Si la empresa ya lo dice, "
+              "mantené el formato habitual del usuario: 'Gas - Camuzzi', 'Electricidad - Calf Energía', "
+              "'Movistar', 'Expensas'. Ojo: Pronto Pago es solo un medio de cobro (cobra varios "
+              "servicios) y Apple puede ser una compra, no iCloud. Si no estás seguro de a qué "
+              "servicio corresponde, registralo igual y preguntá en el texto.\n"
         )
     pm_lines = []
     for pm in payment_methods_cache:
@@ -4479,6 +4484,11 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
         if t in ("si", "sí", "dale", "ok", "sip", "eso", "exacto", "correcto", "si, eso", "sí, eso"):
             ok, event_id = await create_recordatorio({"summary": state["summary"], "fire_at": state["fire_at"], "emoji": "🔔"})
             if ok:
+                pending_state[phone] = {
+                    "type": "reminder_created",
+                    "events": [{"id": event_id, "summary": state["summary"], "fire_at": state["fire_at"]}],
+                    "expires_at": (now_argentina() + timedelta(minutes=15)).replace(tzinfo=None).isoformat(),
+                }
                 await send_message(phone, format_recordatorio({"summary": state["summary"], "fire_at": state["fire_at"], "emoji": "🔔"}))
             else:
                 await send_message(phone, "No pude crear el recordatorio. Probá de nuevo.")
