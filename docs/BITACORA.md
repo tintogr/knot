@@ -1,4 +1,6 @@
-# Bitácora de Knot — sesión de desarrollo (junio–julio 2026)
+# Bitácora de Knot — sesiones de desarrollo (junio–septiembre 2026)
+
+> §0–9: junio–julio. §10: agosto–septiembre (al final del documento).
 
 Documento extenso con **todo** lo que hablamos, cambiamos y decidimos, para retomar
 sin perder contexto. El `CLAUDE.md` es el resumen corto; esto es el detalle.
@@ -168,3 +170,113 @@ identificar servicios aunque el nombre varíe.
 - El mapa de mensajes citados no sobrevive reinicios de Render (aceptable para un bot
   personal; persistirlo sería un extra).
 - Movistar tiene varias entradas históricas; se puede ordenar como se hizo con CALF si molesta.
+
+---
+
+## 10. Sesión agosto–septiembre 2026
+
+Arrancó con "Knot anda muy mal: no sigue el hilo y dice que no puede hacer cosas que
+sí puede". Casi todo resultó ser una misma familia: **Knot afirmaba o hacía cosas sin
+tener la información**, y cuando algo fallaba lo tapaba.
+
+### 10.1 Setup
+- Martin sigue solo en esta Mac. Se descartó sincronización automática entre PCs.
+- `gh` (GitHub CLI 2.97) instalado a mano en `~/bin` (no hay Homebrew), `PATH` en
+  `~/.zshrc`, login por device flow y `gh auth setup-git`. GitHub Desktop tiene sus
+  propias credenciales, que la terminal no ve.
+
+### 10.2 Pregunta "¿con qué pagaste?" y el hilo de la conversación
+- `dd2a0e8`: un gasto nuevo de 2 palabras ("Expensas 110000") no llegaba al umbral
+  de ≥3 palabras y se comía como respuesta al método de pago → umbral a 2.
+- `264bc47`: las confirmaciones de facturas (`confirm_factura_paid`,
+  `factura_mismatch_confirm`, `factura_confirm`) abandonaban la pregunta ante
+  cualquier mensaje de ≥4 palabras, aunque fuera la aclaración pedida ("la de camuzzi
+  que acabo de pagar es de agosto") → terminaba en `corregir_gasto` con respuestas
+  sin sentido. Ahora solo se abandona si el mensaje trae un monto.
+- `20d6fad`: al soltar la pregunta y reprocesar el mensaje, **el agente de gastos
+  re-ejecutaba el registro anterior** en vez del nuevo (se perdieron "antigüedades" y
+  "funcional 77000"). La línea del prompt "no re-registres los ✅" no alcanzaba: ahora
+  recibe la lista explícita de lo registrado en los últimos 10 min + "REGLA #1: lo que
+  registrás es el ÚLTIMO mensaje".
+
+### 10.3 Duplicados
+- `22f2aa3` + `28d5d1d`: guardarraíl anti-duplicado (mismo nombre + monto + fecha en
+  10 min). Primero era solo memoria (`_recent_creations`), pero cada deploy de Render
+  la borra → ahora también consulta Notion por `created_time`
+  (`_ds.find_recent_duplicate`).
+- Los 4 duplicados del 26/07 (Movistar, Claude, Verdura, Yogurt) salieron del incidente
+  de las 18:08 del 10/08, 6 segundos **antes** de que existiera el guardarraíl. Martin
+  los borró a mano.
+- `254cdb0`: si el agente falla **después** de guardar, se lista lo que sí quedó
+  guardado ("no hace falta reenviarlo") en vez de un `Error:` seco. Eso era lo que
+  hacía reenviar y generaba el confuso "ya estaba registrado".
+
+### 10.4 Estado Pagada/Impaga y correcciones
+- `22f2aa3`: `create_notion_entry` nunca pasaba `estado` → todos los gastos por
+  WhatsApp nacían con Estado vacío. Ahora los EGRESO nacen `Pagada`.
+- `a8b6ebc`: "el alquiler está impago" → `corregir_gasto` con `new_estado`;
+  `update_expense` soporta `estado`.
+- `b8f561d`: lote de 6 gastos con uno sin `date` → se guardaba y después
+  `data['date']` tiraba KeyError. Ahora falta date = hoy; la confirmación muestra la
+  fecha si no es hoy; `corregir_gasto` tiene `new_date` ("cambiá la fecha de la cena
+  al 06/09"). El agente deja de decir "no puedo hacer correcciones".
+- `05daa46`: "no, ahora borraste la de agosto!" se clasificó ELIMINAR_GASTO; el
+  extractor sacó "agosto" y con `limit=1` ofreció borrar "Sesiones psicóloga - julio y
+  agosto". Ahora el extractor puede devolver null (verbo en pasado = reclamo), varias
+  coincidencias se listan, la confirmación muestra el monto, y corregir/eliminar
+  reciben contexto (`_history_context`).
+
+### 10.5 Facturas
+- `49ad66c` (**el más grave**): `mark_finance_paid` escribía `Method` como `select`,
+  pero es una **relación**. Notion rechazaba el update entero (400), el except devolvía
+  False y nadie lo miraba: Knot decía "✅ marcada como pagada" sin tocar nada, en casi
+  todo pago con comprobante. Ahora se resuelve el id del método
+  (`_resolve_payment_method_id`), se loguea el fallo y los 4 lugares que anunciaban el
+  cambio chequean el bool.
+- `7681e26`: el match factura↔pago era solo por proveedor + monto (±10%). Ahora el
+  agente extrae `periodo_factura` del comprobante y se compara con el mes de la
+  factura (`_invoice_period`: del título "— Ago 2026", o del Date con ±1 mes). Si no
+  coincide, pregunta.
+- `9cff9ab`: la factura de Camuzzi de abril quedó en $22,96 (era $22.966): el punto
+  de miles argentino leído como decimal. Prompt con formato explícito + control contra
+  el historial del proveedor (x1000 si cae en rango).
+- `254cdb0`: el agente de gastos por fin usa la DB Servicios (era el ítem 2 de la hoja
+  de ruta): "ARCA" → "Monotributo" (`_canonical_service_name`, solo si el nombre es
+  exactamente una empresa/alias).
+
+### 10.6 Calendario, ubicaciones y recordatorios
+- `f5c129a`, `042be0e`, `0c95776`: "¿dónde es?" sobre "en lo de Mati" (location =
+  "Allen") mandaba al agente a Google Contacts (falla: el token no tiene scope de
+  People API; **decisión: no agregarlo**). Ahora: mira el calendario, reconoce que una
+  ciudad o "lo de Mati" no es una dirección, revisa lugares conocidos y pregunta. El
+  aviso decía "tiene ubicación" (falso) y el "sí" **no hacía nada** (no hay routing):
+  ahora dice "Lo anoté en Allen, ¿te armo la ruta?" y manda un link de Google Maps con
+  origen GPS (gratis, muestra el tráfico). `73afdcf`: no se ofrece si la ubicación es
+  tu propia ciudad.
+- `d770917`: "hacerme acordar del keynote" → recordatorio **hoy 12:00** inventado:
+  `parse_recordatorio` no veía la agenda y estaba obligado a dar `fire_at`. Ahora
+  recibe 60 días de agenda y puede devolver null.
+- `73afdcf`: si no está en agenda ni tiene fecha, **busca en la web**
+  (`web_search_20250305`) a qué se refiere ("el próximo keynote" = evento de Apple) y
+  propone con confirmación. Tras crear un recordatorio hay 15 min para decir "no es
+  hoy": se borra el evento y se rehace. El chat ya no responde sobre otro evento
+  cuando no encuentra el pedido (el keynote había terminado en el cumpleaños de Martin).
+
+### 10.7 Limpieza de datos (hecha desde Claude Code con el conector de Notion)
+- CALF: la factura de **julio** ($93.115,36, comprobante 20832901) nunca se había
+  cargado ni pagado → se creó y se marcó Pagada (Pronto Pago, 02/09). La de agosto
+  ($90.246,49) se pagó **dos veces** el 02/09 (BBVA 13:31 y Pronto Pago 15:53); CALF
+  tomó el extra a cuenta de septiembre, que quedó en $10.506,22.
+- Camuzzi abril: monto corregido a $22.966. Los dos "Gas - Camuzzi" $22.966 (10/04 y
+  10/08, creados con 10 min de diferencia) son el mismo pago → falta borrar uno.
+- "ARCA" → "Monotributo"; cena del cumpleaños → 06/09; gastos del cumpleaños → 10/09.
+- El conector **no puede borrar ni archivar**: se le pasan links a Martin.
+
+### 10.8 Abierto
+- **Doble conteo factura + pago** (ver `CLAUDE.md`, hoja de ruta 0): decisión pendiente.
+- Borrar a mano: copia de "Supermercado $63.000" del 04/07 (16:18:56), uno de los "Gas -
+  Camuzzi" $22.966 y el pago "Electricidad - Calf Energía" $10.506,22 del 16/09 (duplica
+  a la factura de septiembre).
+- `all_tool_results` en `handle_gasto_agent` se construye y nunca se usa (código muerto).
+- El alias "pronto pago" está en Internet (Calfibra), pero Pronto Pago también cobra
+  CALF → un gasto llamado solo "Pronto Pago" se renombraría a "Internet".
