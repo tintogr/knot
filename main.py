@@ -2827,6 +2827,9 @@ UBICACION DE UN EVENTO ("donde es?", "donde queda", "en que direccion"):
 3. Si no la tenes, decilo derecho y pedile la direccion al usuario, ofreciendole guardarla con guardar_lugar_conocido para la proxima y calcularle un horario de salida estimado. Ejemplo: "Lo tengo como en Allen, pero no tengo la direccion de lo de Mati. Si me la pasas la guardo y te digo a que hora conviene salir."
 NUNCA adivines la direccion de un evento hurgando en buscar_contacto, y nunca inventes una. Preguntar es la respuesta correcta.
 
+COSAS QUE NO ENCONTRAS: si el usuario pregunta por algo puntual (un evento, una fecha, "cuando es X") y no aparece en su agenda, NUNCA respondas sobre OTRO evento como si fuera ese (ej: te piden el keynote y la agenda solo tiene un cumpleaños -> no hables del cumpleaños).
+Si es algo externo o ambiguo (un keynote, un partido, un recital, un lanzamiento), usa web_search para averiguar a que se refiere mas probablemente y cuando es, y pregunta para confirmar: "¿Te referis a X, el dd/mm?". Si ni asi lo encontras, decilo claramente y pedi que te aclare.
+
 RAZONAMIENTO IMPORTANTE para preguntas sobre pagos de servicios:
 1. Busca la factura en Gmail para saber el monto exacto que deberia haberse pagado
 2. Busca en Notion usando MULTIPLES terminos: el nombre de la empresa (ej: "CALF") Y el tipo de servicio (ej: "luz", "electricidad") Y variantes posibles. SIEMPRE busca en el mes actual Y en el mes anterior — los servicios se pagan frecuentemente el mes siguiente al de la factura.
@@ -3595,7 +3598,10 @@ EVENTOS RECURRENTES:
                     fecha = data["date"]
                 t_result = "Evento creado: " + data.get("emoji", "") + " " + data["summary"] + " el " + fecha + hora + "."
                 # Trigger #7: primer evento con ubicacion → ofrecer aviso de tiempo de viaje
-                if data.get("location"):
+                _loc_norm = (data.get("location") or "").strip().lower()
+                _mi_ciudad = {c.strip().lower() for c in (user_prefs.get("city"), current_location.get("location_name")) if c}
+                # Una ruta hasta la ciudad en la que ya estas no aporta nada.
+                if data.get("location") and _loc_norm not in _mi_ciudad:
                     emit_hint(phone, suggestion_gate.Hint(
                         trigger_id="event_with_location",
                         message=(f"🚗 Lo anoté en *{data.get('location')}*. ¿Querés que te arme la ruta "
@@ -4457,6 +4463,64 @@ async def _classify_yes_no_answer(question: str, text: str) -> str:
 
 async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
     state_type = state.get("type")
+
+    if state_type in ("reminder_research_confirm", "reminder_created"):
+        try:
+            _vencido = now_argentina().replace(tzinfo=None) > datetime.fromisoformat(state["expires_at"])
+        except Exception:
+            _vencido = False
+        if _vencido:
+            del pending_state[phone]
+            return False
+
+    if state_type == "reminder_research_confirm":
+        t = text.strip().lower().rstrip("!.")
+        del pending_state[phone]
+        if t in ("si", "sí", "dale", "ok", "sip", "eso", "exacto", "correcto", "si, eso", "sí, eso"):
+            ok, event_id = await create_recordatorio({"summary": state["summary"], "fire_at": state["fire_at"], "emoji": "🔔"})
+            if ok:
+                await send_message(phone, format_recordatorio({"summary": state["summary"], "fire_at": state["fire_at"], "emoji": "🔔"}))
+            else:
+                await send_message(phone, "No pude crear el recordatorio. Probá de nuevo.")
+            return True
+        if t in ("no", "nop", "nope", "no es eso", "nada que ver"):
+            await send_message(phone, f"Dale, no lo agendo. Contame qué es y cuándo, y te lo recuerdo.")
+            return True
+        return False  # otra cosa: soltar la propuesta y procesar el mensaje normal
+
+    if state_type == "reminder_created":
+        # "no es hoy, fijate cuando es": antes el recordatorio equivocado quedaba creado
+        # y sonaba igual. Solo miramos mensajes cortos con pinta de correccion.
+        t = text.strip().lower()
+        _correccion = ("no es", "no era", "mal", "cancel", "borr", "cambi", "otro dia", "otro día",
+                       "fijate", "fíjate", "cuando es", "cuándo es", "equivoc")
+        if len(t.split()) > 15 or not any(k in t for k in _correccion):
+            del pending_state[phone]
+            return False
+        eventos = state.get("events") or []
+        _desc = "; ".join(f"'{e.get('summary')}' para {e.get('fire_at')}" for e in eventos)
+        try:
+            dresp = await claude_create(
+                model=HAIKU_MODEL, max_tokens=5,
+                system=(f"El asistente acaba de crear este recordatorio: {_desc}. ¿El mensaje del usuario dice "
+                        f"que ese recordatorio quedo mal (fecha u hora equivocada) o que lo cancele? "
+                        f"Responde solo SI o NO."),
+                messages=[{"role": "user", "content": text.strip()}],
+            )
+            _es_correccion = dresp.content[0].text.strip().upper().startswith("SI")
+        except Exception:
+            _es_correccion = False
+        del pending_state[phone]
+        if not _es_correccion:
+            return False
+        borrados = [e for e in eventos if await _borrar_evento(e.get("id"))]
+        if borrados:
+            await send_message(phone, "Listo, borré el recordatorio que había puesto mal: "
+                               + ", ".join(f"*{e.get('summary')}*" for e in borrados) + ".")
+        # Rehacerlo con la aclaracion del usuario (ahora mira agenda e internet).
+        _tema = ", ".join(e.get("summary") or "" for e in eventos)
+        await send_message(phone, await handle_recordatorio(phone, f"Recordame {_tema}. Aclaración: {text.strip()}"))
+        return True
 
     if state_type == "confirm_delete":
         expires_at = state.get("expires_at")
@@ -6431,34 +6495,7 @@ async def process_single_item(phone: str, item: dict):
                 await _reply(respuesta)
 
         elif tipo == "RECORDATORIO":
-            parsed_list = await parse_recordatorio(text)
-            created = []
-            sin_fecha = []
-            for parsed in parsed_list:
-                if not parsed.get("fire_at"):
-                    sin_fecha.append(parsed.get("summary") or "eso")
-                    continue
-                success, _err = await create_recordatorio(parsed)
-                if success:
-                    created.append(parsed)
-            if sin_fecha and not created:
-                _que = ", ".join(f"*{s}*" for s in sin_fecha)
-                await _reply(f"No encontré {_que} en tu agenda ni me dijiste cuándo. "
-                             f"¿Para cuándo te lo recuerdo?")
-            elif len(created) == 1:
-                await _reply(format_recordatorio(created[0]))
-            elif len(created) > 1:
-                lines = ["🔔 Recordatorios configurados:"]
-                for p in created:
-                    try:
-                        dt = datetime.strptime(p["fire_at"], "%Y-%m-%dT%H:%M")
-                        fecha = dt.strftime("%d/%m") if dt.date() != now_argentina().date() else "hoy"
-                        lines.append(f"- {p.get('emoji','🔔')} {p['summary']} — {fecha} a las {dt.strftime('%H:%M')}")
-                    except Exception:
-                        lines.append(f"- {p.get('summary', 'Recordatorio')}")
-                await _reply("\n".join(lines))
-            else:
-                await _reply("No pude crear el recordatorio. Intenta de nuevo.")
+            await _reply(await handle_recordatorio(phone, text))
 
         elif tipo == "CANCELAR_RECORDATORIO":
             success, msg = await cancelar_recordatorio(text)
@@ -6658,7 +6695,126 @@ async def create_recordatorio(data: dict) -> tuple[bool, str]:
             headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
             json=event
         )
-        return (True, "") if r.status_code in [200, 201] else (False, r.text)
+        # En exito el segundo valor es el id del evento: sirve para borrarlo si el
+        # usuario avisa enseguida que el recordatorio quedo mal.
+        return (True, r.json().get("id", "")) if r.status_code in [200, 201] else (False, r.text)
+
+
+async def _borrar_evento(event_id: str) -> bool:
+    access_token = await get_gcal_access_token()
+    if not access_token or not event_id:
+        return False
+    async with httpx.AsyncClient() as http:
+        r = await http.delete(
+            f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    return r.status_code in (200, 204)
+
+
+def _fire_at_para(fecha: str, hora: str | None) -> str:
+    """Aviso 1 hora antes si hay horario; si no, a las 09:00 de ese dia."""
+    if hora:
+        try:
+            return (datetime.strptime(f"{fecha} {hora}", "%Y-%m-%d %H:%M") - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M")
+        except ValueError:
+            pass
+    return f"{fecha}T09:00"
+
+
+async def _investigar_recordatorio(pedido: str) -> dict | None:
+    """Cuando el usuario pide recordar algo que no esta en su agenda y no dice cuando
+    ('el proximo keynote'), buscar en la web a que se refiere antes de rendirse."""
+    now = now_argentina()
+    try:
+        resp = await claude_create(
+            model=SONNET_MODEL, max_tokens=1200,
+            system=(
+                "El usuario le pidio a su asistente personal (Argentina) que le recuerde algo, pero no "
+                "dijo cuando y no esta en su agenda. Busca en la web a que se refiere MAS probablemente "
+                "y cuando es la proxima vez que ocurre (ej: 'el proximo keynote' suele ser el proximo "
+                "evento de Apple). Solo cuentan fechas futuras.\n"
+                "Responde SOLO un JSON, sin markdown: {\"hallado\": true|false, \"que\": \"descripcion corta\", "
+                "\"fecha\": \"YYYY-MM-DD\" o null, \"hora\": \"HH:MM\" en hora de Argentina o null, "
+                "\"fuente\": \"sitio\" o null}"
+            ),
+            messages=[{"role": "user", "content": f"Hoy es {now.strftime('%Y-%m-%d')}. Pedido del usuario: {pedido}"}],
+            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
+        )
+    except Exception as e:
+        print(f"[recordatorio] busqueda web fallo: {e}")
+        return None
+    texto = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text")
+    ini, fin = texto.find("{"), texto.rfind("}")
+    if ini < 0 or fin <= ini:
+        return None
+    try:
+        info = json.loads(texto[ini:fin + 1])
+    except ValueError:
+        return None
+    if not info.get("hallado") or not info.get("fecha"):
+        return None
+    try:
+        if datetime.strptime(info["fecha"], "%Y-%m-%d").date() < now.date():
+            return None
+    except ValueError:
+        return None
+    return info
+
+
+async def handle_recordatorio(phone: str, text: str) -> str:
+    parsed_list = await parse_recordatorio(text)
+    created = []
+    sin_fecha = []
+    for parsed in parsed_list:
+        if not parsed.get("fire_at"):
+            sin_fecha.append(parsed.get("summary") or "eso")
+            continue
+        success, event_id = await create_recordatorio(parsed)
+        if success:
+            created.append(dict(parsed, event_id=event_id))
+
+    if sin_fecha and not created:
+        que = sin_fecha[0]
+        info = await _investigar_recordatorio(f"{text} (tema: {que})")
+        if not info:
+            return (f"No encontré *{que}* en tu agenda, ni en internet sé a qué te referís. "
+                    f"¿Me decís qué es y cuándo?")
+        fecha_txt = datetime.strptime(info["fecha"], "%Y-%m-%d").strftime("%d/%m")
+        hora_txt = f" a las {info['hora']}" if info.get("hora") else ""
+        fuente = f" (según {info['fuente']})" if info.get("fuente") else ""
+        aviso = "una hora antes" if info.get("hora") else "ese día a las 9"
+        pending_state[phone] = {
+            "type": "reminder_research_confirm",
+            "summary": info.get("que") or que,
+            "fire_at": _fire_at_para(info["fecha"], info.get("hora")),
+            "expires_at": (now_argentina() + timedelta(minutes=30)).replace(tzinfo=None).isoformat(),
+        }
+        return (f"No lo tenía en tu agenda, así que lo busqué: ¿te referís a *{info.get('que') or que}*, "
+                f"el {fecha_txt}{hora_txt}{fuente}?\n\nSi es eso, decime *sí* y te aviso {aviso}.")
+
+    if created and phone not in pending_state:
+        # Ventana corta para poder deshacer si el usuario dice "no es hoy".
+        pending_state[phone] = {
+            "type": "reminder_created",
+            "events": [{"id": p.get("event_id"), "summary": p.get("summary"), "fire_at": p.get("fire_at")} for p in created],
+            "expires_at": (now_argentina() + timedelta(minutes=15)).replace(tzinfo=None).isoformat(),
+        }
+
+    if len(created) == 1:
+        return format_recordatorio(created[0])
+    if len(created) > 1:
+        lines = ["🔔 Recordatorios configurados:"]
+        for p in created:
+            try:
+                dt = datetime.strptime(p["fire_at"], "%Y-%m-%dT%H:%M")
+                fecha = dt.strftime("%d/%m") if dt.date() != now_argentina().date() else "hoy"
+                lines.append(f"- {p.get('emoji','🔔')} {p['summary']} — {fecha} a las {dt.strftime('%H:%M')}")
+            except Exception:
+                lines.append(f"- {p.get('summary', 'Recordatorio')}")
+        return "\n".join(lines)
+    return "No pude crear el recordatorio. Intenta de nuevo."
+
 
 def format_recordatorio(data: dict) -> str:
     emoji = data.get("emoji", "🔔")
