@@ -1008,23 +1008,51 @@ _recent_creations: dict = {}
 DUP_WINDOW_MIN = 10
 
 
+# Medios de cobro: cobran varios servicios, no identifican cual se pago.
+_CANALES_DE_PAGO = {"pronto pago", "pago facil", "rapipago", "mercado pago", "link pagos", "provincia net"}
+
+
+def _empresa_corta(svc: dict) -> str:
+    """'CALF (Cooperativa CALF)' -> 'CALF'; 'Camuzzi Gas del Sur' -> 'Camuzzi'."""
+    import re as _re
+    empresa = _re.sub(r"\s*\(.*?\)", "", svc.get("empresa") or "").split(" / ")[0].strip()
+    if len(empresa.split()) > 2:
+        # Usar el alias mas largo que sea una parte (no el todo) del nombre de la empresa
+        for al in sorted(svc.get("aliases") or [], key=len, reverse=True):
+            pos = empresa.lower().find(al.lower())
+            if (al and pos >= 0 and len(al) < len(empresa)
+                    and al.lower() != (svc.get("servicio") or "").lower()):
+                return empresa[pos:pos + len(al)]
+    return empresa
+
+
 def _canonical_service_name(name: str) -> str | None:
-    """Si el nombre del gasto es SOLO la empresa o un alias de un impuesto ('ARCA'),
-    devuelve el nombre del servicio ('Monotributo'). Solo para Categoria=Impuestos:
-    el organismo no dice que se pago. Para el resto la empresa ya lo dice y renombrar
-    rompia el formato habitual (Movistar -> 'Teléfono', CALF -> 'Luz') o erraba con
-    alias genericos ('Pronto Pago' -> 'Internet', 'Apple' -> 'iCloud')."""
+    """Nombre uniforme 'Servicio - Empresa' ('Luz - CALF', 'Monotributo - ARCA') para
+    pagos de servicios fijos, asi el nombre dice que se pago y a quien.
+    Solo si el nombre del gasto esta hecho unicamente de terminos del servicio
+    (empresa, aliases, nombre): 'Electricidad - Calf Energía' -> 'Luz - CALF', pero
+    'Supermercado' o 'Regalo Apple Watch' no se tocan. Se excluyen suscripciones
+    ('Apple' puede ser una compra, no iCloud) y medios de cobro ('Pronto Pago')."""
     import unicodedata as _ud, re as _re
 
     def _n(s):
         s = "".join(c for c in _ud.normalize("NFD", (s or "").lower()) if _ud.category(c) != "Mn")
         return _re.sub(r"[^a-z0-9]+", " ", s).strip()
 
-    svc = _ds.service_of(name or "")
-    if not svc or not svc.get("servicio") or svc.get("categoria") != "Impuestos":
+    nombre = _n(name)
+    if not nombre or nombre in _CANALES_DE_PAGO:
         return None
-    terms = {_n(t) for t in [svc.get("empresa")] + list(svc.get("aliases") or []) if t}
-    return svc["servicio"] if _n(name) in terms else None
+    svc = _ds.service_of(name or "")
+    if not svc or not svc.get("servicio") or svc.get("categoria") == "Suscripciones":
+        return None
+    empresa = _empresa_corta(svc)
+    terms = [_n(t) for t in [svc.get("servicio"), svc.get("empresa"), empresa] + list(svc.get("aliases") or []) if t]
+    resto = f" {nombre} "
+    for t in sorted(set(terms), key=len, reverse=True):
+        resto = resto.replace(f" {t} ", " ")
+    if resto.strip():
+        return None  # el nombre dice algo mas que el servicio: respetarlo
+    return f"{svc['servicio']} - {empresa}" if empresa else svc["servicio"]
 
 
 def _prune_recent_creations(now=None):
@@ -1100,12 +1128,11 @@ async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=N
     if _svc_lines:
         providers_ctx += (
             "\nServicios fijos del usuario (nombre a usar <- empresa/aliases):\n" + "\n".join(_svc_lines)
-            + "\nUsá esta lista para saber QUÉ se pagó. Si el nombre de la empresa no lo dice "
-              "(ARCA/AFIP -> 'Monotributo'), usá el nombre del servicio. Si la empresa ya lo dice, "
-              "mantené el formato habitual del usuario: 'Gas - Camuzzi', 'Electricidad - Calf Energía', "
-              "'Movistar', 'Expensas'. Ojo: Pronto Pago es solo un medio de cobro (cobra varios "
-              "servicios) y Apple puede ser una compra, no iCloud. Si no estás seguro de a qué "
-              "servicio corresponde, registralo igual y preguntá en el texto.\n"
+            + "\nSi el gasto es un pago de uno de esos servicios, el name va como 'Servicio - Empresa' "
+              "(ej: 'Luz - CALF', 'Monotributo - ARCA', 'Gas - Camuzzi', 'Expensas - Interfast'). "
+              "Ojo: Pronto Pago es solo un medio de cobro (cobra varios servicios) y Apple puede ser "
+              "una compra, no iCloud. Si no estás seguro de a qué servicio corresponde, registralo "
+              "igual y preguntá en el texto.\n"
         )
     pm_lines = []
     for pm in payment_methods_cache:
@@ -1190,8 +1217,6 @@ Emoji: elegi el mas especifico segun el contexto real."""
             data["date"] = now.strftime("%Y-%m-%d")
         _canon = _canonical_service_name(data.get("name", ""))
         if _canon:
-            if not data.get("notas"):
-                data["notas"] = f"Pago a {data['name']}"
             data["name"] = _canon
         final_cats, cat_note = await check_and_apply_category(data.get("name", ""), data.get("categoria", []))
         data["categoria"] = final_cats

@@ -22,7 +22,7 @@ En la Mac de Martin, `gh` está instalado a mano en `~/bin` (sin Homebrew) y con
 ## Sistema de Servicios (fuente de verdad)
 DB Notion **"Servicios"** (database `922e0822baee4d1bba19e778e0e177d4`, data source `2d3de41d-6d68-4f7f-bbf8-87bb6d5762a0`).
 Cada servicio: Servicio, Empresa, **Aliases**, Categoría, Tipo (Hogar/Suscripción/Impuesto), Frecuencia, Pagado hasta, Vence dia, Llega por mail, Activo.
-`_ds.load_services()` la carga al startup; `_ds.service_of(text)` mapea texto→servicio vía aliases (ej: "interfast" → Expensas). Se usa en el dedup de facturas, en la canonización del extractor y en el **agente de gastos** (un pago a "ARCA" se guarda como "Monotributo", ver `_canonical_service_name`).
+`_ds.load_services()` la carga al startup; `_ds.service_of(text)` mapea texto→servicio vía aliases (ej: "interfast" → Expensas). Se usa en el dedup de facturas, en la canonización del extractor y en el **agente de gastos** (los pagos de servicios se nombran **"Servicio - Empresa"**: "ARCA" -> "Monotributo - ARCA", "Electricidad - Calf Energía" -> "Luz - CALF"; ver `_canonical_service_name`. No aplica a suscripciones ni a medios de cobro como Pronto Pago).
 DB Finanzas: data source `2b717b92-440a-4d78-a59a-723c913d6f5c`. Categoría "Suscripciones" para apps.
 Campo **Estado** (select): `Impaga` / `Pagada`. Los gastos que reporta Martin nacen `Pagada`; facturas por mail y deudas nacen `Impaga`. Vacío = registros viejos, se tratan como pagados.
 Campo **Method** es una **relación** a la DB Métodos de pago (`61930ca6-a8e2-4238-9b2e-bc4a69844624`), NO un select.
