@@ -814,11 +814,13 @@ class NotionDataStore:
     async def update_expense(self, entry_id: str, updates: dict) -> EntryResult:
         """
         Update fields of an expense entry.
-        Supported update keys: value_ars, categories, name, method, notes, liters, estado
+        Supported update keys: value_ars, categories, name, method, notes, liters, estado, date
         """
         props = {}
         if updates.get("estado"):
             props["Estado"] = {"select": {"name": updates["estado"]}}
+        if updates.get("date"):
+            props["Date"] = {"date": {"start": updates["date"]}}
         if "value_ars" in updates:
             props["Value (ars)"] = {"number": float(updates["value_ars"])}
         if "categories" in updates:

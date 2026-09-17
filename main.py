@@ -1104,7 +1104,8 @@ COMPROBANTES DE TRANSFERENCIA (CRITICO para la direccion in_out):
 - Si el REMITENTE es el usuario (su nombre, CUIT/CUIL o cuenta) -> es un EGRESO: el usuario ESTA PAGANDO. NO es un ingreso.
 - Solo es INGRESO si el DESTINATARIO es el usuario y el remitente es un tercero (cliente, empleador).
 - NO asumas que toda transferencia recibida/vista es un ingreso. Mira SIEMPRE quien envia y quien recibe. Ejemplo: comprobante "De: {user_prefs.get("greeting_name") or "el usuario"} / Para: Consorcio/Inmobiliaria/persona" -> EGRESO (pago de expensas, alquiler, etc.), categoria segun el concepto (Depto/Recurrente), NUNCA Sueldo.
-IMPORTANTE: Si el mensaje habla de corregir, editar, cambiar o actualizar algo ya registrado -> NO uses la tool, respondé que no podés hacer correcciones desde acá.
+IMPORTANTE: Si el mensaje habla de corregir, editar, cambiar o actualizar algo ya registrado -> NO uses la tool. Knot SI puede corregir (fecha, monto, nombre, categoria, estado): decile que se lo pida directo, por ejemplo "cambiá la fecha de la cena al 06/09". Nunca digas que no se puede corregir.
+Si un gasto que el usuario manda ya esta en YA REGISTRADOS pero con un dato distinto (otra fecha, otro monto), no digas solo que ya estaba: aclará que diferencia hay y ofrecé corregirlo.
 - Si el mensaje tiene descripcion Y monto -> usa la tool registrar_gasto directamente.
 - Si el monto esta en DOLARES (USD/dolares) -> convertilo a pesos vos mismo (USD × tasa dolar blue de arriba) y registra con value_ars = ese resultado, poniendo "(USD X)" en notas. Registra IGUAL aunque no sepas el medio de pago.
 - CRITICO: NUNCA preguntes vos el medio de pago en texto libre. Si tenes descripcion y monto, REGISTRA YA (payment_method=null si no lo dijo) y el sistema le pregunta el medio solo. No respondas cosas como "¿con que lo pagaste?" sin haber registrado primero.
@@ -1147,6 +1148,11 @@ Emoji: elegi el mas especifico segun el contexto real."""
     dup_names = []
     for tool_block in tool_blocks:
         data = dict(tool_block.input)
+        # date es obligatorio en el schema, pero el modelo a veces lo omite en lotes
+        # largos. Sin esto la entrada se guardaba sin fecha y despues el armado de la
+        # respuesta tiraba KeyError: el usuario veia "Error" con el gasto ya creado.
+        if not data.get("date"):
+            data["date"] = now.strftime("%Y-%m-%d")
         final_cats, cat_note = await check_and_apply_category(data.get("name", ""), data.get("categoria", []))
         data["categoria"] = final_cats
 
@@ -1226,6 +1232,12 @@ Emoji: elegi el mas especifico segun el contexto real."""
                 line += f" (USD {usd:.2f})"
             if cats:
                 line += f" · _{', '.join(cats)}_"
+            _fecha = data.get("date") or ""
+            if _fecha and _fecha[:10] != now.strftime("%Y-%m-%d"):
+                try:
+                    line += f" · {datetime.strptime(_fecha[:10], '%Y-%m-%d').strftime('%d/%m')}"
+                except ValueError:
+                    pass
             if pm and pm_matched:
                 line += f" · {pm}"
             lines.append(line)
@@ -1662,6 +1674,7 @@ Responde:
   "new_name": "nuevo nombre" o null,
   "new_notes": "nueva nota" o null,
   "new_estado": "Pagada" si el usuario dice que ya lo pago / esta saldado, "Impaga" si dice que esta pendiente, impago o sin pagar, null si no habla del estado,
+  "new_date": "YYYY-MM-DD" si el usuario quiere cambiar la FECHA del gasto (si solo dice "actualiza su fecha", tomala del contexto reciente), null si no,
   "new_emoji": emoji nuevo (un solo caracter) o null. Ej: si dice 'ponele uno de supermercado' -> '🛒', 'cerveza' -> '🍺', 'comida' -> '🍽️'}}"""}]
     )
     raw = response.content[0].text.strip()
@@ -1692,6 +1705,12 @@ Responde:
         updates["notes"] = intent["new_notes"]
     if intent.get("new_estado") in ("Pagada", "Impaga"):
         updates["estado"] = intent["new_estado"]
+    if intent.get("new_date"):
+        updates["date"] = intent["new_date"]
+        # "pasá la cena al 06/09": esa fecha es la NUEVA, no sirve para buscar la
+        # entrada (que hoy tiene otra fecha o ninguna).
+        if date_filter == intent["new_date"]:
+            date_filter = None
     if intent.get("new_emoji"):
         updates["emoji"] = intent["new_emoji"]
     if not updates:
@@ -1731,6 +1750,8 @@ Responde:
             changes_preview.append(f"nota → _{intent['new_notes']}_")
         if updates.get("estado"):
             changes_preview.append(f"estado → *{updates['estado']}*")
+        if updates.get("date"):
+            changes_preview.append(f"fecha → *{updates['date']}*")
         names_preview = "\n".join(f"  • {e.name} (${e.value_ars:,.0f})" for e in entries_to_update)
         pending_state[phone] = {
             "type": "bulk_correction_confirm",
@@ -1768,6 +1789,8 @@ Responde:
         changes.append(f"Nota -> _{intent['new_notes']}_")
     if updates.get("estado"):
         changes.append(f"Estado -> *{updates['estado']}*")
+    if updates.get("date"):
+        changes.append(f"Fecha -> *{updates['date']}*")
 
     names = list({e.name for e in entries_to_update[:updated]})
     if updated > 1:
