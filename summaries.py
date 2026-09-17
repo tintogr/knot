@@ -440,6 +440,7 @@ async def get_invoices_from_gmail(now: datetime) -> list[dict]:
 Te paso los mails de facturas del último mes y, cuando hay, los PDF adjuntos (esos PDF son la factura REAL).
 
 MONTO (clave): usá el "TOTAL A PAGAR" final del PDF. NO sumes renglones ni uses subtotales. Si una factura tiene descuentos o "devolución de anticipo", el total ya los contempla. Si solo hay texto del mail (sin PDF) y el total no aparece claro, poné amount=null.
+FORMATO DEL MONTO: las facturas argentinas usan punto para miles y coma para decimales. "amount" va como número JSON en pesos, SIN separador de miles y con punto decimal: "$ 22.966,00" -> 22966.00 ; "$ 1.234.567,89" -> 1234567.89. Nunca devuelvas 22.966 para veintidós mil.
 
 CANONIZACIÓN del proveedor: tenés este catálogo de servicios conocidos con sus aliases. Si la factura matchea cualquier alias/empresa, devolvé como "provider" el nombre de la EMPRESA del catálogo (no inventes variantes). Ej: una factura de "Interfast" o del "Consorcio ARIES VI" → provider de Expensas.
 Catálogo:
@@ -812,6 +813,16 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                 if not provider:
                     continue
                 historial = await _ds.get_finance_history_by_provider(provider, limit=2)
+                # "$ 22.966,00" llegaba a veces como 22.96: el punto de miles leido como
+                # decimal. Si el monto es ridiculo frente a lo que se venia pagando y x1000
+                # cae en rango, es ese error; lo corregimos en vez de cargar una factura de $22.
+                if 0 < amount < 1000:
+                    _previos = [h.value_ars for h in historial if (h.value_ars or 0) >= 1000]
+                    if _previos:
+                        _ref = sum(_previos) / len(_previos)
+                        if 0.2 * _ref <= amount * 1000 <= 5 * _ref:
+                            print(f"[facturas] {provider}: monto {amount} parece mal separado, uso {amount * 1000}")
+                            amount = round(amount * 1000, 2)
                 ya_pagada = False
                 pago_dudoso = None
                 for h in historial:
