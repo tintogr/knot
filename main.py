@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import asyncio
 import base64
 import time
@@ -2222,28 +2223,9 @@ Si hay ambiguedad -> responde solo la pregunta de aclaracion mas concisa y natur
         return None
 
 # ── CLASIFICADOR ───────────────────────────────────────────────────────────────
-async def classify(text: str, has_image: bool, image_b64: str = None, image_type: str = None, history: list = None, extra_images: list = None) -> str:
-    if has_image and not text.strip() and not image_b64:
-        return "GASTO"
-    content = []
-    if image_b64:
-        content.append({"type": "image", "source": {"type": "base64", "media_type": image_type or "image/jpeg", "data": image_b64}})
-    for b64, itype in (extra_images or []):
-        content.append({"type": "image", "source": {"type": "base64", "media_type": itype or "image/jpeg", "data": b64}})
-    prompt_text = text if text.strip() else "(ver imagen adjunta)"
-    history_ctx = ""
-    if history and len(text.strip()) < 80:
-        recent = history[-10:] if len(history) >= 10 else history
-        history_ctx = "\nContexto reciente de la conversacion:\n" + "\n".join(
-            f"{'Usuario' if m['role']=='user' else 'Matrics'}: {str(m['content'])[:120]}"
-            for m in recent
-        ) + "\n\nTeniendo en cuenta ese contexto, clasifica el siguiente mensaje:"
-    content.append({"type": "text", "text": history_ctx + "\n" + prompt_text if history_ctx else prompt_text})
-    response = await claude_create(
-        model=SONNET_MODEL, max_tokens=10,
-        system="""Responde SOLO una palabra: GASTO, CORREGIR_GASTO, ELIMINAR_GASTO, PLANTA, EDITAR_PLANTA, ELIMINAR_PLANTA, EVENTO, EDITAR_EVENTO, ELIMINAR_EVENTO, RECORDATORIO, CANCELAR_RECORDATORIO, SHOPPING, CORREGIR_SHOPPING, ELIMINAR_SHOPPING, REUNION, EDITAR_REUNION, ELIMINAR_REUNION, SALUD, ACTIVIDAD_FISICA, GEO_REMINDER, CONFIGURAR, RESUMEN_DIARIO, LISTA o CHAT.
-
-GASTO: registrar un pago, compra o ingreso NUEVO. El usuario describe algo que acaba de pagar o comprar ahora. NUNCA cuando usa "corregir", "cambiar", "editar", "actualizar", "la descripcion", "las notas", "el nombre" de algo ya registrado.
+# Catalogo de modulos: lo comparten el clasificador viejo y el agente de entrada.
+# (los nombres validos salen del propio catalogo, asi no hay dos listas que se separen)
+_CATALOGO_MODULOS = """GASTO: registrar un pago, compra o ingreso NUEVO. El usuario describe algo que acaba de pagar o comprar ahora. NUNCA cuando usa "corregir", "cambiar", "editar", "actualizar", "la descripcion", "las notas", "el nombre" de algo ya registrado.
 DEUDA: registrar algo que el usuario TODAVIA NO PAGO pero debe pagar. "le debo X a Y", "me deben X", "tengo que pagar X". Diferente a GASTO que es un pago ya realizado.
 CORREGIR_GASTO: modificar cualquier campo de un gasto ya registrado — monto, categoria, nombre, descripcion, notas, o su ESTADO (pagada/impaga). Ejemplos: "el gasto de X era Y", "cambia la categoria de X", "corrige la descripcion de los 3 de anthropic", "en realidad eran extra usage", "la nota estaba mal", "el alquiler esta impago", "marca las expensas como pagadas", "poné que X ya lo pagué". Si el usuario habla de algo que YA registró y quiere cambiarlo → CORREGIR_GASTO.
 ELIMINAR_GASTO: eliminar o borrar un gasto de Notion.
@@ -2268,7 +2250,34 @@ CONFIGURAR: cambiar configuracion de Knot. Solo cuando el usuario quiere CAMBIAR
 RESUMEN_DIARIO: el usuario pide RECIBIR el resumen ahora, sin especificar un horario nuevo. "manda el resumen", "pasame el resumen diario", "dame el resumen ya", "enviame el buenos dias". NUNCA si incluye una hora especifica ("a las X") — eso es CONFIGURAR. NUNCA si pregunta sobre la configuracion → eso es CHAT.
 LISTA: gestionar listas generativas del usuario (peliculas, libros, lugares, ideas, etc., distintas de SHOPPING que es supermercado). Ejemplos: "agrega 3 pelis de Tarantino a mi lista de pelis", "sumame 5 libros de no ficcion a leer", "agrega Inception a mi lista de pelis", "que tengo en mi lista de libros", "borra X de mi lista de Y", "crea una lista de viajes". El usuario menciona "mi lista de X" o pide agregar items que NO son del super.
 CHAT: cualquier pregunta, consulta o conversacion. Si tiene "?" o pide informacion -> CHAT.
+"""
 
+
+_MODULOS_VALIDOS = set(re.findall(r"^([A-Z_]+):", _CATALOGO_MODULOS, re.M)) | {"DEUDA"}
+
+
+async def classify(text: str, has_image: bool, image_b64: str = None, image_type: str = None, history: list = None, extra_images: list = None) -> str:
+    if has_image and not text.strip() and not image_b64:
+        return "GASTO"
+    content = []
+    if image_b64:
+        content.append({"type": "image", "source": {"type": "base64", "media_type": image_type or "image/jpeg", "data": image_b64}})
+    for b64, itype in (extra_images or []):
+        content.append({"type": "image", "source": {"type": "base64", "media_type": itype or "image/jpeg", "data": b64}})
+    prompt_text = text if text.strip() else "(ver imagen adjunta)"
+    history_ctx = ""
+    if history and len(text.strip()) < 80:
+        recent = history[-10:] if len(history) >= 10 else history
+        history_ctx = "\nContexto reciente de la conversacion:\n" + "\n".join(
+            f"{'Usuario' if m['role']=='user' else 'Matrics'}: {str(m['content'])[:120]}"
+            for m in recent
+        ) + "\n\nTeniendo en cuenta ese contexto, clasifica el siguiente mensaje:"
+    content.append({"type": "text", "text": history_ctx + "\n" + prompt_text if history_ctx else prompt_text})
+    response = await claude_create(
+        model=SONNET_MODEL, max_tokens=10,
+        system=f"""Responde SOLO una palabra: GASTO, CORREGIR_GASTO, ELIMINAR_GASTO, PLANTA, EDITAR_PLANTA, ELIMINAR_PLANTA, EVENTO, EDITAR_EVENTO, ELIMINAR_EVENTO, RECORDATORIO, CANCELAR_RECORDATORIO, SHOPPING, CORREGIR_SHOPPING, ELIMINAR_SHOPPING, REUNION, EDITAR_REUNION, ELIMINAR_REUNION, SALUD, ACTIVIDAD_FISICA, GEO_REMINDER, CONFIGURAR, RESUMEN_DIARIO, LISTA o CHAT.
+
+{_CATALOGO_MODULOS}
 REGLA: si el mensaje PREGUNTA algo -> siempre CHAT, nunca GASTO.
 
 IMAGENES SIN TEXTO:
@@ -2306,6 +2315,82 @@ IMAGENES SIN TEXTO:
     if "EVENTO" in r:                  return "EVENTO"
     if "CHAT" in r:                    return "CHAT"
     return "GASTO"
+
+# ── AGENTE DE ENTRADA ──────────────────────────────────────────────────────────
+# Reemplaza al clasificador de una palabra: ve la conversacion de verdad, puede
+# contestar el mismo y le pasa el contexto al modulo (que no ve la conversacion).
+# Se apaga con KNOT_ROUTER=0 en Render y vuelve el clasificador viejo.
+ROUTER_ACTIVO = os.environ.get("KNOT_ROUTER", "1") != "0"
+
+
+def _conversacion_reciente(phone: str, turnos: int = 12) -> str:
+    hist = get_history(phone)[-turnos:]
+    if not hist:
+        return "(sin mensajes previos)"
+    return "\n".join(
+        f"{'Martin' if m['role'] == 'user' else 'Knot'}: {str(m['content'])[:500]}"
+        for m in hist
+    )
+
+
+async def _router_agent(phone: str, text: str, has_image: bool) -> dict:
+    """Devuelve {"modulo": str|None, "mensaje": str, "respuesta": str|None}."""
+    now = now_argentina()
+    system = f"""Sos Knot, el asistente personal de Martin por WhatsApp. Hablás en español rioplatense.
+Hoy: {hoy_str(now)}. Calendario: {semana_str(now)}.
+
+Tu trabajo acá es entender el mensaje EN CONTEXTO de la conversación y decidir quién lo atiende.
+Cada módulo es un especialista que NO ve la conversación: solo recibe el texto que vos le pases.
+
+Módulos disponibles:
+{_CATALOGO_MODULOS}
+
+Reglas:
+- Si el mensaje continúa algo que se venía hablando (una respuesta, una aclaración, una corrección),
+  resolvelo con ese contexto. Ej: si Knot preguntó por una factura y Martin dice "pagué, pero con
+  descuento fueron 17791", eso es un pago de esa factura, no un mensaje suelto.
+- En "mensaje" va el texto de Martin TAL CUAL (no cambies sus palabras ni sus números). Si el módulo
+  necesita contexto para entenderlo, agregalo AL FINAL entre corchetes.
+  Ej: "pagué, fueron 17791 [contexto: es la factura de Movistar de septiembre, que figuraba $29.791,80]".
+- Si podés resolverlo vos sin tocar nada (una duda sobre lo que acabás de hacer, un gracias, una
+  aclaración), contestá en "respuesta" y dejá "modulo" en null. No inventes datos que no tengas:
+  si hace falta consultar la agenda, las finanzas o los mails, mandalo a CHAT.
+- Si no entendés qué quiere, preguntale en "respuesta" en vez de adivinar un módulo.
+- Ante una foto o documento, elegí el módulo por lo que se ve (factura/ticket -> GASTO, etc.).
+
+Respondé SOLO un JSON, sin markdown:
+{{"modulo": "NOMBRE_DEL_MODULO" o null, "mensaje": "texto para el módulo", "respuesta": "texto para Martin" o null}}"""
+    contenido = (f"Conversación reciente:\n{_conversacion_reciente(phone)}\n\n"
+                 f"Mensaje nuevo de Martin: {text or '(manda una imagen sin texto)'}"
+                 + (" [viene con imagen adjunta]" if has_image else ""))
+    resp = await claude_create(model=SONNET_MODEL, max_tokens=700, system=system,
+                               messages=[{"role": "user", "content": contenido}])
+    crudo = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text").strip()
+    ini, fin = crudo.find("{"), crudo.rfind("}")
+    if ini < 0 or fin <= ini:
+        raise ValueError(f"el agente de entrada no devolvio JSON: {crudo[:120]}")
+    datos = json.loads(crudo[ini:fin + 1])
+    modulo = (datos.get("modulo") or "").strip().upper() or None
+    return {"modulo": modulo, "mensaje": datos.get("mensaje") or text, "respuesta": datos.get("respuesta")}
+
+
+async def _decidir_ruta(phone: str, text: str, has_image: bool, history: list, image_b64=None,
+                        image_type=None, extra_images=None) -> tuple:
+    """(tipo, texto_para_el_modulo, respuesta_directa). Si el agente falla por lo que
+    sea, se cae al clasificador viejo: nunca dejamos a Martin sin respuesta."""
+    if ROUTER_ACTIVO:
+        try:
+            r = await _router_agent(phone, text, has_image)
+            if r["respuesta"] and not r["modulo"]:
+                return None, text, r["respuesta"]
+            if r["modulo"] in _MODULOS_VALIDOS:
+                return r["modulo"], r["mensaje"], r["respuesta"]
+            print(f"[router] modulo desconocido: {r['modulo']!r}, uso el clasificador")
+        except Exception as e:
+            print(f"[router] falló ({type(e).__name__}: {e}), uso el clasificador")
+    tipo = await classify(text, has_image, image_b64, image_type, history=history, extra_images=extra_images)
+    return tipo, text, None
+
 
 async def query_finances(month: str = None) -> str:
     if not month:
@@ -6487,7 +6572,16 @@ async def process_single_item(phone: str, item: dict):
         if user_prefs.get("_config_page_id") is None:
             await load_user_config(phone)
 
-        tipo = await classify(text, image_b64 is not None, image_b64, image_type, history=get_history(phone), extra_images=extra_images)
+        tipo, text, _respuesta_directa = await _decidir_ruta(
+            phone, text, image_b64 is not None, get_history(phone),
+            image_b64=image_b64, image_type=image_type, extra_images=extra_images,
+        )
+        if _respuesta_directa and not tipo:
+            # El agente resolvió el mensaje sin necesidad de ningún módulo.
+            add_to_history(phone, "user", text or "(imagen)")
+            add_to_history(phone, "assistant", _respuesta_directa)
+            await _reply(_respuesta_directa)
+            return
         exchange_rate = await get_exchange_rate()
 
         if tipo == "GASTO":

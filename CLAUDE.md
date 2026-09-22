@@ -27,6 +27,16 @@ DB Finanzas: data source `2b717b92-440a-4d78-a59a-723c913d6f5c`. Categoría "Sus
 Campo **Estado** (select): `Impaga` / `Pagada`. Los gastos que reporta Martin nacen `Pagada`; facturas por mail y deudas nacen `Impaga`. Vacío = registros viejos, se tratan como pagados.
 Campo **Method** es una **relación** a la DB Métodos de pago (`61930ca6-a8e2-4238-9b2e-bc4a69844624`), NO un select.
 
+## Puerta de entrada (migración a agente, sept 2026)
+`_router_agent` reemplaza al clasificador de una palabra: ve la conversación real (12 turnos sin recortar),
+elige módulo, puede **contestar solo** (modulo=null) y le pasa al módulo el texto de Martin + contexto entre
+corchetes (los módulos no ven la conversación). Catálogo compartido en `_CATALOGO_MODULOS`; los nombres
+válidos se derivan de ahí (`_MODULOS_VALIDOS`).
+**Apagado de emergencia: `KNOT_ROUTER=0` en Render** → vuelve `classify()`. También cae solo al clasificador
+si el agente falla o inventa un módulo.
+Pendiente: las preguntas pendientes (`handle_pending_state`, 36 estados) todavía se resuelven con código y
+un Haiku de una palabra; migrarlas es el próximo paso (empezando por las de plata).
+
 ## Contexto que Knot usa para clasificar
 - **Rafael Lorenzo** = jefe de Martin → sus transferencias por MP = **Sueldo**.
 - Facturas de servicios: se leen del PDF adjunto del mail (montos reales) y se deduplican por proveedor (tokens + aliases) + mes + monto.
