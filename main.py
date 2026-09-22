@@ -915,10 +915,11 @@ async def _remove_invoice_confirmation(conf_id: str) -> None:
     user_prefs["pending_invoice_confirmations"] = [c for c in confs if c.get("id") != conf_id]
     await save_user_config(MY_NUMBER)
 
-async def _auto_mark_invoice_paid(impaga, paid_amount: float, payment_method: str | None = None) -> bool:
+async def _auto_mark_invoice_paid(impaga, paid_amount: float, payment_method: str | None = None,
+                                  notes: str | None = None) -> bool:
     """Marca la factura como pagada y su task asociada. Devuelve si Notion lo aceptó:
     anunciar el cambio sin mirar esto es como quedaban facturas Impagas 'marcadas'."""
-    ok = await _ds.mark_finance_paid(impaga.id, paid_amount, payment_method)
+    ok = await _ds.mark_finance_paid(impaga.id, paid_amount, payment_method, notes)
     if not ok:
         return False
     tasks = await get_pending_factura_tasks()
@@ -1351,7 +1352,7 @@ Emoji: elegi el mas especifico segun el contexto real."""
                             "type": "factura_confirm", "situation": "diff_moderate",
                             "conf_id": conf_id, "finance_page_id": impaga.id,
                             "paid_amount": paid_amount, "payment_method": payment_method,
-                            "provider_name": impaga.name,
+                            "provider_name": impaga.name, "invoice_amount": inv_amount,
                         }
                         reply += (f"\n\n🤔 Tengo impaga *{impaga.name}* por ${inv_amount:,.0f}, pero este "
                                   f"pago parece de otro período. ¿Corresponde a esa factura? (sí/no)")
@@ -1393,7 +1394,7 @@ Emoji: elegi el mas especifico segun el contexto real."""
                             "type": "factura_confirm", "situation": "diff_moderate",
                             "conf_id": conf_id, "finance_page_id": impaga.id,
                             "paid_amount": paid_amount, "payment_method": payment_method,
-                            "provider_name": impaga.name,
+                            "provider_name": impaga.name, "invoice_amount": inv_amount,
                         }
                         reply += f"\n\n💡 Tenés una factura de *{impaga.name}* por ${inv_amount:,.0f}. ¿Este pago de ${paid_amount:,.0f} corresponde a esa? (sí/no)"
 
@@ -1406,7 +1407,7 @@ Emoji: elegi el mas especifico segun el contexto real."""
                             "type": "factura_confirm", "situation": "diff_large",
                             "conf_id": conf_id, "finance_page_id": impaga.id,
                             "paid_amount": paid_amount, "payment_method": payment_method,
-                            "provider_name": impaga.name,
+                            "provider_name": impaga.name, "invoice_amount": inv_amount,
                         }
                         reply += f"\n\n⚠️ La factura de *{impaga.name}* era ${inv_amount:,.0f} pero pagaste ${paid_amount:,.0f}. ¿Fue un pago parcial? (sí/no)"
 
@@ -4472,11 +4473,14 @@ async def _classify_yes_no_answer(question: str, text: str) -> str:
                 "Knot le hizo una pregunta de si/no al usuario y el usuario respondio algo.\n"
                 f"Pregunta de Knot: {question}\n\n"
                 "Responde SOLO una palabra:\n"
-                "- SI si el usuario confirma o afirma.\n"
-                "- NO si el usuario niega, o si corrige/aclara que la premisa de la pregunta esta equivocada.\n"
+                "- SI si el usuario confirma el HECHO principal de la pregunta, aunque corrija un detalle "
+                "como el monto o la fecha. Ej: a '¿ya está pagada?' -> 'pagué, pero con descuento fueron "
+                "$17.500' es SI (la pagó).\n"
+                "- NO si niega el hecho principal (no la pagó, no fue parcial, ese pago es de otra factura "
+                "o de otro período).\n"
                 "- OTRO solo si el mensaje no tiene NADA que ver con la pregunta (otro gasto distinto, otra orden, otra consulta).\n"
-                "Importante: una aclaracion sobre la MISMA factura o el MISMO pago (ej: 'esa es de otro mes', "
-                "'no, esa ya la pague', 'la que pague es la de agosto') NO es OTRO: es NO.\n"
+                "Importante: una aclaracion sobre la MISMA factura o el MISMO pago nunca es OTRO; decidi "
+                "entre SI y NO segun lo que el usuario afirma del hecho principal.\n"
                 "Respuesta (SI, NO u OTRO):"
             ),
             messages=[{"role": "user", "content": text.strip()}]
@@ -5741,13 +5745,40 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
         if situation == "diff_large":
             provider_name = state.get("provider_name", "la factura")
             finance_page_id = state.get("finance_page_id")
+            inv_amount = state.get("invoice_amount") or 0
+            _hoy = now_argentina().strftime("%d/%m/%Y")
+            _aclaracion = text.strip() if len(text.strip().split()) > 1 else ""
+            await _remove_invoice_confirmation(conf_id)
             if affirm:
-                # Pago parcial confirmado — no marca la factura como pagada
-                await _remove_invoice_confirmation(conf_id)
-                await send_message(phone, f"Anotado como pago parcial de *{provider_name}*. La factura sigue pendiente hasta que la saldés completa.")
+                # Pago parcial: la factura sigue impaga, pero dejamos constancia.
+                falta = inv_amount - paid_amount if inv_amount else 0
+                nota = f"Pago parcial de ${paid_amount:,.0f} el {_hoy}"
+                if falta > 0:
+                    nota += f"; quedan ${falta:,.0f} de ${inv_amount:,.0f}"
+                if _aclaracion:
+                    nota += f". Aclaración: {_aclaracion}"
+                await _ds.update_expense(finance_page_id, {"notes": nota})
+                await send_message(phone, f"Anotado como pago parcial de *{provider_name}*"
+                                   + (f": faltan ${falta:,.0f}." if falta > 0 else ".")
+                                   + " La factura sigue pendiente hasta que la saldés completa.")
             else:
-                await _remove_invoice_confirmation(conf_id)
-                await send_message(phone, f"Ok. La factura de *{provider_name}* sigue pendiente.")
+                # No fue parcial -> ese pago salda la factura aunque el monto no coincida
+                # (descuento, recargo, o monto mal leído). Antes quedaba pendiente igual y
+                # Martin la seguía viendo como deuda después de haberla pagado.
+                nota = f"Pagada ${paid_amount:,.0f} el {_hoy}"
+                if inv_amount:
+                    nota += f" (facturaba ${inv_amount:,.0f}, diferencia ${inv_amount - paid_amount:,.0f})"
+                if _aclaracion:
+                    nota += f". Aclaración: {_aclaracion}"
+                _ok = await _auto_mark_invoice_paid(
+                    type("_", (), {"id": finance_page_id, "value_ars": paid_amount})(),
+                    paid_amount, payment_method, nota
+                )
+                if _ok:
+                    await send_message(phone, f"✅ Marqué *{provider_name}* como pagada por ${paid_amount:,.0f}"
+                                       + (f" (facturaba ${inv_amount:,.0f})." if inv_amount else "."))
+                else:
+                    await send_message(phone, f"⚠️ No pude marcar *{provider_name}* como pagada en Notion.")
             return True
 
         if situation == "multiple_invoices":
