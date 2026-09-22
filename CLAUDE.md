@@ -40,6 +40,12 @@ y los montos concretos, y corre en Sonnet. Si devuelve OTRO se suelta el estado 
 Pendiente: los otros ~33 estados (botones de eventos, plantas, método de pago) siguen con código y listas
 de palabras.
 
+## Modo verificación (período de prueba)
+Después de escribir en Notion, Knot **relee la página** (`_ds.get_expense`) y muestra lo que quedó
+guardado: nombre, monto, fecha, tipo, categoría, estado, método, notas y link. Nunca se inventa la
+confirmación: si no puede releer, muestra el mensaje de siempre. Se apaga con **`KNOT_VERIFICAR=0`**.
+Aplicado a: registro de gastos, marcar factura pagada y correcciones.
+
 ## Contexto que Knot usa para clasificar
 - **Rafael Lorenzo** = jefe de Martin → sus transferencias por MP = **Sueldo**.
 - Facturas de servicios: se leen del PDF adjunto del mail (montos reales) y se deduplican por proveedor (tokens + aliases) + mes + monto.

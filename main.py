@@ -1002,6 +1002,43 @@ async def _find_invoice_candidates(name_lower: str) -> list:
     return candidatos
 
 
+# Modo verificación: después de escribir en Notion, releer la página y mostrarle a
+# Martin lo que QUEDÓ guardado (no lo que el modelo dijo que iba a guardar).
+# Se apaga con KNOT_VERIFICAR=0.
+VERIFICAR_ESCRITURAS = os.environ.get("KNOT_VERIFICAR", "1") != "0"
+
+
+def _link_notion(page_id: str) -> str:
+    return "https://www.notion.so/" + (page_id or "").replace("-", "")
+
+
+async def _confirmacion_verificada(page_id: str, titulo: str = "Guardado en Notion") -> str | None:
+    """Relee la entrada y arma el detalle. None si no se pudo releer (nunca inventamos
+    una confirmación: si no se pudo verificar, el que llama muestra lo de siempre)."""
+    if not VERIFICAR_ESCRITURAS or not page_id:
+        return None
+    e = await _ds.get_expense(page_id)
+    if not e:
+        return None
+    lineas = [f"✅ {titulo}:", f"• *{e.name}*", f"• Monto: ${e.value_ars:,.2f} ARS"]
+    if e.date:
+        lineas.append(f"• Fecha: {e.date.strftime('%d/%m/%Y') if hasattr(e.date, 'strftime') else e.date}")
+    lineas.append(f"• Tipo: {'Ingreso' if e.in_out == 'INGRESO' else 'Egreso'}")
+    if e.categories:
+        lineas.append(f"• Categoría: {', '.join(e.categories)}")
+    lineas.append(f"• Estado: {e.estado or '(vacío)'}")
+    if e.method:
+        lineas.append(f"• Método de pago: {e.method}")
+    if e.client:
+        lineas.append(f"• Cliente: {', '.join(e.client)}")
+    if e.liters:
+        lineas.append(f"• Litros: {e.liters}")
+    if e.notes:
+        lineas.append(f"• Notas: {e.notes[:300]}")
+    lineas.append(f"🔗 {_link_notion(e.id)}")
+    return "\n".join(lineas)
+
+
 # ── MODULO GASTOS ──────────────────────────────────────────────────────────────
 
 # Gastos creados hace poco: (nombre, monto, fecha) -> timestamp. Sirve para dos cosas:
@@ -1276,7 +1313,7 @@ Emoji: elegi el mas especifico segun el contexto real."""
         reply = "No pude registrar el gasto en Notion."
     else:
         lines = []
-        for _, data, ok in created_entries:
+        for _page_id_entry, data, ok in created_entries:
             if not ok:
                 lines.append(f"❌ No pude registrar *{data.get('name', '?')}*.")
                 continue
@@ -1307,7 +1344,8 @@ Emoji: elegi el mas especifico segun el contexto real."""
                     pass
             if pm and pm_matched:
                 line += f" · {pm}"
-            lines.append(line)
+            _verificada = await _confirmacion_verificada(_page_id_entry)
+            lines.append(_verificada or line)
         if pre_text:
             lines.insert(0, pre_text)
         reply = "\n".join(lines)
@@ -1361,7 +1399,8 @@ Emoji: elegi el mas especifico segun el contexto real."""
                         # Auto-marca sin preguntar
                         _marcada = await _auto_mark_invoice_paid(impaga, paid_amount, payment_method)
                         if _marcada:
-                            reply += f"\n\n✅ Marqué *{impaga.name}* como pagada."
+                            _v = await _confirmacion_verificada(impaga.id, "Factura marcada como pagada")
+                            reply += "\n\n" + (_v or f"✅ Marqué *{impaga.name}* como pagada.")
                         else:
                             reply += (f"\n\n⚠️ No pude marcar *{impaga.name}* como pagada en Notion. "
                                       f"Quedó pendiente: marcala a mano.")
@@ -1864,7 +1903,12 @@ Responde:
         label = f"*{updated}* entradas de _{names[0] if len(names)==1 else search_term}_"
     else:
         label = f"*{entries_to_update[0].name}*"
-    return True, f"✅ {label} corregida{'s' if updated > 1 else ''}\n" + "\n".join(changes)
+    _msg = f"✅ {label} corregida{'s' if updated > 1 else ''}\n" + "\n".join(changes)
+    if updated == 1:
+        _v = await _confirmacion_verificada(entries_to_update[0].id, "Así quedó en Notion")
+        if _v:
+            _msg += "\n\n" + _v
+    return True, _msg
 
 async def eliminar_gasto(text: str, phone: str = None) -> tuple[bool, str]:
     response = await claude_create(
@@ -5884,8 +5928,9 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
                     paid_amount, payment_method, nota
                 )
                 if _ok:
-                    await send_message(phone, f"✅ Marqué *{provider_name}* como pagada por ${paid_amount:,.0f}"
-                                       + (f" (facturaba ${inv_amount:,.0f})." if inv_amount else "."))
+                    _v = await _confirmacion_verificada(finance_page_id, "Factura marcada como pagada")
+                    await send_message(phone, _v or (f"✅ Marqué *{provider_name}* como pagada por ${paid_amount:,.0f}"
+                                                     + (f" (facturaba ${inv_amount:,.0f})." if inv_amount else ".")))
                 else:
                     await send_message(phone, f"⚠️ No pude marcar *{provider_name}* como pagada en Notion.")
             return True

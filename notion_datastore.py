@@ -685,6 +685,31 @@ class NotionDataStore:
     # FINANCES
     # ══════════════════════════════════════════════════════════════════════
 
+    def _nombre_metodo(self, props: dict) -> str:
+        """Method es una RELACION a la DB de metodos de pago: leerlo como select
+        devolvia siempre vacio. Resuelve el id contra el cache de metodos."""
+        rel = (props.get("Method") or {}).get("relation") or []
+        if rel:
+            pid = (rel[0] or {}).get("id", "")
+            for pm in (getattr(self, "_pm_cache", None) or []):
+                if pm.id.replace("-", "") == pid.replace("-", ""):
+                    return pm.name or " ".join(filter(None, [pm.bank, pm.modality]))
+            return "(método registrado)"
+        return _get_select(props, "Method") or _get_text(props, "Payment Method (legacy)") or ""
+
+    async def get_expense(self, entry_id: str) -> EntryResult | None:
+        """Relee una entrada desde Notion. Sirve para confirmarle al usuario lo que
+        QUEDO guardado, en vez de repetirle lo que el modelo dijo que iba a guardar."""
+        try:
+            r = await self._http.get(f"{NOTION_API}/pages/{entry_id}", headers=self._headers_cache)
+            if r.status_code != 200:
+                print(f"[get_expense] HTTP {r.status_code}: {r.text[:200]}")
+                return None
+            return self._parse_expense(r.json())
+        except Exception as e:
+            print(f"[get_expense] {type(e).__name__}: {e}")
+            return None
+
     def _parse_expense(self, page: dict) -> EntryResult:
         """Convert a Notion page to an EntryResult."""
         props = page.get("properties", {})
@@ -695,7 +720,7 @@ class NotionDataStore:
             value_ars=_get_number(props, "Value (ars)") or 0,
             in_out="INGRESO" if "INGRESO" in in_out_raw else "EGRESO",
             categories=_get_multi_select(props, "Category"),
-            method=_get_select(props, "Method"),
+            method=self._nombre_metodo(props),
             date=_get_date(props, "Date"),
             time=None,
             client=_get_multi_select(props, "Client"),
