@@ -34,8 +34,11 @@ corchetes (los módulos no ven la conversación). Catálogo compartido en `_CATA
 válidos se derivan de ahí (`_MODULOS_VALIDOS`).
 **Apagado de emergencia: `KNOT_ROUTER=0` en Render** → vuelve `classify()`. También cae solo al clasificador
 si el agente falla o inventa un módulo.
-Pendiente: las preguntas pendientes (`handle_pending_state`, 36 estados) todavía se resuelven con código y
-un Haiku de una palabra; migrarlas es el próximo paso (empezando por las de plata).
+Las preguntas pendientes de plata (`confirm_factura_paid`, `factura_mismatch_confirm`, `factura_confirm`)
+ya resuelven con `_classify_yes_no_answer(pregunta, texto, phone, datos)`: recibe la conversación (8 turnos)
+y los montos concretos, y corre en Sonnet. Si devuelve OTRO se suelta el estado y lo atiende el agente.
+Pendiente: los otros ~33 estados (botones de eventos, plantas, método de pago) siguen con código y listas
+de palabras.
 
 ## Contexto que Knot usa para clasificar
 - **Rafael Lorenzo** = jefe de Martin → sus transferencias por MP = **Sueldo**.

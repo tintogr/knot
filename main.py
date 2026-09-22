@@ -4548,12 +4548,22 @@ REGLAS:
     return reply
 
 # ── PENDING STATE HANDLER ──────────────────────────────────────────────────────
-async def _classify_yes_no_answer(question: str, text: str) -> str:
-    """Desambigua con Haiku si un mensaje responde SI/NO a una pregunta pendiente
-    o si es otro tema (OTRO) que hay que re-rutear. Ante cualquier error, OTRO."""
+async def _classify_yes_no_answer(question: str, text: str, phone: str = None,
+                                  datos: dict = None) -> str:
+    """Resuelve si un mensaje responde SI/NO a una pregunta pendiente, o si es otro
+    tema (OTRO). Recibe la conversacion y los datos concretos de la pregunta: sin eso
+    decidia a ciegas y leia "pagué, pero fueron 17791" como una negacion.
+    Ante cualquier error, OTRO (se suelta el estado y lo atiende el agente de entrada)."""
+    _ctx = ""
+    if phone:
+        _ctx += f"\nConversacion reciente:\n{_conversacion_reciente(phone, 8)}\n"
+    if datos:
+        _detalle = "\n".join(f"- {k}: {v}" for k, v in datos.items() if v not in (None, ""))
+        if _detalle:
+            _ctx += f"\nDatos de lo que se esta hablando:\n{_detalle}\n"
     try:
         resp = await claude_create(
-            model=HAIKU_MODEL, max_tokens=5,
+            model=SONNET_MODEL, max_tokens=8,
             system=(
                 "Knot le hizo una pregunta de si/no al usuario y el usuario respondio algo.\n"
                 f"Pregunta de Knot: {question}\n\n"
@@ -4566,7 +4576,8 @@ async def _classify_yes_no_answer(question: str, text: str) -> str:
                 "- OTRO solo si el mensaje no tiene NADA que ver con la pregunta (otro gasto distinto, otra orden, otra consulta).\n"
                 "Importante: una aclaracion sobre la MISMA factura o el MISMO pago nunca es OTRO; decidi "
                 "entre SI y NO segun lo que el usuario afirma del hecho principal.\n"
-                "Respuesta (SI, NO u OTRO):"
+                + _ctx +
+                "\nRespuesta (SI, NO u OTRO):"
             ),
             messages=[{"role": "user", "content": text.strip()}]
         )
@@ -5686,7 +5697,10 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
         _affirm_task = t_lower in ("si", "sí", "dale", "ok", "yes", "correcto", "s", "sip")
         _deny_task   = t_lower in ("no", "nope", "nel", "nah")
         if not _affirm_task and not _deny_task:
-            _ans = await _classify_yes_no_answer(f"Ya pagaste {task_name}?", text)
+            _ans = await _classify_yes_no_answer(
+                f"Ya pagaste {task_name}?", text, phone,
+                {"factura": task_name, "monto": state.get("amount")},
+            )
             if _ans == "OTRO":
                 del pending_state[phone]
                 return False
@@ -5716,7 +5730,10 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
         # Si no es ni confirmación ni negación clara → desambiguar antes de abandonar el hilo
         if not _affirm and not _deny:
             _ans = await _classify_yes_no_answer(
-                f"La factura de {provider} ya esta pagada?", t_stripped
+                f"La factura de {provider} ya esta pagada?", t_stripped, phone,
+                {"proveedor": provider,
+                 "monto de la factura": f"${invoice_amount:,.0f}" if invoice_amount else None,
+                 "ultimo pago registrado": f"${paid_amount:,.0f}" if paid_amount else None},
             )
             if _ans == "OTRO":
                 del pending_state[phone]
@@ -5803,7 +5820,14 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
                 if situation == "diff_moderate"
                 else f"El pago que registraste fue un pago parcial de la factura de {_prov}?"
             )
-            _ans = await _classify_yes_no_answer(_q, text)
+            _ans = await _classify_yes_no_answer(
+                _q, text, phone,
+                {"factura": _prov,
+                 "monto de la factura": f"${(state.get('invoice_amount') or 0):,.0f}" if state.get("invoice_amount") else None,
+                 "monto que pagó": f"${paid_amount:,.0f}" if paid_amount else None,
+                 "diferencia": (f"${(state.get('invoice_amount') or 0) - paid_amount:,.0f}"
+                                if state.get("invoice_amount") and paid_amount else None)},
+            )
             if _ans == "OTRO":
                 del pending_state[phone]
                 return False
