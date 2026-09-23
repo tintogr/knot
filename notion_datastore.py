@@ -554,21 +554,33 @@ class NotionDataStore:
         filter_obj: dict = None,
         sorts: list = None,
         page_size: int = 100,
+        max_items: int = None,
     ) -> list[dict]:
-        """Generic database query. Returns a list of pages."""
-        body = {"page_size": page_size}
+        """Generic database query. Returns a list of pages.
+        Notion devuelve como mucho 100 filas por request: sin paginar, un mes con mas
+        de 100 movimientos daba totales mal en silencio. Con max_items se sigue
+        pidiendo hasta juntar esa cantidad."""
+        body = {"page_size": min(page_size, 100)}
         if filter_obj:
             body["filter"] = filter_obj
         if sorts:
             body["sorts"] = sorts
-        r = await self._http.post(
-            f"{NOTION_API}/databases/{self._db(db_name)}/query",
-            headers=self._headers_cache,
-            json=body,
-        )
-        if r.status_code != 200:
-            raise DataStoreError(f"Query {db_name} failed ({r.status_code}): {r.text[:200]}")
-        return r.json().get("results", [])
+        resultados = []
+        while True:
+            r = await self._http.post(
+                f"{NOTION_API}/databases/{self._db(db_name)}/query",
+                headers=self._headers_cache,
+                json=body,
+            )
+            if r.status_code != 200:
+                raise DataStoreError(f"Query {db_name} failed ({r.status_code}): {r.text[:200]}")
+            data = r.json()
+            resultados.extend(data.get("results", []))
+            if not max_items or not data.get("has_more") or len(resultados) >= max_items:
+                break
+            body["start_cursor"] = data["next_cursor"]
+            body["page_size"] = min(100, max_items - len(resultados))
+        return resultados[:max_items] if max_items else resultados
 
     async def _create_page(
         self,
@@ -832,7 +844,8 @@ class NotionDataStore:
             "finances",
             filter_obj=filter_obj,
             sorts=[{"property": "Date", "direction": "descending"}],
-            page_size=limit,
+            page_size=min(limit, 100),
+            max_items=limit if limit > 100 else None,
         )
         return [self._parse_expense(p) for p in pages]
 
@@ -931,7 +944,7 @@ class NotionDataStore:
                 start=date(year, mon, 1),
                 end=date(year, mon, last_day),
             ),
-            limit=100,
+            limit=500,
         ))
 
         ingresos = egresos = 0
