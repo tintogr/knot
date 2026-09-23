@@ -46,6 +46,12 @@ guardado: nombre, monto, fecha, tipo, categoría, estado, método, notas y link.
 confirmación: si no puede releer, muestra el mensaje de siempre. Se apaga con **`KNOT_VERIFICAR=0`**.
 Aplicado a: registro de gastos, marcar factura pagada y correcciones.
 
+## Limpieza del calendario (diaria, con el resumen)
+`limpiar_eventos_vencidos(rutinas)` borra lo anterior a hoy que no aporta mirado hacia atrás:
+los recordatorios `[TEMP]` que creó Knot (ya sonaron) y las clases pasadas de las actividades que
+Martin declaró como rutina (`user_prefs["activities"]`). **Nunca** toca turnos, reuniones, eventos
+con invitados ni cumpleaños. Google los guarda 30 días en la papelera.
+
 ## Contexto que Knot usa para clasificar
 - **Rafael Lorenzo** = jefe de Martin → sus transferencias por MP = **Sueldo**.
 - Facturas de servicios: se leen del PDF adjunto del mail (montos reales) y se deduplican por proveedor (tokens + aliases) + mes + monto.

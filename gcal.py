@@ -389,3 +389,56 @@ async def calcular_fecha_con_verificacion(descripcion: str) -> str:
     """Calcula la fecha con Python y la verifica."""
     resultado_python = calcular_fecha_exacta(descripcion)
     return f"Calculado: {resultado_python} (verificado con Python)"
+
+async def limpiar_eventos_vencidos(rutinas: set[str] = None) -> int:
+    """Borra del calendario lo que ya pasó y no aporta nada mirado hacia atrás:
+    los recordatorios [TEMP] que creó Knot (ya sonaron) y las clases pasadas de las
+    actividades que el usuario declaró como rutina.
+    NO toca turnos, reuniones, cumpleaños, eventos con invitados, ni nada que no
+    esté en la lista de rutinas. Devuelve cuántos borró."""
+    import unicodedata as _ud
+
+    def _norm(t):
+        t = "".join(c for c in _ud.normalize("NFD", (t or "").lower()) if _ud.category(c) != "Mn")
+        return re.sub(r"[^a-z0-9 ]+", " ", t).strip()
+
+    rutinas = {_norm(r) for r in (rutinas or set()) if _norm(r)}
+    access_token = await get_gcal_access_token()
+    if not access_token:
+        return 0
+    now = now_argentina()
+    # Solo lo anterior a hoy: lo de hoy se respeta hasta que termine el día.
+    time_min = (now - timedelta(days=120)).strftime("%Y-%m-%dT00:00:00-03:00")
+    time_max = now.strftime("%Y-%m-%dT00:00:00-03:00")
+    borrados = 0
+    async with httpx.AsyncClient(timeout=20) as http:
+        r = await http.get(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"timeMin": time_min, "timeMax": time_max, "singleEvents": "true",
+                    "orderBy": "startTime", "maxResults": "250"},
+        )
+        if r.status_code != 200:
+            print(f"[limpieza] no pude listar: {r.status_code} {r.text[:150]}")
+            return 0
+        for ev in r.json().get("items", []):
+            if ev.get("attendees") or ev.get("eventType") == "birthday":
+                continue
+            es_temp = "[TEMP]" in (ev.get("description") or "")
+            resumen = _norm(ev.get("summary", "").replace("🔔", ""))
+            es_rutina = bool(rutinas) and any(
+                rut == resumen or rut in resumen.split() or resumen in rut for rut in rutinas
+            )
+            if not (es_temp or es_rutina):
+                continue
+            d = await http.delete(
+                f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{ev['id']}",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if d.status_code in (200, 204):
+                borrados += 1
+            else:
+                print(f"[limpieza] no pude borrar {ev.get('summary')}: {d.status_code}")
+    if borrados:
+        print(f"[limpieza] {borrados} eventos vencidos borrados (recordatorios + rutinas)")
+    return borrados

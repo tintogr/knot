@@ -31,6 +31,7 @@ from gcal import (
     fuzzy_match_event, _find_calendar_event, find_similar_calendar_events,
     RRULE_DAY_MAP, WEEKDAY_TO_RRULE, next_weekday_date, fix_recurring_event_date,
     query_calendar, query_calendar_date, calcular_fecha_exacta, calcular_fecha_con_verificacion,
+    limpiar_eventos_vencidos,
 )
 from config import load_user_config, save_user_config, handle_configurar
 from summaries import (
@@ -7331,6 +7332,12 @@ async def _cron_job_inner():
                 await _check_daily_hints(now)
             except Exception:
                 pass
+            # Limpieza del calendario: recordatorios ya sonados y clases pasadas de
+            # rutinas. Nunca toca turnos, reuniones ni cumpleaños.
+            try:
+                await limpiar_eventos_vencidos(set(user_prefs.get("activities") or {}))
+            except Exception as _e:
+                print(f"[limpieza] falló: {type(_e).__name__}: {_e}")
             await save_user_config(MY_NUMBER)
             fired.append("DAILY_SUMMARY")
         except Exception as e:
