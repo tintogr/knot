@@ -1916,30 +1916,53 @@ async def eliminar_gasto(text: str, phone: str = None) -> tuple[bool, str]:
         system=(
             "Decidis si el mensaje pide BORRAR una entrada de Notion. Responde SOLO JSON.\n"
             "search_term = nombre de la entrada a eliminar.\n"
+            "mes = 'YYYY-MM' si el usuario acota a un mes ('el alquiler de este mes', 'el de agosto'); "
+            "fecha = 'YYYY-MM-DD' si nombra un dia concreto. null si no acota.\n"
             "search_term DEBE ser null si el mensaje no es una orden de baja: reclamos o quejas "
             "sobre algo ya ocurrido ('borraste la de agosto', 'me eliminaste X'), preguntas, "
             "o correcciones de datos. Un verbo en pasado es un reclamo, no una orden.\n"
             "Ante la duda, null."
         ),
-        messages=[{"role": "user", "content": f'{_history_context(phone)}Mensaje: {text}\nResponde: {{"search_term": "nombre o null"}}'}]
+        messages=[{"role": "user", "content": f'Hoy: {now_argentina().strftime("%Y-%m-%d")}\n{_history_context(phone)}'
+                                               f'Mensaje: {text}\nResponde: {{"search_term": "nombre o null", "mes": "YYYY-MM o null", "fecha": "YYYY-MM-DD o null"}}'}]
     )
     raw = response.content[0].text.strip()
     if raw.startswith("```"):
         raw = raw.strip("`").lstrip("json").strip()
-    search_term = json.loads(raw).get("search_term") or ""
+    _intent = json.loads(raw)
+    search_term = _intent.get("search_term") or ""
     if not search_term:
         return False, ("No estoy seguro de qué querés borrar, así que no toqué nada. "
                        "Si te borré o cambié algo que no correspondía, decime cuál es y lo revisamos.")
 
     # limit=1 agarraba la primera coincidencia de substring: "agosto" matcheaba
     # "Sesiones psicóloga - julio y agosto" y ofrecia borrarla. Mejor mostrar y preguntar.
-    results = await _ds.query_expenses(QueryFilter(name_contains=search_term, limit=5))
+    # Acotar por mes/fecha: "el alquiler de este mes" no puede terminar borrando el de agosto.
+    _filtro = QueryFilter(name_contains=search_term, limit=5)
+    _periodo = ""
+    from datetime import date as _date
+    try:
+        if _intent.get("fecha"):
+            _d = _date.fromisoformat(_intent["fecha"])
+            _filtro.date_range = DateRange(start=_d, end=_d)
+            _periodo = f" del {_d.strftime('%d/%m')}"
+        elif _intent.get("mes"):
+            _a, _m = (int(x) for x in _intent["mes"].split("-")[:2])
+            _ultimo = monthrange(_a, _m)[1]
+            _filtro.date_range = DateRange(start=_date(_a, _m, 1), end=_date(_a, _m, _ultimo))
+            _periodo = f" de {_date(_a, _m, 1).strftime('%m/%Y')}"
+    except (ValueError, TypeError):
+        pass
+
+    results = await _ds.query_expenses(_filtro)
     if not results:
-        return False, f"No encontre ninguna entrada llamada _{search_term}_"
+        return False, f"No encontre ninguna entrada llamada _{search_term}_{_periodo}"
     if len(results) > 1:
-        listado = "\n".join(f"  • {e.name} — ${e.value_ars:,.0f}" for e in results)
-        return False, (f"Hay varias que coinciden con _{search_term}_:\n{listado}\n\n"
-                       "¿Cuál borro? Pasame el nombre completo.")
+        listado = "\n".join(
+            f"  • {e.name} — ${e.value_ars:,.0f}" + (f" ({e.date.strftime('%d/%m')})" if getattr(e, "date", None) and hasattr(e.date, "strftime") else "")
+            for e in results)
+        return False, (f"Hay varias que coinciden con _{search_term}_{_periodo}:\n{listado}\n\n"
+                       "¿Cuál borro? Pasame el nombre completo o la fecha.")
     entry = results[0]
     if phone:
         expires_at = (now_argentina() + timedelta(minutes=5)).replace(tzinfo=None).isoformat()

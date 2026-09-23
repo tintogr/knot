@@ -439,6 +439,12 @@ async def get_invoices_from_gmail(now: datetime) -> list[dict]:
             instr = f"""Sos el extractor de facturas de servicios de Knot. Hoy es {today}.
 Te paso los mails de facturas del último mes y, cuando hay, los PDF adjuntos (esos PDF son la factura REAL).
 
+QUE ES UNA FACTURA: solo cuentan los avisos de algo POR PAGAR. Ignorá por completo los
+COMPROBANTES DE PAGO ya hecho: "constancia de pago", "comprobante de pago", "ticket de pago",
+"pagaste tu servicio", "recibo", confirmaciones de Pronto Pago / Rapipago / Pago Fácil / banco /
+Mercado Pago. Esos mails avisan que YA pagaste: si los cargás como factura, Knot le inventa una
+deuda al usuario. Tampoco cuentes como una sola factura un pago agrupado de varias.
+
 MONTO (clave): usá el "TOTAL A PAGAR" final del PDF. NO sumes renglones ni uses subtotales. Si una factura tiene descuentos o "devolución de anticipo", el total ya los contempla. Si solo hay texto del mail (sin PDF) y el total no aparece claro, poné amount=null.
 FORMATO DEL MONTO: las facturas argentinas usan punto para miles y coma para decimales. "amount" va como número JSON en pesos, SIN separador de miles y con punto decimal: "$ 22.966,00" -> 22966.00 ; "$ 1.234.567,89" -> 1234567.89. Nunca devuelvas 22.966 para veintidós mil.
 

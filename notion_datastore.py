@@ -713,6 +713,9 @@ class NotionDataStore:
         """Relee una entrada desde Notion. Sirve para confirmarle al usuario lo que
         QUEDO guardado, en vez de repetirle lo que el modelo dijo que iba a guardar."""
         try:
+            if not getattr(self, "_pm_cache", None):
+                # Sin el cache cargado, el metodo de pago salia como "(método registrado)".
+                self._pm_cache = await self.load_payment_methods()
             r = await self._http.get(f"{NOTION_API}/pages/{entry_id}", headers=self._headers_cache)
             if r.status_code != 200:
                 print(f"[get_expense] HTTP {r.status_code}: {r.text[:200]}")
