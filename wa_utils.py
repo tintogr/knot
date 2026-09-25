@@ -1,8 +1,8 @@
 import httpx
-from state import WA_API, WA_TOKEN, record_message_text
+from state import WA_API, WA_TOKEN, record_message_text, registrar_enviado
 
 
-async def send_message(to: str, text: str):
+async def send_message(to: str, text: str) -> bool:
     async with httpx.AsyncClient() as http:
         r = await http.post(WA_API, headers={
             "Authorization": f"Bearer {WA_TOKEN}",
@@ -13,14 +13,20 @@ async def send_message(to: str, text: str):
             "type": "text",
             "text": {"body": text}
         })
+        if r.status_code != 200:
+            # Antes se ignoraba: si WhatsApp rechazaba el envio, nadie se enteraba.
+            print(f"[whatsapp] envío rechazado ({r.status_code}): {r.text[:300]}")
+            return False
         # Registrar el wamid saliente para poder resolver cuando el usuario
-        # responda/cite este mensaje mas adelante.
+        # responda/cite este mensaje mas adelante, y para reenviarlo si no se entrega.
         try:
             mid = (r.json().get("messages") or [{}])[0].get("id")
             if mid:
                 record_message_text(mid, text)
+                registrar_enviado(mid, text)
         except Exception:
             pass
+        return True
 
 
 async def send_interactive_buttons(to: str, body: str, buttons: list[dict], header: str = None):

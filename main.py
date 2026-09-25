@@ -13,6 +13,7 @@ from math import radians, sin, cos, sqrt, atan2
 from fastapi import FastAPI, Request, BackgroundTasks
 
 from state import (
+    mensajes_no_entregados, texto_enviado,
     _ds, QueryFilter, DateRange,
     WA_TOKEN, WA_PHONE_ID, WA_API, MY_NUMBER, DAILY_SUMMARY_HOUR,
     USER_LAT, USER_LON, SONNET_MODEL, HAIKU_MODEL,
@@ -6300,6 +6301,17 @@ async def enqueue_message(message: dict):
             if len(processed_message_ids) > MAX_PROCESSED_IDS:
                 processed_message_ids.clear()
 
+        if mensajes_no_entregados:
+            # Martin escribió: la ventana de 24 h está abierta otra vez.
+            _pend = list(mensajes_no_entregados)
+            mensajes_no_entregados.clear()
+            _extra = len(_pend) - 3
+            await send_message(phone, "📬 Esto te lo quise mandar pero WhatsApp no me dejó, porque hacía más de "
+                                      "24 horas que no hablábamos:"
+                                      + (f" (te paso los últimos 3 de {len(_pend)})" if _extra > 0 else ""))
+            for _t in _pend[-3:]:
+                await send_message(phone, _t)
+
         msg_type = message["type"]
         text = ""
         image_b64 = image_type = None
@@ -6441,7 +6453,19 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             return {"ok": False, "error": "invalid signature"}
     try:
         body = json.loads(raw)
-        messages = body["entry"][0]["changes"][0]["value"].get("messages")
+        value = body["entry"][0]["changes"][0]["value"]
+        # Avisos de estado de lo que mandó Knot. Antes se ignoraban por completo.
+        for st in value.get("statuses") or []:
+            if st.get("status") != "failed":
+                continue
+            errores = st.get("errors") or []
+            print(f"[whatsapp] NO se entregó {st.get('id')}: {errores}")
+            if any(e.get("code") == 131047 for e in errores):
+                # Ventana de 24 h cerrada: guardarlo para cuando Martin escriba.
+                txt = texto_enviado(st.get("id"))
+                if txt:
+                    mensajes_no_entregados.append(txt)
+        messages = value.get("messages")
         if messages:
             msg = messages[0]
             sender = msg.get("from", "")

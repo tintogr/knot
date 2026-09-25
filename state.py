@@ -203,3 +203,25 @@ def add_to_history(phone: str, role: str, content: str):
     chat_history[phone].append({"role": role, "content": content})
     if len(chat_history[phone]) > MAX_HISTORY:
         chat_history[phone] = chat_history[phone][-MAX_HISTORY:]
+
+
+# WhatsApp solo deja mandar texto libre dentro de las 24 h desde el ultimo mensaje de
+# Martin. Fuera de esa ventana el envio "sale bien" pero despues llega un aviso de
+# fallo (error 131047) y el mensaje nunca se entrega: el resumen de las 7, un
+# recordatorio. Se guardan aca y se reenvian apenas Martin escribe (se reabre la ventana).
+mensajes_no_entregados: list[str] = []
+_enviados_completos: dict[str, str] = {}
+_ENVIADOS_CAP = 60
+
+
+def registrar_enviado(msg_id: str, text: str):
+    if not msg_id or not text:
+        return
+    if len(_enviados_completos) > _ENVIADOS_CAP:
+        for k in list(_enviados_completos)[: _ENVIADOS_CAP // 2]:
+            del _enviados_completos[k]
+    _enviados_completos[msg_id] = text
+
+
+def texto_enviado(msg_id: str) -> str | None:
+    return _enviados_completos.get(msg_id)

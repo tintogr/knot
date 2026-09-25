@@ -52,6 +52,15 @@ los recordatorios `[TEMP]` que creó Knot (ya sonaron) y las clases pasadas de l
 Martin declaró como rutina (`user_prefs["activities"]`). **Nunca** toca turnos, reuniones, eventos
 con invitados ni cumpleaños. Google los guarda 30 días en la papelera.
 
+## WhatsApp: política de Meta y ventana de 24 h
+- Desde el **15/01/2026** los términos de WhatsApp Business prohíben a los "AI Providers" usar la API para
+  ofrecer un asistente de IA cuando esa es la función principal (apunta a ChatGPT, Perplexity, Luzia, etc.).
+  Knot es un asistente general pero de **un solo usuario** y no se distribuye: zona gris, riesgo bajo. Si
+  Meta lo aplicara, se pierde el número del bot, no el WhatsApp personal de Martin.
+- Texto libre solo dentro de las **24 h** desde el último mensaje de Martin. Fuera de eso la API acepta el
+  envío pero después avisa **error 131047** por webhook (`statuses`) y el mensaje no llega. Knot lo detecta,
+  lo guarda en `mensajes_no_entregados` y lo reenvía apenas Martin escribe. `send_message` devuelve bool.
+
 ## Contexto que Knot usa para clasificar
 - **Rafael Lorenzo** = jefe de Martin → sus transferencias por MP = **Sueldo**.
 - Facturas de servicios: se leen del PDF adjunto del mail (montos reales) y se deduplican por proveedor (tokens + aliases) + mes + monto.
