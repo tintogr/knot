@@ -61,7 +61,7 @@ con invitados ni cumpleaños. Google los guarda 30 días en la papelera.
 - Agosto–septiembre (bitácora §10): anti-duplicados persistente, gastos nacen `Pagada`, marcar pagada/impaga y cambiar fecha desde WhatsApp, marcar facturas pagadas **de verdad** (bug de `Method`), match de facturas por período, montos con punto de miles, recordatorios que miran agenda + web y se pueden deshacer, borrado seguro (un reclamo no es una orden), preguntar en vez de inventar ubicaciones.
 
 ## Hoja de ruta pendiente
-0. **Decisión abierta — doble conteo factura + pago**: cuando un pago matchea una factura, quedan dos EGRESO por el mismo dinero (la factura marcada Pagada y el gasto del pago). Pasó con CALF mayo/sep y Calfibra abril. Opción propuesta: al marcar la factura, archivar el gasto del pago (la factura queda como único registro, con el método). Falta que Martin decida.
+0. **Modelo "una factura = un registro"** (decidido por Martin): la factura es el único registro; Impaga no suma ni resta, Pagada resta; los pagos parciales se aclaran en nombre y notas. **Hecho:** los totales de Knot ya excluyen las Impagas (`get_financial_summary` las reporta aparte como `pendiente`). **Falta:** (a) que al pagar una factura existente Knot la marque en vez de crear un gasto aparte (hoy genera doble conteo), (b) la fórmula `Expenses` de Notion todavía suma las Impagas.
 1. **Aprendizaje de aliases**: cuando Martin aclara un proveedor nuevo, agregar el alias a la DB Servicios solo.
 2. **Recordatorios automáticos** de servicios con `Llega por mail = ☐` (EPAS, Monotributo) usando `Vence dia`.
 3. **Comparar facturas mes a mes** y explicar subas (ej: "¿por qué la luz salió cara?") — se apoya en la lectura de PDFs.

@@ -950,11 +950,18 @@ class NotionDataStore:
             limit=500,
         ))
 
-        ingresos = egresos = 0
+        # Regla de Martin: una factura Impaga todavia no es plata que salio, no suma
+        # ni resta. Antes entraba en los egresos: "¿cuanto gasté?" incluia facturas sin
+        # pagar (y una factura fantasma de $183.361 inflaba septiembre).
+        ingresos = egresos = pendiente = 0
         by_category = {}
+        impagas = []
         for e in entries:
             if e.in_out == "INGRESO":
                 ingresos += e.value_ars
+            elif e.estado == "Impaga":
+                pendiente += e.value_ars
+                impagas.append((e.name, e.value_ars))
             else:
                 egresos += e.value_ars
                 for cat in (e.categories or []):
@@ -966,6 +973,8 @@ class NotionDataStore:
             "balance": ingresos - egresos,
             "by_category": by_category,
             "entries": len(entries),
+            "pendiente": pendiente,
+            "impagas": impagas,
         }
 
     async def search_expenses(self, query: str, month: str = None) -> list[EntryResult]:

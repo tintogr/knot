@@ -2473,6 +2473,9 @@ async def query_finances(month: str = None) -> str:
     summary = f"*Finanzas {month}*\n\nIngresos: ${data['ingresos']:,.0f}\nEgresos: ${data['egresos']:,.0f}\nBalance: ${data['balance']:,.0f}\n"
     if top_cats:
         summary += "\n*Top categorias:*\n" + "".join(f"- {c}: ${v:,.0f}\n" for c, v in top_cats)
+    if data.get("pendiente"):
+        summary += (f"\n*Pendiente de pago (no suma en egresos):* ${data['pendiente']:,.0f}\n"
+                    + "".join(f"- {n}: ${v:,.0f}\n" for n, v in data.get("impagas", [])[:5]))
     return summary
 
 
