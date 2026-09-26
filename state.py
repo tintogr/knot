@@ -81,7 +81,7 @@ DIAS_SEMANA = ["lunes", "martes", "miercoles", "jueves", "viernes", "sabado", "d
 INGRESO_EXACT = "\u2192INGRESO\u2190"
 EGRESO_EXACT  = "\u2190 EGRESO \u2192"
 
-MAX_HISTORY = 10
+MAX_HISTORY = 20  # ahora también entra lo que Knot manda solo (avisos, recordatorios)
 
 # ── Variables de estado en memoria (mutables, compartidas entre módulos) ──────
 
@@ -194,15 +194,46 @@ def semana_str(now: datetime = None) -> str:
         lines.append(entry)
     return " | ".join(lines)
 
+def _clave_historial(phone: str) -> str:
+    """Una sola conversación por persona aunque el número venga en distintos formatos:
+    el webhook usa 54298... y el cron MY_NUMBER, que puede venir como 549298...
+    Si no coinciden, lo que Knot manda solo (recordatorios, avisos) queda en otra
+    conversación que el agente nunca ve."""
+    d = "".join(c for c in str(phone or "") if c.isdigit())
+    return "54" + d[3:] if d.startswith("549") else d
+
+
 def get_history(phone: str) -> list:
-    return chat_history.get(phone, [])
+    return chat_history.get(_clave_historial(phone), [])
+
 
 def add_to_history(phone: str, role: str, content: str):
-    if phone not in chat_history:
-        chat_history[phone] = []
-    chat_history[phone].append({"role": role, "content": content})
-    if len(chat_history[phone]) > MAX_HISTORY:
-        chat_history[phone] = chat_history[phone][-MAX_HISTORY:]
+    k = _clave_historial(phone)
+    h = chat_history.setdefault(k, [])
+    # Los handlers registran su respuesta y después la envían, y el envío también
+    # registra: sin esto cada respuesta quedaría dos veces.
+    if h and h[-1]["role"] == role and h[-1]["content"] == content:
+        return
+    h.append({"role": role, "content": content})
+    if len(h) > MAX_HISTORY:
+        chat_history[k] = h[-MAX_HISTORY:]
+
+
+def historial_para_api(phone: str) -> list:
+    """El historial listo para pasarlo como `messages` a la API: sin entradas vacías
+    y empezando por un turno del usuario. Desde que se registran también los avisos
+    que Knot manda solo, la conversación puede arrancar con un mensaje de Knot."""
+    h = [dict(m) for m in get_history(phone) if m.get("content")]
+    if h and h[0]["role"] != "user":
+        h.insert(0, {"role": "user", "content": "(conversación previa)"})
+    return h
+
+
+def quitar_ultimo_de_historial(phone: str, role: str, content: str):
+    """Deshace un add_to_history si sigue siendo la última entrada."""
+    h = chat_history.get(_clave_historial(phone), [])
+    if h and h[-1]["role"] == role and h[-1]["content"] == content:
+        h.pop()
 
 
 # WhatsApp solo deja mandar texto libre dentro de las 24 h desde el ultimo mensaje de

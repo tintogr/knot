@@ -1,5 +1,5 @@
 import httpx
-from state import WA_API, WA_TOKEN, record_message_text, registrar_enviado
+from state import WA_API, WA_TOKEN, record_message_text, registrar_enviado, add_to_history
 
 
 async def send_message(to: str, text: str) -> bool:
@@ -26,6 +26,11 @@ async def send_message(to: str, text: str) -> bool:
                 registrar_enviado(mid, text)
         except Exception:
             pass
+        # Todo lo que Knot dice queda en la conversación, también lo que manda solo
+        # (recordatorios, avisos, respuestas a preguntas pendientes). Si no, el agente
+        # contestaba "no tengo registro" sobre un recordatorio que él mismo mandó.
+        if not text.startswith("⏳"):
+            add_to_history(to, "assistant", text)
         return True
 
 
@@ -58,6 +63,9 @@ async def send_interactive_buttons(to: str, body: str, buttons: list[dict], head
                 record_message_text(mid, body)
         except Exception:
             pass
+        if r.status_code == 200:
+            opciones = " | ".join(b["title"] for b in buttons[:3])
+            add_to_history(to, "assistant", f"{body}\n[opciones: {opciones}]")
 
 
 async def send_reaction(to: str, message_id: str, emoji: str):
