@@ -2403,7 +2403,8 @@ def _conversacion_reciente(phone: str, turnos: int = 12) -> str:
     )
 
 
-async def _router_agent(phone: str, text: str, has_image: bool) -> dict:
+async def _router_agent(phone: str, text: str, has_image: bool, image_b64=None,
+                        image_type=None, extra_images=None) -> dict:
     """Devuelve {"modulo": str|None, "mensaje": str, "respuesta": str|None}."""
     now = now_argentina()
     system = f"""Sos Knot, el asistente personal de Martin por WhatsApp. Hablás en español rioplatense.
@@ -2427,22 +2428,34 @@ Reglas:
   si hace falta consultar la agenda, las finanzas o los mails, mandalo a CHAT.
 - Si no entendés qué quiere, preguntale en "respuesta" en vez de adivinar un módulo.
 - NUNCA digas que hiciste algo (agendé, registré, pospuse, borré, marqué) si en la conversación no aparece Knot confirmando ESA acción. Si Martin pregunta '¿lo hiciste?' y no ves la confirmación, decile que no quedó hecho y ofrecé hacerlo ahora. No confundas una acción con otra anterior.
-- Ante una foto o documento, elegí el módulo por lo que se ve (factura/ticket -> GASTO, etc.).
+- Ante una foto o documento, MIRALA y elegí el módulo por lo que se ve (factura/ticket -> GASTO, etc.).
+- Si es una captura de pantalla (de esta misma conversación, de otra app, de un mail), leela y usala
+  como contexto: Martin te la manda para que entiendas de qué habla. Ej: si muestra que Knot le recordó
+  'Armar un corte constructivo' y él pidió posponerlo, entendé que quiere eso. Los módulos de texto NO
+  ven la imagen: poné en el corchete de "mensaje" todo lo que necesiten de ella.
 
 Respondé SOLO un JSON, sin markdown:
-{{"modulo": "NOMBRE_DEL_MODULO" o null, "mensaje": "texto para el módulo", "respuesta": "texto para Martin" o null}}"""
+{{"modulo": "NOMBRE_DEL_MODULO" o null, "mensaje": "texto para el módulo", "respuesta": "texto para Martin" o null,
+ "imagen": "si mandó imagen: qué muestra, en una línea (queda en la conversación); si no, null"}}"""
     contenido = (f"Conversación reciente:\n{_conversacion_reciente(phone)}\n\n"
                  f"Mensaje nuevo de Martin: {text or '(manda una imagen sin texto)'}"
                  + (" [viene con imagen adjunta]" if has_image else ""))
-    resp = await claude_create(model=SONNET_MODEL, max_tokens=700, system=system,
-                               messages=[{"role": "user", "content": contenido}])
+    bloques = []
+    for _b64, _tipo in ([(image_b64, image_type)] if image_b64 else []) + list(extra_images or []):
+        if _b64:
+            bloques.append({"type": "image", "source": {"type": "base64",
+                            "media_type": _tipo or "image/jpeg", "data": _b64}})
+    bloques.append({"type": "text", "text": contenido})
+    resp = await claude_create(model=SONNET_MODEL, max_tokens=900, system=system,
+                               messages=[{"role": "user", "content": bloques}])
     crudo = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text").strip()
     ini, fin = crudo.find("{"), crudo.rfind("}")
     if ini < 0 or fin <= ini:
         raise ValueError(f"el agente de entrada no devolvio JSON: {crudo[:120]}")
     datos = json.loads(crudo[ini:fin + 1])
     modulo = (datos.get("modulo") or "").strip().upper() or None
-    return {"modulo": modulo, "mensaje": datos.get("mensaje") or text, "respuesta": datos.get("respuesta")}
+    return {"modulo": modulo, "mensaje": datos.get("mensaje") or text, "respuesta": datos.get("respuesta"),
+            "imagen": datos.get("imagen") if has_image else None}
 
 
 async def _decidir_ruta(phone: str, text: str, has_image: bool, history: list, image_b64=None,
@@ -2451,9 +2464,12 @@ async def _decidir_ruta(phone: str, text: str, has_image: bool, history: list, i
     sea, se cae al clasificador viejo: nunca dejamos a Martin sin respuesta."""
     if ROUTER_ACTIVO:
         try:
-            r = await _router_agent(phone, text, has_image)
+            r = await _router_agent(phone, text, has_image, image_b64, image_type, extra_images)
             if r["respuesta"] and not r["modulo"]:
-                return None, text, r["respuesta"]
+                # Lo que queda en la conversación: el texto + qué mostraba la imagen, para que
+                # el próximo mensaje sepa de qué se habló (antes quedaba solo "(imagen)").
+                _txt = f"{text} [imagen: {r['imagen']}]".strip() if r.get("imagen") else text
+                return None, _txt, r["respuesta"]
             if r["modulo"] in _MODULOS_VALIDOS:
                 return r["modulo"], r["mensaje"], r["respuesta"]
             print(f"[router] modulo desconocido: {r['modulo']!r}, uso el clasificador")
