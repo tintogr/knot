@@ -67,14 +67,16 @@ con invitados ni cumpleaños. Google los guarda 30 días en la papelera.
 
 ## Trabajo reciente (feat/fix ya deployados)
 - Junio–julio: lectura de PDFs de facturas con visión, dedup robusto, DB Servicios, ~12 bugs de conversación (ver bitácora §1–8).
+- 17–26 septiembre (bitácora §11): agente de entrada con conversación e imágenes, historial completo, impagas fuera de los totales (Knot + fórmulas de Notion), Gmail completo, limpieza de calendario, verificación contra Notion.
 - Agosto–septiembre (bitácora §10): anti-duplicados persistente, gastos nacen `Pagada`, marcar pagada/impaga y cambiar fecha desde WhatsApp, marcar facturas pagadas **de verdad** (bug de `Method`), match de facturas por período, montos con punto de miles, recordatorios que miran agenda + web y se pueden deshacer, borrado seguro (un reclamo no es una orden), preguntar en vez de inventar ubicaciones.
 
 ## Hoja de ruta pendiente
-0. **Modelo "una factura = un registro"** (decidido por Martin): la factura es el único registro; Impaga no suma ni resta, Pagada resta; los pagos parciales se aclaran en nombre y notas. **Hecho:** los totales de Knot ya excluyen las Impagas (`get_financial_summary` las reporta aparte como `pendiente`). **Falta:** (a) que al pagar una factura existente Knot la marque en vez de crear un gasto aparte (hoy genera doble conteo), (b) la fórmula `Expenses` de Notion todavía suma las Impagas (hace falta que Martin pegue la fórmula actual para envolverla). El gráfico "📈 Gráfico por categoría" ya filtra `Estado != Impaga OR Estado IS EMPTY` (sept 2026).
+0. **Modelo "una factura = un registro"** (decidido por Martin): la factura es el único registro; Impaga no suma ni resta, Pagada resta; los pagos parciales se aclaran en nombre y notas. **Hecho:** Impaga no suma ni resta, ni en Knot (`get_financial_summary`) ni en Notion (fórmulas `Expenses` y `ARS`, gráfico por categoría). **Falta:** que al pagar una factura existente Knot la marque en vez de crear un gasto aparte (hoy genera doble conteo).
 1. **Aprendizaje de aliases**: cuando Martin aclara un proveedor nuevo, agregar el alias a la DB Servicios solo.
 2. **Recordatorios automáticos** de servicios con `Llega por mail = ☐` (EPAS, Monotributo) usando `Vence dia`.
 3. **Comparar facturas mes a mes** y explicar subas (ej: "¿por qué la luz salió cara?") — se apoya en la lectura de PDFs.
 4. **Ingesta de resúmenes PDF de Mercado Pago** (parsear movimientos + clasificar + dedup).
+6. **Evaluar base de datos propia** en vez de Notion (idea de Martin, sept 2026): servidores, costos, pros y contras. La capa `_ds` ya aísla todo el acceso a Notion.
 5. Avisos de salida según tráfico: hoy solo se manda un link de Google Maps; calcularlo de verdad necesita routing (OSRM, gratis) + scheduler.
 
 ## Reglas críticas

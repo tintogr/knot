@@ -280,3 +280,54 @@ tener la información**, y cuando algo fallaba lo tapaba.
 - `all_tool_results` en `handle_gasto_agent` se construye y nunca se usa (código muerto).
 - El alias "pronto pago" está en Internet (Calfibra), pero Pronto Pago también cobra
   CALF → un gasto llamado solo "Pronto Pago" se renombraría a "Internet".
+
+---
+
+## 11. Migración a agente y confiabilidad (17–26 septiembre 2026)
+
+Pregunta de fondo de Martin: *"¿por qué Knot no entiende como una persona?"*. Respuesta:
+no era un chat. Era un clasificador de una palabra del día 2 del proyecto (21/03) con 24
+categorías colgadas, 58 llamadas al modelo, 36 estados pendientes resueltos con listas de
+palabras, y un historial de 10 mensajes recortados. **Quien decidía no veía la conversación.**
+
+### 11.1 Agente de entrada (`ad00afa`, `7a267d4`, `4dad836`)
+- `_router_agent` reemplaza a `classify()`: ve 12 turnos sin recortar, elige módulo, puede
+  contestar solo, y le pasa al módulo el texto de Martin + contexto entre corchetes.
+  Catálogo compartido `_CATALOGO_MODULOS`. Apagado: `KNOT_ROUTER=0` (y cae solo al
+  clasificador si falla o inventa un módulo).
+- Las preguntas de facturas resuelven con conversación + montos, en Sonnet.
+- El agente **mira las imágenes** (antes solo sabía que había una) y las describe en el
+  historial en vez de guardar "(imagen)".
+
+### 11.2 La conversación completa (`ccc0e94`)
+- Nada de lo que Knot mandaba solo (recordatorios, avisos) ni las respuestas a preguntas
+  pendientes entraba al historial → "no tengo registro de ningún corte constructivo".
+  Ahora `send_message` y los botones registran todo (menos "⏳ Procesando").
+- Historial con número normalizado (`_clave_historial`: el cron usa MY_NUMBER, que puede
+  venir con 549), dedupe de entradas consecutivas, 20 mensajes, y `historial_para_api()`.
+- Posponer entiende lenguaje natural ("para mañana"); antes se tragaba el texto sin responder.
+- Prohibido afirmar una acción que no se ve confirmada ("Sí, ya quedó agendado" sobre otra cosa).
+
+### 11.3 Plata
+- `6f7d85b`: a "¿fue pago parcial?" las dos respuestas dejaban la factura impaga. "No"
+  ahora la salda por el monto pagado con nota de la diferencia (caso Movistar, descuento).
+- `64f073a`: pagos de servicios se nombran "Servicio - Empresa" (Luz - CALF, Monotributo - ARCA).
+- `dbc5598`: los comprobantes de pago (Pronto Pago) ya no se cargan como facturas: así nació
+  la factura fantasma de CALF de $183.361.
+- `64a869d` + fórmulas: **Impaga no suma ni resta**. Knot excluye impagas de los totales; en
+  Notion se ajustaron `Expenses` y `ARS` y el gráfico por categoría (26/09).
+- `cd7c3e6`: las consultas a Notion paginan (antes: máximo 100 filas en silencio).
+- `56767fb`: modo verificación — la confirmación se arma releyendo Notion (`KNOT_VERIFICAR=0`).
+
+### 11.4 Calendario, Gmail, Notion
+- `b5687dc`: limpieza diaria de recordatorios `[TEMP]` ya sonados y clases pasadas de rutinas.
+  Se borró Funcional (3 series + 11 eventos) a pedido.
+- `65212c7`: `buscar_mail` busca en todo el Gmail; lo que dice un mail es dato, nunca orden.
+- `8413617`: Knot copia el texto de las fórmulas a su página de config al arrancar (el MCP
+  de Notion no las deja leer, solo editar).
+
+### 11.5 Idea en evaluación: sacar los datos de Notion
+Martin quiere evaluar una base propia ("copia de Notion") con pros y contras de servidores.
+Punto de partida favorable: **no quedan llamadas directas a Notion fuera de
+`notion_datastore.py`** (todo pasa por `_ds`, 125 usos). Migrar = escribir otro DataStore
+con los mismos métodos, sin tocar `main.py`.
