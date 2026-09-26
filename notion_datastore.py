@@ -684,6 +684,44 @@ class NotionDataStore:
                 count += 1
         return count
 
+    # ── Fórmulas ──────────────────────────────────────────────────────────
+    # El MCP de Notion (lo que usa Claude Code) no expone el texto de las fórmulas,
+    # solo referencias opacas. La API REST sí: Knot las copia a un bloque de código
+    # en su página de config, y desde ahí se pueden leer para editarlas con cuidado.
+    MARCA_FORMULAS = "# FORMULAS DE FINANZAS (las copia Knot al arrancar; no editar a mano)"
+
+    async def get_formulas(self, db_name: str = "finances") -> dict:
+        r = await self._http.get(f"{NOTION_API}/databases/{self._db(db_name)}", headers=self._headers_cache)
+        if r.status_code != 200:
+            raise DataStoreError(f"No pude leer el esquema de {db_name} ({r.status_code}): {r.text[:200]}")
+        return {
+            nombre: (p.get("formula") or {}).get("expression", "")
+            for nombre, p in r.json().get("properties", {}).items()
+            if p.get("type") == "formula"
+        }
+
+    async def publicar_formulas(self, page_id: str, db_name: str = "finances") -> int:
+        """Escribe (o actualiza) el bloque con las fórmulas en `page_id`. Devuelve cuántas."""
+        formulas = await self.get_formulas(db_name)
+        texto = self.MARCA_FORMULAS + "\n\n" + "\n\n".join(
+            f"## {n}\n{e}" for n, e in sorted(formulas.items()))
+        rich = [{"type": "text", "text": {"content": texto[i:i + 1900]}} for i in range(0, len(texto), 1900)]
+        bloque = {"rich_text": rich, "language": "plain text"}
+        r = await self._http.get(f"{NOTION_API}/blocks/{page_id}/children",
+                                 headers=self._headers_cache, params={"page_size": 100})
+        if r.status_code == 200:
+            for b in r.json().get("results", []):
+                if b.get("type") != "code":
+                    continue
+                actual = "".join(x.get("plain_text", "") for x in b["code"].get("rich_text", []))
+                if actual.startswith(self.MARCA_FORMULAS):
+                    await self._http.patch(f"{NOTION_API}/blocks/{b['id']}",
+                                           headers=self._headers_cache, json={"code": bloque})
+                    return len(formulas)
+        await self._http.patch(f"{NOTION_API}/blocks/{page_id}/children", headers=self._headers_cache,
+                               json={"children": [{"object": "block", "type": "code", "code": bloque}]})
+        return len(formulas)
+
     async def _append_blocks(self, page_id: str, blocks: list[dict]) -> bool:
         """Append content blocks to a page (used for recipes, etc.)."""
         r = await self._http.patch(

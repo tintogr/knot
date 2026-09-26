@@ -58,6 +58,19 @@ async def startup_event():
     await _ds.ensure_db_text_field("config", "City")
     asyncio.create_task(_run_once_migrations())
     asyncio.create_task(_cron_loop())
+    asyncio.create_task(_publicar_formulas())
+
+
+async def _publicar_formulas():
+    """Copia el texto de las fórmulas de Finanzas a la página de config (ver
+    NotionDataStore.publicar_formulas). Si falla no pasa nada: es solo para leerlas."""
+    try:
+        page_id = user_prefs.get("_config_page_id")
+        if page_id:
+            n = await _ds.publicar_formulas(page_id)
+            print(f"[formulas] {n} fórmulas de Finanzas copiadas a la página de config")
+    except Exception as e:
+        print(f"[formulas] no pude publicarlas: {type(e).__name__}: {e}")
 
 @app.on_event("shutdown")
 async def shutdown_event():
