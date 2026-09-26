@@ -70,7 +70,7 @@ con invitados ni cumpleaños. Google los guarda 30 días en la papelera.
 - Agosto–septiembre (bitácora §10): anti-duplicados persistente, gastos nacen `Pagada`, marcar pagada/impaga y cambiar fecha desde WhatsApp, marcar facturas pagadas **de verdad** (bug de `Method`), match de facturas por período, montos con punto de miles, recordatorios que miran agenda + web y se pueden deshacer, borrado seguro (un reclamo no es una orden), preguntar en vez de inventar ubicaciones.
 
 ## Hoja de ruta pendiente
-0. **Modelo "una factura = un registro"** (decidido por Martin): la factura es el único registro; Impaga no suma ni resta, Pagada resta; los pagos parciales se aclaran en nombre y notas. **Hecho:** los totales de Knot ya excluyen las Impagas (`get_financial_summary` las reporta aparte como `pendiente`). **Falta:** (a) que al pagar una factura existente Knot la marque en vez de crear un gasto aparte (hoy genera doble conteo), (b) la fórmula `Expenses` de Notion todavía suma las Impagas.
+0. **Modelo "una factura = un registro"** (decidido por Martin): la factura es el único registro; Impaga no suma ni resta, Pagada resta; los pagos parciales se aclaran en nombre y notas. **Hecho:** los totales de Knot ya excluyen las Impagas (`get_financial_summary` las reporta aparte como `pendiente`). **Falta:** (a) que al pagar una factura existente Knot la marque en vez de crear un gasto aparte (hoy genera doble conteo), (b) la fórmula `Expenses` de Notion todavía suma las Impagas (hace falta que Martin pegue la fórmula actual para envolverla). El gráfico "📈 Gráfico por categoría" ya filtra `Estado != Impaga OR Estado IS EMPTY` (sept 2026).
 1. **Aprendizaje de aliases**: cuando Martin aclara un proveedor nuevo, agregar el alias a la DB Servicios solo.
 2. **Recordatorios automáticos** de servicios con `Llega por mail = ☐` (EPAS, Monotributo) usando `Vence dia`.
 3. **Comparar facturas mes a mes** y explicar subas (ej: "¿por qué la luz salió cara?") — se apoya en la lectura de PDFs.
@@ -85,5 +85,5 @@ con invitados ni cumpleaños. Google los guarda 30 días en la papelera.
 - **No obligar al modelo a completar un campo sin datos**: permitir `null` y preguntar (el recordatorio sin fecha inventaba "hoy 12:00").
 - **Extractores (corregir/eliminar) reciben contexto** con `_history_context(phone)`; un verbo en pasado es un reclamo, no una orden de borrar.
 - **Montos argentinos**: punto = miles, coma = decimales. Especificarlo siempre al pedirle un número al modelo.
-- El conector de Notion de Claude Code **no puede borrar ni archivar** páginas: pasarle a Martin el link directo.
+- Conector de Notion de Claude Code: **no puede** borrar ni archivar páginas (pasarle a Martin el link) ni **leer** fórmulas (`formulaCode://` no se puede fetchear). **Sí puede** editar esquema y fórmulas (`notion-update-data-source` con `ALTER COLUMN ... SET FORMULA(...)`) y filtros/config de vistas (`notion-update-view`). Verificar antes de afirmar que algo no se puede.
 - Martin prefiere que Knot **pregunte cuando no está seguro** antes que inventar o actuar solo.
