@@ -5230,6 +5230,11 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
         scores = [(pm, _pm_score(pm)) for pm in payment_methods_cache]
         best = max(scores, key=lambda x: x[1], default=(None, 0))
         matched = best[0] if best[1] >= 3 else None
+        # Las palabras clave solo valen para respuestas cortas ("bbva débito", "efectivo",
+        # "con mp"). En un mensaje largo, nombrar el banco no es responder: "el mail del
+        # trámite de BBVA ya lo leí" le asignaba BBVA Credit a la vianda.
+        if matched and len(t.split()) > 4:
+            matched = None
 
         # Si el scoring no encontró match, desambiguar con IA: ¿es un metodo, otra intencion, o skip?
         decision = "OTHER"
@@ -5240,10 +5245,13 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
             )
             try:
                 dresp = await claude_create(
-                    model=HAIKU_MODEL, max_tokens=10,
+                    model=SONNET_MODEL, max_tokens=10,
                     system=(
-                        "El usuario respondio a la pregunta '¿con que pagaste?' sobre un gasto recien registrado.\n"
+                        f"Knot le pregunto al usuario '¿con que pagaste?' sobre el gasto '{name}'.\n"
+                        f"Conversacion reciente:\n{_conversacion_reciente(phone, 6)}\n\n"
                         "Metodos de pago disponibles (indice: descripcion):\n" + pm_list + "\n\n"
+                        "Ojo: mencionar un banco o una app NO es responder. Si el mensaje habla de otra cosa "
+                        "(un mail, un tramite, otro gasto), aunque nombre el banco, es OTHER.\n"
                         "Decidi que es el mensaje del usuario y responde SOLO una palabra:\n"
                         "- El numero de indice del metodo si el mensaje indica uno de los metodos de la lista (aunque sea con sinonimos: 'mp'=Mercado Pago, 'efectivo'=cash, 'transferencia', 'credito', 'debito', el banco, etc).\n"
                         "- SKIP si dice que no sabe o no importa.\n"
