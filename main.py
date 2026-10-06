@@ -33,7 +33,7 @@ from gcal import (
     fuzzy_match_event, _find_calendar_event, find_similar_calendar_events,
     RRULE_DAY_MAP, WEEKDAY_TO_RRULE, next_weekday_date, fix_recurring_event_date,
     query_calendar, query_calendar_date, calcular_fecha_exacta, calcular_fecha_con_verificacion,
-    limpiar_eventos_vencidos,
+    limpiar_eventos_vencidos, cancelar_recordatorios_futuros,
 )
 from config import load_user_config, save_user_config, handle_configurar
 from summaries import (
@@ -4712,9 +4712,15 @@ async def _classify_yes_no_answer(question: str, text: str, phone: str = None,
     return "OTRO"
 
 
+# Lo que un mensaje pide además de responder una pregunta pendiente (lo deja
+# handle_pending_state y lo atiende process_single_item a continuación).
+_resto_de_mensaje: dict = {}
+
+
 async def _interpretar_posponer(summary: str, text: str, phone: str) -> tuple:
-    """("posponer", "YYYY-MM-DDTHH:MM") | ("posponer", None) si no dijo cuándo |
-    ("descartar", None) | ("otro", None) si el mensaje no habla del recordatorio."""
+    """(accion, fire_at, resto). accion: "posponer" (fire_at "YYYY-MM-DDTHH:MM", o None
+    si no dijo cuándo) | "descartar" | "otro" si el mensaje no habla del recordatorio.
+    resto: lo que el mensaje pide además ("...y cuánto pagué de EPAS?"), o "" si nada."""
     now = now_argentina()
     try:
         resp = await claude_create(
@@ -4724,11 +4730,14 @@ async def _interpretar_posponer(summary: str, text: str, phone: str) -> tuple:
                 f"Knot acaba de avisarle a Martin del recordatorio '{summary}' y le preguntó si lo pospone.\n"
                 f"Conversacion reciente:\n{_conversacion_reciente(phone, 6)}\n\n"
                 "Decidí qué quiere con su mensaje. Responde SOLO JSON:\n"
-                '{"accion": "posponer" | "descartar" | "otro", "fire_at": "YYYY-MM-DDTHH:MM" o null}\n'
+                '{"accion": "posponer" | "descartar" | "otro", "fire_at": "YYYY-MM-DDTHH:MM" o null, '
+                '"resto": "..."}\n'
                 "- posponer: pide moverlo a otro momento. Calculá fire_at. Si dice un día sin hora "
                 "('para mañana'), usá las 09:00 de ese día. Si no dice cuándo, fire_at null.\n"
                 "- descartar: ya lo hizo o no lo quiere más.\n"
-                "- otro: el mensaje habla de otra cosa (un gasto, otra pregunta)."
+                "- otro: el mensaje habla de otra cosa (un gasto, otra pregunta).\n"
+                "- resto: si ADEMÁS de responder sobre el recordatorio pide o pregunta otra cosa, "
+                "copiá esa parte tal cual la escribió; si no, \"\"."
             ),
             messages=[{"role": "user", "content": text.strip()}],
         )
@@ -4736,9 +4745,10 @@ async def _interpretar_posponer(summary: str, text: str, phone: str) -> tuple:
         d = json.loads(crudo[crudo.find("{"):crudo.rfind("}") + 1])
     except Exception as e:
         print(f"[snooze] no pude interpretar: {e}")
-        return "otro", None
+        return "otro", None, ""
     accion = d.get("accion") if d.get("accion") in ("posponer", "descartar", "otro") else "otro"
-    return accion, (d.get("fire_at") if accion == "posponer" else None)
+    resto = (d.get("resto") or "").strip() if accion != "otro" else ""
+    return accion, (d.get("fire_at") if accion == "posponer" else None), resto
 
 
 async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
@@ -5414,11 +5424,25 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
         if not minutes:
             # Texto libre ("posponémelo para mañana", "en 2 horas"). Antes solo se
             # entendían los 3 botones y cualquier otra cosa se tragaba SIN responder.
-            accion, fire_at = await _interpretar_posponer(summary, text, phone)
+            accion, fire_at, resto = await _interpretar_posponer(summary, text, phone)
             if accion == "otro":
                 return False  # no hablaba del recordatorio: lo atiende el agente
+            if resto:
+                # "...que saques los recordatorios --- cuánto pagué de EPAS?": la
+                # pregunta se perdía. process_single_item la atiende después.
+                _resto_de_mensaje[phone] = resto
             if accion == "descartar":
-                await send_message(phone, f"Dale, descarto *{summary}*.")
+                # "Ya lo hice" vale para toda la serie: antes solo se descartaba este
+                # aviso y los que quedaban seguían sonando.
+                borrados, fallidos = await cancelar_recordatorios_futuros(summary)
+                msg = f"Dale, descarto *{summary}*."
+                if borrados:
+                    msg += (f" También borré los {len(borrados)} avisos que quedaban "
+                            f"({', '.join(borrados)}).") if len(borrados) > 1 else \
+                           f" También borré el aviso que quedaba ({borrados[0]})."
+                if fallidos:
+                    msg += f" ⚠️ No pude borrar {fallidos} aviso(s): pueden volver a sonar."
+                await send_message(phone, msg)
                 return True
             if not fire_at:
                 pending_state[phone] = {"type": "snooze", "summary": summary}
@@ -6774,11 +6798,18 @@ async def process_single_item(phone: str, item: dict):
                 # entraba a la conversación y el agente no sabía de qué se venía hablando.
                 _txt_hist = text or "(imagen)"
                 add_to_history(phone, "user", _txt_hist)
+                _resto_de_mensaje.pop(phone, None)
                 handled = await handle_pending_state(phone, text, pending_state.get(phone, {}))
                 if handled:
-                    return
-                # No era respuesta a la pregunta: lo registra el flujo normal.
-                quitar_ultimo_de_historial(phone, "user", _txt_hist)
+                    _resto = _resto_de_mensaje.pop(phone, None)
+                    if not _resto:
+                        return
+                    # Respondió la pregunta pendiente y además pidió otra cosa: seguir
+                    # con esa parte como un mensaje nuevo.
+                    text, image_b64, image_type, extra_images, quoted_text = _resto, None, None, [], None
+                else:
+                    # No era respuesta a la pregunta: lo registra el flujo normal.
+                    quitar_ultimo_de_historial(phone, "user", _txt_hist)
 
         # Botones interactivos con ID conocido sin pending_state activo → expirados, no clasificar
         _KNOWN_BUTTON_IDS = {

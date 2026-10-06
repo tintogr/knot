@@ -442,3 +442,51 @@ async def limpiar_eventos_vencidos(rutinas: set[str] = None) -> int:
     if borrados:
         print(f"[limpieza] {borrados} eventos vencidos borrados (recordatorios + rutinas)")
     return borrados
+
+
+async def cancelar_recordatorios_futuros(summary: str) -> tuple[list[str], int]:
+    """Borra los recordatorios [TEMP] que todavía no sonaron y tienen el mismo texto.
+    Una serie ("3 veces por día") son eventos sueltos: descartar uno solo dejaba los
+    demás programados. Devuelve (horarios borrados "dd/mm HH:MM", cuántos fallaron)."""
+    import unicodedata as _ud
+
+    def _norm(t):
+        t = "".join(c for c in _ud.normalize("NFD", (t or "").lower()) if _ud.category(c) != "Mn")
+        return re.sub(r"[^a-z0-9 ]+", " ", t).split()
+
+    objetivo = _norm(summary.replace("🔔", ""))
+    access_token = await get_gcal_access_token()
+    if not access_token or not objetivo:
+        return [], 0
+    now = now_argentina()
+    borrados, fallidos = [], 0
+    async with httpx.AsyncClient(timeout=20) as http:
+        r = await http.get(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"timeMin": now.strftime("%Y-%m-%dT%H:%M:00-03:00"),
+                    "timeMax": (now + timedelta(days=90)).strftime("%Y-%m-%dT00:00:00-03:00"),
+                    "singleEvents": "true", "orderBy": "startTime", "maxResults": "250"},
+        )
+        if r.status_code != 200:
+            print(f"[recordatorios] no pude listar: {r.status_code} {r.text[:150]}")
+            return [], 0
+        for ev in r.json().get("items", []):
+            if "[TEMP]" not in (ev.get("description") or ""):
+                continue
+            if _norm(ev.get("summary", "").replace("🔔", "")) != objetivo:
+                continue
+            d = await http.delete(
+                f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{ev['id']}",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if d.status_code in (200, 204):
+                ini = (ev.get("start") or {}).get("dateTime", "")[:16]
+                try:
+                    borrados.append(datetime.strptime(ini, "%Y-%m-%dT%H:%M").strftime("%d/%m %H:%M"))
+                except ValueError:
+                    borrados.append(ini)
+            else:
+                fallidos += 1
+                print(f"[recordatorios] no pude borrar {ev.get('summary')}: {d.status_code}")
+    return borrados, fallidos
