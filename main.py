@@ -13,6 +13,7 @@ from math import radians, sin, cos, sqrt, atan2
 from fastapi import FastAPI, Request, BackgroundTasks
 
 from state import (
+    personas_ctx,
     historial_para_api, quitar_ultimo_de_historial,
     mensajes_no_entregados, texto_enviado, info_enviado,
     _ds, QueryFilter, DateRange,
@@ -1228,7 +1229,7 @@ async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=N
                 "payment_method": {"type": ["string", "null"], "description": "Medio de pago: banco o tarjeta. Deducilo del ticket si menciona digitos de tarjeta. Null si no se puede determinar."},
                 "periodo_factura": {"type": ["string", "null"], "description": "Solo para pagos de servicios: el periodo de la factura en formato YYYY-MM. Deducilo del comprobante (fecha de emision de la factura, periodo facturado, o el mes anterior al vencimiento). Null si no es un servicio o no se puede determinar."},
                 "paga_impaga_id": {"type": ["string", "null"], "description": "Si este EGRESO es el pago de una de las FACTURAS Y DEUDAS PENDIENTES de la lista, el id de esa (copiado tal cual). Null si no corresponde a ninguna."},
-                "prestamo_de": {"type": ["string", "null"], "description": "Solo si es un INGRESO de plata PRESTADA que hay que devolver ('le pedí 200 a mi viejo', 'me prestó'): a quién hay que devolverle (ej 'papá (Fabian)'). Null en cualquier otro caso."}
+                "prestamo_de": {"type": ["string", "null"], "description": "Solo si es un INGRESO de plata PRESTADA que hay que devolver ('le pedí 200 a mi viejo', 'me prestó'): a quién hay que devolverle. Si es alguien de PERSONAS QUE CONOCE MARTIN, nombralo siempre igual: 'papá (Fabian)' tanto si dice 'Fabian' como 'mi viejo'. Null en cualquier otro caso."}
             },
             "required": ["name", "in_out", "value_ars", "categoria", "date", "emoji"]
         }
@@ -1299,7 +1300,7 @@ async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=N
     system = f"""Sos Knot, asistente personal por WhatsApp. Hablas en espanol rioplatense, natural y conciso.
 Hoy: {hoy_str(now)}. Calendario: {semana_str(now)}.
 Tasa dolar blue: ${exchange_rate:,.0f}/USD
-{profile_gastos_ctx}{providers_ctx}{cards_ctx}{known_shops_ctx}{impagas_ctx}{_recent_creations_context()}
+{profile_gastos_ctx}{providers_ctx}{cards_ctx}{known_shops_ctx}{impagas_ctx}{personas_ctx()}{_recent_creations_context()}
 Tu tarea: registrar gastos e ingresos NUEVOS del usuario.
 REGLA #1: lo que tenes que registrar es lo que dice el ULTIMO mensaje del usuario. El historial es solo contexto de apoyo. Si el ultimo mensaje describe un gasto, registra ESE — nunca vuelvas a ejecutar el registro de un mensaje anterior.
 El usuario es {user_prefs.get("greeting_name") or "el titular de la cuenta"}.
@@ -2564,7 +2565,7 @@ async def _router_agent(phone: str, text: str, has_image: bool, image_b64=None,
     """Devuelve {"modulo": str|None, "mensaje": str, "respuesta": str|None}."""
     now = now_argentina()
     system = f"""Sos Knot, el asistente personal de Martin por WhatsApp. Hablás en español rioplatense.
-Hoy: {hoy_str(now)}. Calendario: {semana_str(now)}.
+Hoy: {hoy_str(now)}. Calendario: {semana_str(now)}.{personas_ctx()}
 
 Tu trabajo acá es entender el mensaje EN CONTEXTO de la conversación y decidir quién lo atiende.
 Cada módulo es un especialista que NO ve la conversación: solo recibe el texto que vos le pases.

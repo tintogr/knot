@@ -38,6 +38,19 @@ DAILY_SUMMARY_HOUR = int(os.environ.get("DAILY_SUMMARY_HOUR", "8"))
 
 # ── Modelos de Claude (único punto de cambio cuando Anthropic retira uno) ──────
 # Se pueden overridear por env var sin tocar código.
+# Quién es quién para Martin. Los agentes no tenían esto en ningún lado: "le pagué a
+# Fabian" y "le devolví a mi viejo" son la misma persona.
+PERSONAS_CONOCIDAS = {
+    "Fabian (Hector Fabian Gentili)": "papá de Martin; también le dice 'mi viejo'",
+    "Rafael Lorenzo": "jefe de Martin; sus transferencias son Sueldo",
+}
+
+
+def personas_ctx() -> str:
+    return ("\nPERSONAS QUE CONOCE MARTIN:\n"
+            + "\n".join(f"  - {k}: {v}" for k, v in PERSONAS_CONOCIDAS.items()) + "\n")
+
+
 SONNET_MODEL = os.environ.get("SONNET_MODEL", "claude-sonnet-4-6")
 HAIKU_MODEL  = os.environ.get("HAIKU_MODEL",  "claude-haiku-4-5-20251001")
 
