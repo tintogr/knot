@@ -45,7 +45,8 @@ async def load_user_config(wa_number: str):
             user_prefs.setdefault("domain_profiles", {}).update(cfg.domain_profiles)
         # Personas: si la columna está vacía, arranca con las que ya se conocen.
         from state import PERSONAS_INICIALES
-        user_prefs["personas"] = cfg.personas or dict(PERSONAS_INICIALES)
+        # Se suman las iniciales que falten (sin pisar lo que Knot ya aprendió).
+        user_prefs["personas"] = {**PERSONAS_INICIALES, **(cfg.personas or {})}
         user_prefs["knot_state"] = cfg.knot_state or {}
         user_prefs["_config_page_id"] = page_id
         if cfg.saved_lat is not None and cfg.saved_lon is not None:

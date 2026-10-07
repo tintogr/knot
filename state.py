@@ -42,7 +42,17 @@ DAILY_SUMMARY_HOUR = int(os.environ.get("DAILY_SUMMARY_HOUR", "8"))
 # load_user_config); estas son las que se cargan si la columna está vacía.
 PERSONAS_INICIALES = {
     "Fabian": {"relacion": "papá", "nombre_completo": "Hector Fabian Gentili", "le_dice": ["papá", "mi viejo"]},
+    "Claudia": {"relacion": "mamá", "nombre_completo": "Claudia Silvina Reus", "le_dice": ["mamá", "mi vieja"],
+                "notas": "las facturas de EPAS y Camuzzi están a su nombre"},
+    "Anita": {"relacion": "novia"},
+    "Enzo": {"relacion": "amigo", "notas": "se suelen prestar plata"},
+    "Sofi": {"relacion": "amiga"},
+    "Manu": {"relacion": "amigo"},
+    "Marce": {"relacion": "amigo"},
+    "Tomi": {"relacion": "amigo"},
+    "Fer": {"relacion": "amigo"},
     "Rafael Lorenzo": {"relacion": "jefe", "notas": "sus transferencias son Sueldo"},
+    "Ruth": {"relacion": "cliente"},
 }
 
 
