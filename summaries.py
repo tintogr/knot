@@ -605,7 +605,9 @@ async def _remind_pending_invoice_confirmations(summary_type: str) -> None:
             paid = conf.get("paid_amount")
             if finance_ids and paid and conf.get("situation") not in ("diff_large",):
                 try:
-                    await _ds.mark_finance_paid(finance_ids[0], paid)
+                    if await _ds.mark_finance_paid(finance_ids[0], paid) and conf.get("gasto_page_id"):
+                        # Una factura = un registro: el pago ya quedó en la factura.
+                        await _ds.archive_expense(conf["gasto_page_id"])
                 except Exception:
                     pass
             await send_message(MY_NUMBER, f"⚠️ Registré automáticamente el pago de *{provider}* ya que no obtuve respuesta.")

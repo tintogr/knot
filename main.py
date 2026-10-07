@@ -933,10 +933,18 @@ async def _remove_invoice_confirmation(conf_id: str) -> None:
     await save_user_config(MY_NUMBER)
 
 async def _auto_mark_invoice_paid(impaga, paid_amount: float, payment_method: str | None = None,
-                                  notes: str | None = None) -> bool:
+                                  notes: str | None = None, gasto_page_id: str | None = None) -> bool:
     """Marca la factura como pagada y su task asociada. Devuelve si Notion lo aceptó:
-    anunciar el cambio sin mirar esto es como quedaban facturas Impagas 'marcadas'."""
-    ok = await _ds.mark_finance_paid(impaga.id, paid_amount, payment_method, notes)
+    anunciar el cambio sin mirar esto es como quedaban facturas Impagas 'marcadas'.
+    Con gasto_page_id, el pago se junta con la factura (ver _juntar_pago_con_factura)."""
+    if gasto_page_id:
+        ok, archivado = await _juntar_pago_con_factura(impaga.id, gasto_page_id, paid_amount, payment_method, notes)
+        if ok and not archivado:
+            _gastos_sin_archivar.add(gasto_page_id)
+        if ok and archivado:
+            _gasto_juntado_en[gasto_page_id] = impaga.id
+    else:
+        ok = await _ds.mark_finance_paid(impaga.id, paid_amount, payment_method, notes)
     if not ok:
         return False
     tasks = await get_pending_factura_tasks()
@@ -945,6 +953,60 @@ async def _auto_mark_invoice_paid(impaga, paid_amount: float, payment_method: st
             await mark_factura_task_paid(t["page_id"])
             break
     return True
+
+_gastos_sin_archivar: set = set()
+# gasto archivado -> factura donde quedó el pago (para que "¿con qué pagaste?" y
+# las correcciones apunten a la factura y no a una página archivada).
+_gasto_juntado_en: dict = {}
+
+
+def _nota_juntado(gasto_page_id: str | None) -> str:
+    """Qué pasó con el gasto suelto después de pasar el pago a la factura."""
+    if not gasto_page_id:
+        return ""
+    if gasto_page_id in _gastos_sin_archivar:
+        return (f"\n⚠️ No pude borrar el gasto suelto del pago: borralo a mano para que no se cuente "
+                f"dos veces: {_link_notion(gasto_page_id)}")
+    return "\n_No dejé un gasto aparte: el pago quedó registrado en la factura._"
+
+
+async def _juntar_pago_con_factura(factura_id: str, gasto_page_id: str, paid_amount: float,
+                                   payment_method: str | None = None,
+                                   notes: str | None = None) -> tuple[bool, bool]:
+    """Una factura = un registro. El pago que Martin reporta se guarda primero como
+    gasto; si corresponde a una factura impaga, el pago pasa a la factura (monto
+    pagado, método, fecha del pago) y el gasto suelto se archiva. Antes quedaban los
+    dos y el mismo pago restaba dos veces.
+    Devuelve (factura marcada, gasto archivado). Si no se pudo marcar la factura, el
+    gasto NO se toca: es preferible un duplicado visible a perder el pago."""
+    gasto = await _ds.get_expense(gasto_page_id)
+    metodo = payment_method or (gasto.method if gasto else None)
+    fecha_pago = None
+    if gasto and gasto.date:
+        fecha_pago = gasto.date.strftime("%Y-%m-%d") if hasattr(gasto.date, "strftime") else str(gasto.date)[:10]
+    nota = notes or ""
+    if fecha_pago:
+        _f = f"{fecha_pago[8:10]}/{fecha_pago[5:7]}/{fecha_pago[:4]}"
+        if _f not in nota:
+            nota = (nota + f" Pagada el {_f}.").strip()
+    if gasto and gasto.notes and gasto.notes not in nota:
+        nota = (nota + " " + gasto.notes).strip()
+    ok = await _ds.mark_finance_paid(factura_id, paid_amount, metodo, nota or None)
+    if not ok:
+        return False, False
+    if fecha_pago:
+        # La factura resta en el mes en que se pagó, no en el que llegó el mail.
+        try:
+            await _ds.update_expense(factura_id, {"date": fecha_pago})
+        except Exception as e:
+            print(f"[juntar_pago] no pude cambiar la fecha de {factura_id}: {e}")
+    try:
+        archivado = await _ds.archive_expense(gasto_page_id)
+    except Exception as e:
+        print(f"[juntar_pago] no pude archivar el gasto {gasto_page_id}: {e}")
+        archivado = False
+    return True, archivado
+
 
 _MESES_FACTURA = {
     "ene": 1, "enero": 1, "jan": 1,
@@ -1406,17 +1468,21 @@ Emoji: elegi el mas especifico segun el contexto real."""
                         pending_state[phone] = {
                             "type": "factura_confirm", "situation": "diff_moderate",
                             "conf_id": conf_id, "finance_page_id": impaga.id,
-                            "paid_amount": paid_amount, "payment_method": payment_method,
+                            "paid_amount": paid_amount, "payment_method": payment_method, "gasto_page_id": page_id,
                             "provider_name": impaga.name, "invoice_amount": inv_amount,
                         }
                         reply += (f"\n\n🤔 Tengo impaga *{impaga.name}* por ${inv_amount:,.0f}, pero este "
                                   f"pago parece de otro período. ¿Corresponde a esa factura? (sí/no)")
                     elif diff_pct <= 0.10:
                         # Auto-marca sin preguntar
-                        _marcada = await _auto_mark_invoice_paid(impaga, paid_amount, payment_method)
+                        _marcada = await _auto_mark_invoice_paid(impaga, paid_amount, payment_method,
+                                                                 gasto_page_id=page_id)
                         if _marcada:
-                            _v = await _confirmacion_verificada(impaga.id, "Factura marcada como pagada")
-                            reply += "\n\n" + (_v or f"✅ Marqué *{impaga.name}* como pagada.")
+                            # El pago quedó en la factura: mostrar ESA, no el gasto suelto
+                            # (que ya se archivó) para no confundir con dos registros.
+                            _v = await _confirmacion_verificada(impaga.id, "Pago registrado en la factura")
+                            reply = (pre_text + "\n" if pre_text else "") + \
+                                (_v or f"✅ Marqué *{impaga.name}* como pagada.") + _nota_juntado(page_id)
                         else:
                             reply += (f"\n\n⚠️ No pude marcar *{impaga.name}* como pagada en Notion. "
                                       f"Quedó pendiente: marcala a mano.")
@@ -1449,7 +1515,7 @@ Emoji: elegi el mas especifico segun el contexto real."""
                         pending_state[phone] = {
                             "type": "factura_confirm", "situation": "diff_moderate",
                             "conf_id": conf_id, "finance_page_id": impaga.id,
-                            "paid_amount": paid_amount, "payment_method": payment_method,
+                            "paid_amount": paid_amount, "payment_method": payment_method, "gasto_page_id": page_id,
                             "provider_name": impaga.name, "invoice_amount": inv_amount,
                         }
                         reply += f"\n\n💡 Tenés una factura de *{impaga.name}* por ${inv_amount:,.0f}. ¿Este pago de ${paid_amount:,.0f} corresponde a esa? (sí/no)"
@@ -1462,7 +1528,7 @@ Emoji: elegi el mas especifico segun el contexto real."""
                         pending_state[phone] = {
                             "type": "factura_confirm", "situation": "diff_large",
                             "conf_id": conf_id, "finance_page_id": impaga.id,
-                            "paid_amount": paid_amount, "payment_method": payment_method,
+                            "paid_amount": paid_amount, "payment_method": payment_method, "gasto_page_id": page_id,
                             "provider_name": impaga.name, "invoice_amount": inv_amount,
                         }
                         reply += f"\n\n⚠️ La factura de *{impaga.name}* era ${inv_amount:,.0f} pero pagaste ${paid_amount:,.0f}. ¿Fue un pago parcial? (sí/no)"
@@ -1475,8 +1541,11 @@ Emoji: elegi el mas especifico segun el contexto real."""
                     if len(valid_candidatos) == 1:
                         # Después del filtro quedó una sola → marcar directamente
                         impaga = valid_candidatos[0]
-                        if await _auto_mark_invoice_paid(impaga, paid_amount, payment_method):
-                            reply += f"\n\n✅ *{impaga.name}* marcada como pagada."
+                        if await _auto_mark_invoice_paid(impaga, paid_amount, payment_method,
+                                                         gasto_page_id=page_id):
+                            _v = await _confirmacion_verificada(impaga.id, "Pago registrado en la factura")
+                            reply = (pre_text + "\n" if pre_text else "") + \
+                                (_v or f"✅ *{impaga.name}* marcada como pagada.") + _nota_juntado(page_id)
                         else:
                             reply += f"\n\n⚠️ No pude marcar *{impaga.name}* como pagada en Notion."
                     else:
@@ -1489,7 +1558,7 @@ Emoji: elegi el mas especifico segun el contexto real."""
                             "type": "factura_confirm", "situation": "multiple_invoices",
                             "conf_id": conf_id,
                             "candidates": [{"id": c.id, "name": c.name, "amount": c.value_ars} for c in valid_candidatos[:3]],
-                            "paid_amount": paid_amount, "payment_method": payment_method,
+                            "paid_amount": paid_amount, "payment_method": payment_method, "gasto_page_id": page_id,
                         }
                         reply += f"\n\n💡 Tenés varias facturas pendientes:\n{options}\n¿A cuál corresponde este pago?"
 
@@ -1578,6 +1647,7 @@ Emoji: elegi el mas especifico segun el contexto real."""
                 or (p.modality and p.modality.lower() in _pm_l)
                 for p in payment_methods_cache
             )
+        _page_id = _gasto_juntado_en.get(_page_id, _page_id)
         if (
             _success and _page_id
             and "EGRESO" in (_data.get("in_out") or "").upper()
@@ -6006,6 +6076,7 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
         conf_id     = state.get("conf_id")
         paid_amount = state.get("paid_amount")
         payment_method = state.get("payment_method")
+        gasto_page_id = state.get("gasto_page_id")
         t_lower = text.strip().lower()
         affirm = t_lower in ("si", "sí", "yes", "dale", "ok", "sip", "claro", "obvio")
         deny   = t_lower in ("no", "nope", "nel", "nah")
@@ -6040,11 +6111,11 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
             if affirm:
                 _ok_marca = await _auto_mark_invoice_paid(
                     type("_", (), {"id": finance_page_id, "value_ars": paid_amount})(),
-                    paid_amount, payment_method
+                    paid_amount, payment_method, gasto_page_id=gasto_page_id
                 )
                 await _remove_invoice_confirmation(conf_id)
-                await send_message(phone, f"✅ *{provider_name}* marcada como pagada." if _ok_marca
-                                   else f"⚠️ No pude marcar *{provider_name}* como pagada en Notion.")
+                await send_message(phone, f"✅ *{provider_name}* marcada como pagada." + _nota_juntado(gasto_page_id)
+                                   if _ok_marca else f"⚠️ No pude marcar *{provider_name}* como pagada en Notion.")
             else:
                 await _remove_invoice_confirmation(conf_id)
                 await send_message(phone, f"Ok, la dejo pendiente.")
@@ -6080,12 +6151,13 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
                     nota += f". Aclaración: {_aclaracion}"
                 _ok = await _auto_mark_invoice_paid(
                     type("_", (), {"id": finance_page_id, "value_ars": paid_amount})(),
-                    paid_amount, payment_method, nota
+                    paid_amount, payment_method, nota, gasto_page_id=gasto_page_id
                 )
                 if _ok:
                     _v = await _confirmacion_verificada(finance_page_id, "Factura marcada como pagada")
-                    await send_message(phone, _v or (f"✅ Marqué *{provider_name}* como pagada por ${paid_amount:,.0f}"
-                                                     + (f" (facturaba ${inv_amount:,.0f})." if inv_amount else ".")))
+                    await send_message(phone, (_v or (f"✅ Marqué *{provider_name}* como pagada por ${paid_amount:,.0f}"
+                                                      + (f" (facturaba ${inv_amount:,.0f})." if inv_amount else ".")))
+                                       + _nota_juntado(gasto_page_id))
                 else:
                     await send_message(phone, f"⚠️ No pude marcar *{provider_name}* como pagada en Notion.")
             return True
@@ -6126,11 +6198,11 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
             if matched:
                 _ok_marca = await _auto_mark_invoice_paid(
                     type("_", (), {"id": matched["id"], "value_ars": matched["amount"]})(),
-                    paid_amount, payment_method
+                    paid_amount, payment_method, gasto_page_id=gasto_page_id
                 )
                 await _remove_invoice_confirmation(conf_id)
                 otros = [c for c in candidates if c["id"] != matched["id"]]
-                msg = (f"✅ *{matched['name']}* marcada como pagada." if _ok_marca
+                msg = (f"✅ *{matched['name']}* marcada como pagada." + _nota_juntado(gasto_page_id) if _ok_marca
                        else f"⚠️ No pude marcar *{matched['name']}* como pagada en Notion.")
                 if otros:
                     msg += " Todavía tenés pendiente: " + ", ".join(f"*{c['name']}*" for c in otros) + "."
