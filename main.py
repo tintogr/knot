@@ -978,7 +978,7 @@ def _nota_juntado(gasto_page_id: str | None) -> str:
     if gasto_page_id in _gastos_sin_archivar:
         return (f"\n⚠️ No pude borrar el gasto suelto del pago: borralo a mano para que no se cuente "
                 f"dos veces: {_link_notion(gasto_page_id)}")
-    return "\n_No dejé un gasto aparte: el pago quedó registrado en la factura._"
+    return "\n_No dejé un gasto aparte: el pago quedó registrado ahí._"
 
 
 async def _juntar_pago_con_factura(factura_id: str, gasto_page_id: str, paid_amount: float,
@@ -1226,7 +1226,9 @@ async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=N
                 "client":         {"type": "array", "items": {"type": "string"}},
                 "emoji":          {"type": "string"},
                 "payment_method": {"type": ["string", "null"], "description": "Medio de pago: banco o tarjeta. Deducilo del ticket si menciona digitos de tarjeta. Null si no se puede determinar."},
-                "periodo_factura": {"type": ["string", "null"], "description": "Solo para pagos de servicios: el periodo de la factura en formato YYYY-MM. Deducilo del comprobante (fecha de emision de la factura, periodo facturado, o el mes anterior al vencimiento). Null si no es un servicio o no se puede determinar."}
+                "periodo_factura": {"type": ["string", "null"], "description": "Solo para pagos de servicios: el periodo de la factura en formato YYYY-MM. Deducilo del comprobante (fecha de emision de la factura, periodo facturado, o el mes anterior al vencimiento). Null si no es un servicio o no se puede determinar."},
+                "paga_impaga_id": {"type": ["string", "null"], "description": "Si este EGRESO es el pago de una de las FACTURAS Y DEUDAS PENDIENTES de la lista, el id de esa (copiado tal cual). Null si no corresponde a ninguna."},
+                "prestamo_de": {"type": ["string", "null"], "description": "Solo si es un INGRESO de plata PRESTADA que hay que devolver ('le pedí 200 a mi viejo', 'me prestó'): a quién hay que devolverle (ej 'papá (Fabian)'). Null en cualquier otro caso."}
             },
             "required": ["name", "in_out", "value_ars", "categoria", "date", "emoji"]
         }
@@ -1276,6 +1278,19 @@ async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=N
         parts.append(")")
         pm_lines.append("".join(parts))
     cards_ctx = ("\nMedios de pago registrados:\n" + "\n".join(pm_lines) + "\n") if pm_lines else ""
+    # Facturas y deudas impagas: el modelo dice cuál paga este gasto (paga_impaga_id), en
+    # vez de adivinarlo después por palabras sueltas del nombre ("devolución" no
+    # encontraba "Devolver préstamo a papá").
+    try:
+        _impagas = [i for i in await _ds.get_impaga_facturas() if (i.value_ars or 0) > 0]
+    except Exception:
+        _impagas = []
+    impagas_ctx = ""
+    if _impagas:
+        impagas_ctx = ("\nFACTURAS Y DEUDAS PENDIENTES (Impaga):\n"
+                       + "\n".join(f"  - id={i.id} | {i.name} | ${i.value_ars:,.0f}" for i in _impagas[:25])
+                       + "\nSi el usuario está pagando una de estas (aunque la nombre distinto: 'le pagué a mi "
+                         "viejo' = 'Devolver préstamo a papá'), registrá el EGRESO y poné su id en paga_impaga_id.\n")
     known_shops = user_prefs.get("known_shops") or {}
     known_shops_ctx = ""
     if known_shops:
@@ -1284,7 +1299,7 @@ async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=N
     system = f"""Sos Knot, asistente personal por WhatsApp. Hablas en espanol rioplatense, natural y conciso.
 Hoy: {hoy_str(now)}. Calendario: {semana_str(now)}.
 Tasa dolar blue: ${exchange_rate:,.0f}/USD
-{profile_gastos_ctx}{providers_ctx}{cards_ctx}{known_shops_ctx}{_recent_creations_context()}
+{profile_gastos_ctx}{providers_ctx}{cards_ctx}{known_shops_ctx}{impagas_ctx}{_recent_creations_context()}
 Tu tarea: registrar gastos e ingresos NUEVOS del usuario.
 REGLA #1: lo que tenes que registrar es lo que dice el ULTIMO mensaje del usuario. El historial es solo contexto de apoyo. Si el ultimo mensaje describe un gasto, registra ESE — nunca vuelvas a ejecutar el registro de un mensaje anterior.
 El usuario es {user_prefs.get("greeting_name") or "el titular de la cuenta"}.
@@ -1306,9 +1321,11 @@ Si un gasto que el usuario manda ya esta en YA REGISTRADOS pero con un dato dist
 - Si falta el monto Y no hay imagen de donde sacarlo -> pregunta de forma natural y breve.
 - Si hay ambiguedad (ej: "compre algo" sin monto ni imagen) -> pregunta que fue y cuanto.
 
-Categorias disponibles: Supermercado, Sueldo, Recurrente, Servicio, Transporte, Vianda, Salud, Salud Mental, Salida, Birra, Ocio, Compras, Depto, Plantas, Viajes, Venta.
+PRESTAMOS: si le prestaron plata ("le pedí 200 a mi viejo", "me prestó X"), es un INGRESO con categoria Préstamo y prestamo_de = a quién se la tiene que devolver. Knot anota solo la deuda para devolverla. Devolver un préstamo es un EGRESO categoria Préstamo con paga_impaga_id de la deuda. Un mismo mensaje puede traer las dos cosas: registrá cada una por separado.
+
+Categorias disponibles: Supermercado, Sueldo, Recurrente, Servicio, Transporte, Vianda, Salud, Salud Mental, Salida, Birra, Ocio, Compras, Depto, Plantas, Viajes, Venta, Préstamo.
 Recurrente = pagos que se repiten todos los meses (alquiler, luz, gas, internet, streaming, gimnasio, suscripciones fijas). Servicio = pago puntual de un servicio no recurrente (factura extra, credito adicional, uso puntual — ej: Anthropic extra usage, multa, servicio tecnico). Depto = compras fisicas para el depto (muebles, materiales, herramientas).
-Si in_out es INGRESO -> categoria solo puede ser Sueldo o Venta.
+Si in_out es INGRESO -> categoria solo puede ser Sueldo, Venta o Préstamo.
 Clientes posibles: LBL, OPERA, ALPATACO, Juan Martin, Depto, Work, Santi Vales, Jorge, Barbara, Vanguardia, Alejo, Dinamo, Paula Diaz, Labti, PlanA, JGA, ATE.
 Emoji: elegi el mas especifico segun el contexto real."""
 
@@ -1387,6 +1404,46 @@ Emoji: elegi el mas especifico segun el contexto real."""
             "content": tr
         })
 
+    # Pagos que el modelo vinculó a una factura/deuda y préstamos recibidos.
+    _juntados = {}      # page_id del gasto -> línea para la respuesta
+    _extra_lines = []
+    _impagas_por_id = {i.id.replace("-", ""): i for i in _impagas}
+    for _pid, _d, _ok in created_entries:
+        if not (_ok and _pid):
+            continue
+        _imp = _impagas_por_id.get((_d.get("paga_impaga_id") or "").replace("-", "").strip())
+        if _imp and "EGRESO" in (_d.get("in_out") or "").upper():
+            _monto = float(_d.get("value_ars") or 0)
+            if _imp.value_ars and abs(_monto - _imp.value_ars) / _imp.value_ars <= 0.10:
+                if await _auto_mark_invoice_paid(_imp, _monto, _d.get("payment_method"), gasto_page_id=_pid):
+                    _juntados[_pid] = (f"✅ Pagada: *{_imp.name}* — ${_monto:,.0f}"
+                                       + _nota_juntado(_pid).replace("\n", " "))
+                else:
+                    _extra_lines.append(f"⚠️ No pude marcar *{_imp.name}* como pagada en Notion.")
+            else:
+                # Pago parcial o monto distinto: se deja para la confirmación de abajo.
+                _d["_impaga_elegida"] = _imp
+        _quien = (_d.get("prestamo_de") or "").strip()
+        if _quien and "INGRESO" in (_d.get("in_out") or "").upper():
+            try:
+                _hoy = now.strftime("%d/%m/%Y")
+                _deuda = await _ds.create_expense({
+                    "name": f"Devolver préstamo a {_quien}",
+                    "in_out": "← EGRESO →",
+                    "value_ars": float(_d.get("value_ars") or 0),
+                    "categories": ["Préstamo"],
+                    "date": _d.get("date") or now.strftime("%Y-%m-%d"),
+                    "estado": "Impaga",
+                    "emoji": "🤝",
+                    "notes": (f"Préstamo recibido el {_hoy}. Impaga no suma ni resta; al devolverlo "
+                              f"se marca Pagada y el préstamo queda en 0."),
+                })
+                _extra_lines.append(f"🤝 Anoté que le debés ${float(_d.get('value_ars') or 0):,.0f} a {_quien}: "
+                                    f"*{_deuda.name}* queda pendiente hasta que se lo devuelvas.")
+            except Exception as _e:
+                print(f"[prestamo] no pude crear la deuda: {_e}")
+                _extra_lines.append(f"⚠️ Registré el préstamo pero no pude anotar la deuda con {_quien}.")
+
     # Texto libre que Claude puso ANTES de llamar la tool (ej: aclaración, pregunta)
     pre_text = next((b.text for b in response.content if hasattr(b, "text") and b.text), "").strip()
 
@@ -1405,6 +1462,9 @@ Emoji: elegi el mas especifico segun el contexto real."""
         for _page_id_entry, data, ok in created_entries:
             if not ok:
                 lines.append(f"❌ No pude registrar *{data.get('name', '?')}*.")
+                continue
+            if _page_id_entry in _juntados:
+                lines.append(_juntados[_page_id_entry])
                 continue
             usd = data["value_ars"] / exchange_rate
             cats = data.get("categoria") or []
@@ -1435,12 +1495,13 @@ Emoji: elegi el mas especifico segun el contexto real."""
                 line += f" · {pm}"
             _verificada = await _confirmacion_verificada(_page_id_entry)
             lines.append(_verificada or line)
+        lines.extend(_extra_lines)
         if pre_text:
             lines.insert(0, pre_text)
         reply = "\n".join(lines)
 
     # Pending state solo cuando hay un unico gasto en el mensaje
-    if len(created_entries) == 1:
+    if len(created_entries) == 1 and created_entries[0][0] not in _juntados:
         page_id, data, success = created_entries[0]
         if success and page_id:
             name_lower = data.get("name", "").lower()
@@ -1456,7 +1517,8 @@ Emoji: elegi el mas especifico segun el contexto real."""
                 paid_amount = data.get("value_ars", 0)
                 payment_method = data.get("payment_method")
                 periodo_pago = data.get("periodo_factura")
-                candidatos = await _find_invoice_candidates(name_lower)
+                candidatos = ([data["_impaga_elegida"]] if data.get("_impaga_elegida")
+                              else await _find_invoice_candidates(name_lower))
                 # Si el comprobante dice de que periodo es, descartar las facturas de
                 # otro mes: si no, se marcaba pagada la unica impaga que hubiera,
                 # aunque el pago fuera de otro periodo.
@@ -2390,7 +2452,7 @@ Si hay ambiguedad -> responde solo la pregunta de aclaracion mas concisa y natur
 # Catalogo de modulos: lo comparten el clasificador viejo y el agente de entrada.
 # (los nombres validos salen del propio catalogo, asi no hay dos listas que se separen)
 _CATALOGO_MODULOS = """GASTO: registrar un pago, compra o ingreso NUEVO. El usuario describe algo que acaba de pagar o comprar ahora. NUNCA cuando usa "corregir", "cambiar", "editar", "actualizar", "la descripcion", "las notas", "el nombre" de algo ya registrado.
-DEUDA: registrar algo que el usuario TODAVIA NO PAGO pero debe pagar. "le debo X a Y", "me deben X", "tengo que pagar X". Diferente a GASTO que es un pago ya realizado.
+DEUDA: registrar algo que el usuario TODAVIA NO PAGO pero debe pagar, SIN que le haya entrado plata. "le debo X a Y", "me deben X", "tengo que pagar X". Diferente a GASTO que es un pago ya realizado. Si le PRESTARON plata ("le pedí 200 a mi viejo", "me prestó X") o está DEVOLVIENDO un préstamo o pagando una deuda pendiente, es GASTO.
 CORREGIR_GASTO: modificar cualquier campo de un gasto ya registrado — monto, categoria, nombre, descripcion, notas, o su ESTADO (pagada/impaga). Ejemplos: "el gasto de X era Y", "cambia la categoria de X", "corrige la descripcion de los 3 de anthropic", "en realidad eran extra usage", "la nota estaba mal", "el alquiler esta impago", "marca las expensas como pagadas", "poné que X ya lo pagué". Si el usuario habla de algo que YA registró y quiere cambiarlo → CORREGIR_GASTO.
 ELIMINAR_GASTO: eliminar o borrar un gasto de Notion.
 PLANTA: adquirir o registrar una planta nueva.
