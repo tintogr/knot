@@ -2,7 +2,9 @@ import httpx
 from state import WA_API, WA_TOKEN, record_message_text, registrar_enviado, add_to_history
 
 
-async def send_message(to: str, text: str) -> bool:
+async def send_message(to: str, text: str, descartable: bool = False) -> bool:
+    """descartable=True: si WhatsApp no lo entrega (ventana de 24 h), no se reenvía
+    después. Para los resúmenes, que solo sirven en su momento."""
     async with httpx.AsyncClient() as http:
         r = await http.post(WA_API, headers={
             "Authorization": f"Bearer {WA_TOKEN}",
@@ -23,7 +25,7 @@ async def send_message(to: str, text: str) -> bool:
             mid = (r.json().get("messages") or [{}])[0].get("id")
             if mid:
                 record_message_text(mid, text)
-                registrar_enviado(mid, text)
+                registrar_enviado(mid, text, descartable)
         except Exception:
             pass
         # Todo lo que Knot dice queda en la conversación, también lo que manda solo

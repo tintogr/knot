@@ -1627,16 +1627,20 @@ class NotionDataStore:
             return False
 
     async def create_finance_invoice(
-        self, provider: str, amount: float, period: str, due_date: str = "", category: str = "Recurrente"
+        self, provider: str, amount: float, period: str, due_date: str = "", category: str = "Recurrente",
+        numero: str = None, nota: str = None, mail_date: str = None,
     ) -> tuple[bool, str]:
-        """Create an Impaga finance entry. Returns (success, page_id).
+        """Crea la factura Impaga. Devuelve (True, page_id) o (False, motivo).
 
-        Deduplica por PROVEEDOR (canonizado por tokens, no por substring exacto) +
-        PERÍODO (mes). Así variantes del nombre ("CALF Energía", "CALF (Luz)",
-        "CALF Energía Eléctrica") cuentan como el mismo proveedor y no se duplican.
+        Es repetida si:
+          1) ya hay un registro con el mismo NÚMERO de factura (en las notas);
+          2) mismo proveedor y mismo PERÍODO (mes y año);
+          3) mismo proveedor y mismo monto (±1%) con fecha a menos de 20 días del mail:
+             es la misma factura que Martin ya pagó o ya está cargada.
+        Antes la regla 3 miraba 45 días y cualquier monto parecido, y como "Sep" no se
+        entendía como septiembre, las facturas de monto fijo (Calfibra, EPAS) se daban
+        por repetidas todos los meses y una factura ya pagada se volvía a cargar.
         """
-        # Sin monto no es una factura accionable (ej: aviso "abono vencido" sin importe).
-        # Evita crear entradas basura en $0 que después aparecen como pendientes.
         try:
             if not amount or float(amount) <= 0:
                 return False, "no_amount"
@@ -1644,49 +1648,80 @@ class NotionDataStore:
             return False, "no_amount"
         import re, unicodedata
         from datetime import date as _date, timezone
-        _MES_ES = {
-            "enero": "01", "febrero": "02", "marzo": "03", "abril": "04",
-            "mayo": "05", "junio": "06", "julio": "07", "agosto": "08",
-            "septiembre": "09", "octubre": "10", "noviembre": "11", "diciembre": "12",
-        }
-        _STOP = {"factura", "periodo", "período", "mensual", "boleta", "comprobante", "servicio"}
 
         def _norm(s: str) -> str:
             s = ''.join(c for c in unicodedata.normalize('NFD', (s or '').lower())
                         if unicodedata.category(c) != 'Mn')
             return re.sub(r'[^a-z0-9]+', ' ', s).strip()
 
+        _STOP = {"factura", "periodo", "mensual", "boleta", "comprobante", "servicio"}
+
         def _sig_list(s: str) -> list:
             return [t for t in _norm(s).split() if len(t) >= 4 and t not in _STOP]
 
-        def _month_of(text: str):
-            tl = (text or "").lower()
-            em = re.search(r'(\d{2})[/-]\d{4}|\d{4}[/-](\d{2})', text or "")
-            mo = (em.group(1) or em.group(2)) if em else None
-            for mes_name, mes_num in _MES_ES.items():
-                if mes_name in tl:
-                    mo = mes_num
-                    break
-            if not mo:
-                m2 = re.search(r'\b(\d{2})\b', text or "")
-                if m2 and m2.group(1) not in ("20", "19"):
-                    mo = m2.group(1)
-            return mo
+        _MESES = {
+            "enero": 1, "ene": 1, "january": 1, "jan": 1,
+            "febrero": 2, "feb": 2, "february": 2,
+            "marzo": 3, "mar": 3, "march": 3,
+            "abril": 4, "abr": 4, "april": 4, "apr": 4,
+            "mayo": 5, "may": 5,
+            "junio": 6, "jun": 6, "june": 6,
+            "julio": 7, "jul": 7, "july": 7,
+            "agosto": 8, "ago": 8, "august": 8, "aug": 8,
+            "septiembre": 9, "setiembre": 9, "sep": 9, "sept": 9, "set": 9, "september": 9,
+            "octubre": 10, "oct": 10, "october": 10,
+            "noviembre": 11, "nov": 11, "november": 11,
+            "diciembre": 12, "dic": 12, "december": 12, "dec": 12,
+        }
 
-        period_month = _month_of(period)
-        prov_list = _sig_list(provider)
-        prov_tokens = set(prov_list)
-        today = _date.today()
+        def _periodo_de(text: str):
+            """(año|None, mes) escrito en el texto: 'Sep 2026', 'Septiembre 2026', '09/2026'."""
+            t = _norm(text)
+            anio = None
+            m_a = re.search(r'\b(20\d{2})\b', t)
+            if m_a:
+                anio = int(m_a.group(1))
+            for tok in t.split():
+                if tok in _MESES:
+                    return anio, _MESES[tok]
+            m = re.search(r'\b(\d{1,2})[/-](20\d{2})\b', text or "")
+            if m and 1 <= int(m.group(1)) <= 12:
+                return int(m.group(2)), int(m.group(1))
+            return None
 
-        # Servicio canónico del proveedor (vía aliases de la DB Servicios), si matchea.
+        def _entry_date(e):
+            d = getattr(e, "date", None)
+            if not d:
+                return None
+            try:
+                return d if isinstance(d, _date) else _date.fromisoformat(str(d)[:10])
+            except Exception:
+                return None
+
+        # 1) Mismo número de factura
+        num = (numero or "").strip()
+        if num and len(re.sub(r'\D', '', num)) >= 5:
+            try:
+                pages = await self._query_db("finances", filter_obj={"or": [
+                    {"property": "Notes", "rich_text": {"contains": num}},
+                    {"property": "Name", "title": {"contains": num}},
+                ]}, page_size=5)
+                if pages:
+                    return False, "duplicate_numero"
+            except Exception as e:
+                print(f"[create_finance_invoice] no pude buscar el numero {num}: {e}")
+
+        periodo_nuevo = _periodo_de(period)
+        prov_tokens = set(_sig_list(provider))
         svc_new = self.service_of(provider)
+        try:
+            ref = _date.fromisoformat(mail_date[:10]) if mail_date else None
+        except ValueError:
+            ref = None
+        ref = ref or _date.today()
 
-        # Candidatos: TODAS las impagas (pocas) + historial pagado buscando por CADA
-        # token significativo del proveedor, MÁS el nombre del servicio/empresa canónica.
-        # Así "Interfast Expensas" (o solo "Interfast") encuentra la entrada "Expensas".
-        candidates = []
-        candidates += await self.get_impaga_facturas()
-        _query_tokens = list(prov_list)
+        candidates = list(await self.get_impaga_facturas())
+        _query_tokens = list(prov_tokens)
         if svc_new:
             _query_tokens.append(svc_new.get("servicio", ""))
             if svc_new.get("empresa"):
@@ -1699,50 +1734,41 @@ class NotionDataStore:
             if tn and len(tn) >= 4 and tn not in _seen_q:
                 _seen_q.add(tn)
                 candidates += await self.get_finance_history_by_provider(tn, limit=10)
-        def _entry_date(e):
-            d = getattr(e, "date", None)
-            if not d:
-                return None
-            try:
-                return d if isinstance(d, _date) else _date.fromisoformat(str(d)[:10])
-            except Exception:
-                return None
 
         for e in candidates:
             ename = e.name or ""
-            # ¿Mismo proveedor? Dos vías:
-            #  a) comparten un token significativo EXACTO ("calf energia" ~ "calf luz",
-            #     pero "calf" NO matchea "calfibra"); o
-            #  b) ambos mapean al MISMO servicio vía aliases ("Interfast" ~ "Expensas").
+            # ¿Mismo proveedor? Comparten un token EXACTO ("calf" no matchea "calfibra")
+            # o mapean al mismo servicio por aliases ("Interfast" ~ "Expensas").
             same_provider = bool(prov_tokens & set(_sig_list(ename)))
             if not same_provider and svc_new:
                 svc_e = self.service_of(ename)
-                if svc_e and svc_e.get("servicio") == svc_new.get("servicio"):
-                    same_provider = True
+                same_provider = bool(svc_e and svc_e.get("servicio") == svc_new.get("servicio"))
             if not same_provider:
                 continue
-            # Mes de la entrada existente: del nombre o, si no está, del campo Date.
-            # (Las entradas reales pagadas se llaman "Expensas", "Calf Energía" sin el
-            #  mes en el nombre — el mes vive en Date. Sin esto se duplicaban.)
-            emonth = _month_of(ename)
+            # 2) Mismo período, solo si el registro existente lo dice en el nombre
+            #    (en los pagos la fecha es cuándo se pagó, no qué mes cubre).
+            periodo_e = _periodo_de(ename)
+            if periodo_nuevo and periodo_e and periodo_e[1] == periodo_nuevo[1] and (
+                    not periodo_e[0] or not periodo_nuevo[0] or periodo_e[0] == periodo_nuevo[0]):
+                return False, "duplicate_periodo"
+            # 3) Mismo monto, pocos días entre uno y otro
             ed = _entry_date(e)
-            if not emonth and ed:
-                emonth = f"{ed.month:02d}"
-            # 1) mismo proveedor + mismo mes → duplicado
-            if period_month and emonth and emonth == period_month:
-                return False, "duplicate"
-            # 2) mismo proveedor + mismo monto (±2%) en una entrada reciente (≤45 días)
-            #    → es la misma factura ya cargada (pagada o no), no la repitas.
-            if amount and getattr(e, "value_ars", 0):
-                if abs(e.value_ars - amount) / max(amount, 1) <= 0.02:
-                    if ed is None or (today - ed).days <= 45:
-                        return False, "duplicate"
-            # 3) sin mes ni monto comparables: fallback por dígitos (excluyendo el año)
-            if not (period_month and emonth):
-                new_digits = {d for d in re.findall(r"\d+", period or "") if len(d) != 4}
-                old_digits = {d for d in re.findall(r"\d+", ename) if len(d) != 4}
-                if new_digits and new_digits & old_digits:
-                    return False, "duplicate"
+            if getattr(e, "value_ars", 0) and abs(e.value_ars - amount) / max(amount, 1) <= 0.01:
+                if ed and abs((ref - ed).days) <= 20:
+                    return False, "duplicate_monto"
+
+        notas = []
+        if num:
+            notas.append(f"Nº {num}")
+        if due_date:
+            try:
+                notas.append("vence " + datetime.strptime(due_date[:10], "%Y-%m-%d").strftime("%d/%m/%Y"))
+            except ValueError:
+                pass
+        if mail_date:
+            notas.append(f"llegó por mail el {mail_date[8:10]}/{mail_date[5:7]}")
+        if nota:
+            notas.append(str(nota))
         now = datetime.now(timezone.utc) - timedelta(hours=3)
         entry = await self.create_expense({
             "name": f"Factura {provider} — {period}",
@@ -1753,6 +1779,7 @@ class NotionDataStore:
             "date": now.strftime("%Y-%m-%d"),
             "estado": "Impaga",
             "emoji": "💸",
+            "notes": " · ".join(notas) if notas else None,
         })
         return True, entry.id
 

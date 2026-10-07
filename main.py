@@ -14,7 +14,7 @@ from fastapi import FastAPI, Request, BackgroundTasks
 
 from state import (
     historial_para_api, quitar_ultimo_de_historial,
-    mensajes_no_entregados, texto_enviado,
+    mensajes_no_entregados, texto_enviado, info_enviado,
     _ds, QueryFilter, DateRange,
     WA_TOKEN, WA_PHONE_ID, WA_API, MY_NUMBER, DAILY_SUMMARY_HOUR,
     USER_LAT, USER_LON, SONNET_MODEL, HAIKU_MODEL,
@@ -616,6 +616,17 @@ MAX_PROCESSED_IDS = 500
 buffer_timers: dict[str, asyncio.Task] = {}
 BUFFER_WINDOW_SECS = 4.0
 PROCESSING_INDICATOR_DELAY = 4.0
+
+
+def _bloque_media(b64: str, mime: str | None) -> dict:
+    """Bloque para la API de Claude según el tipo: un PDF va como documento. Antes todo
+    iba como imagen y un PDF mandado por WhatsApp rompía con un error 400 en inglés."""
+    if (mime or "").lower() == "application/pdf":
+        return {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": b64}}
+    tipo = (mime or "image/jpeg").lower()
+    if tipo not in ("image/jpeg", "image/png", "image/gif", "image/webp"):
+        tipo = "image/jpeg"
+    return {"type": "image", "source": {"type": "base64", "media_type": tipo, "data": b64}}
 
 
 async def get_media_base64(media_id: str) -> tuple[str, str]:
@@ -1223,9 +1234,9 @@ async def handle_gasto_agent(phone: str, text: str, image_b64=None, image_type=N
 
     content = []
     if image_b64:
-        content.append({"type": "image", "source": {"type": "base64", "media_type": image_type or "image/jpeg", "data": image_b64}})
+        content.append(_bloque_media(image_b64, image_type))
     for b64, itype in (extra_images or []):
-        content.append({"type": "image", "source": {"type": "base64", "media_type": itype or "image/jpeg", "data": b64}})
+        content.append(_bloque_media(b64, itype))
     n_imgs = 1 + len(extra_images or []) if image_b64 else len(extra_images or [])
     content.append({"type": "text", "text": text or (f"(ver {n_imgs} imágenes adjuntas)" if n_imgs > 1 else "(ver imagen adjunta)")})
 
@@ -2340,7 +2351,7 @@ async def parse_evento(text: str, image_b64: str = None, image_type: str = None)
     now = now_argentina()
     user_content = []
     if image_b64:
-        user_content.append({"type": "image", "source": {"type": "base64", "media_type": image_type or "image/jpeg", "data": image_b64}})
+        user_content.append(_bloque_media(image_b64, image_type))
     user_content.append({"type": "text", "text": f"""Hoy es {now.strftime("%Y-%m-%d")}, hora actual: {now.strftime("%H:%M")}
 Mensaje: {text or "(ver imagen adjunta)"}
 Extrae la info del evento de la imagen si la hay, o del texto.
@@ -2414,9 +2425,9 @@ async def classify(text: str, has_image: bool, image_b64: str = None, image_type
         return "GASTO"
     content = []
     if image_b64:
-        content.append({"type": "image", "source": {"type": "base64", "media_type": image_type or "image/jpeg", "data": image_b64}})
+        content.append(_bloque_media(image_b64, image_type))
     for b64, itype in (extra_images or []):
-        content.append({"type": "image", "source": {"type": "base64", "media_type": itype or "image/jpeg", "data": b64}})
+        content.append(_bloque_media(b64, itype))
     prompt_text = text if text.strip() else "(ver imagen adjunta)"
     history_ctx = ""
     if history and len(text.strip()) < 80:
@@ -2526,8 +2537,7 @@ Respondé SOLO un JSON, sin markdown:
     bloques = []
     for _b64, _tipo in ([(image_b64, image_type)] if image_b64 else []) + list(extra_images or []):
         if _b64:
-            bloques.append({"type": "image", "source": {"type": "base64",
-                            "media_type": _tipo or "image/jpeg", "data": _b64}})
+            bloques.append(_bloque_media(_b64, _tipo))
     bloques.append({"type": "text", "text": contenido})
     resp = await claude_create(model=SONNET_MODEL, max_tokens=900, system=system,
                                messages=[{"role": "user", "content": bloques}])
@@ -3825,7 +3835,7 @@ EVENTOS RECURRENTES:
 
     content = []
     if image_b64:
-        content.append({"type": "image", "source": {"type": "base64", "media_type": image_type or "image/jpeg", "data": image_b64}})
+        content.append(_bloque_media(image_b64, image_type))
     content.append({"type": "text", "text": text or "(ver imagen adjunta)"})
 
     messages = historial_para_api(phone) + [{"role": "user", "content": content}]
@@ -4328,7 +4338,7 @@ async def handle_reunion(text: str, image_b64: str = None, image_type: str = Non
     now = now_argentina()
     content_parts = []
     if image_b64:
-        content_parts.append({"type": "image", "source": {"type": "base64", "media_type": image_type or "image/jpeg", "data": image_b64}})
+        content_parts.append(_bloque_media(image_b64, image_type))
     prompt_reunion = (
         f"Hoy: {now.strftime('%Y-%m-%d %H:%M')}\n"
         f"Mensaje: {text or '(ver imagen adjunta)'}\n\n"
@@ -4601,7 +4611,7 @@ async def handle_salud_agent(phone: str, text: str, image_b64: str = None, image
 
     content = []
     if image_b64:
-        content.append({"type": "image", "source": {"type": "base64", "media_type": image_type or "image/jpeg", "data": image_b64}})
+        content.append(_bloque_media(image_b64, image_type))
     content.append({"type": "text", "text": text or "(ver imagen adjunta)"})
 
     system = f"""Sos Knot, asistente personal en WhatsApp. Hablas en espanol rioplatense, natural y conciso.
@@ -6488,14 +6498,21 @@ async def enqueue_message(message: dict):
 
         if mensajes_no_entregados:
             # Martin escribió: la ventana de 24 h está abierta otra vez.
-            _pend = list(mensajes_no_entregados)
+            _ahora = now_argentina()
+            # Lo de más de un día ya no sirve (un recordatorio de anteayer).
+            _pend = [m for m in mensajes_no_entregados
+                     if (_ahora - m["cuando"]).total_seconds() < 24 * 3600]
             mensajes_no_entregados.clear()
-            _extra = len(_pend) - 3
-            await send_message(phone, "📬 Esto te lo quise mandar pero WhatsApp no me dejó, porque hacía más de "
-                                      "24 horas que no hablábamos:"
-                                      + (f" (te paso los últimos 3 de {len(_pend)})" if _extra > 0 else ""))
-            for _t in _pend[-3:]:
-                await send_message(phone, _t)
+            if _pend:
+                _extra = len(_pend) - 3
+                await send_message(phone, "📬 Esto te lo quise mandar pero WhatsApp no me dejó, porque hacía más de "
+                                          "24 horas que no hablábamos:"
+                                          + (f" (te paso los últimos 3 de {len(_pend)})" if _extra > 0 else ""))
+                for _m in _pend[-3:]:
+                    _cuando = _m["cuando"]
+                    _rotulo = (f"_(de las {_cuando.strftime('%H:%M')})_" if _cuando.date() == _ahora.date()
+                               else f"_(de ayer {_cuando.strftime('%H:%M')})_")
+                    await send_message(phone, f"{_rotulo}\n{_m['texto']}")
 
         msg_type = message["type"]
         text = ""
@@ -6525,6 +6542,10 @@ async def enqueue_message(message: dict):
             media_id = message["document"]["id"]
             text = message["document"].get("caption", "")
             image_b64, image_type = await get_media_base64(media_id)
+            if image_b64 and not ((image_type or "").startswith("image/") or image_type == "application/pdf"):
+                await send_message(phone, "📎 Por ahora solo puedo leer PDFs e imágenes. "
+                                          "Mandámelo en uno de esos formatos o contame qué dice.")
+                return
         elif msg_type == "audio":
             media_id = message["audio"]["id"]
             await send_message(phone, "🎙️ Transcribiendo audio...")
@@ -6647,9 +6668,11 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             print(f"[whatsapp] NO se entregó {st.get('id')}: {errores}")
             if any(e.get("code") == 131047 for e in errores):
                 # Ventana de 24 h cerrada: guardarlo para cuando Martin escriba.
-                txt = texto_enviado(st.get("id"))
-                if txt:
-                    mensajes_no_entregados.append(txt)
+                _info = info_enviado(st.get("id"))
+                if _info and not _info.get("descartable"):
+                    mensajes_no_entregados.append({"texto": _info["texto"], "cuando": _info["cuando"]})
+                elif _info:
+                    print(f"[whatsapp] resumen no entregado, se descarta: {_info['texto'][:60]!r}")
         messages = value.get("messages")
         if messages:
             msg = messages[0]
@@ -7002,7 +7025,7 @@ async def process_single_item(phone: str, item: dict):
                         model=SONNET_MODEL, max_tokens=1200,
                         system="Transcribi TODO el contenido de la imagen exactamente como esta escrito. Si es una receta: copia el titulo, luego todas las secciones tal como aparecen. No omitas nada.",
                         messages=[{"role": "user", "content": [
-                            {"type": "image", "source": {"type": "base64", "media_type": image_type or "image/jpeg", "data": image_b64}},
+                            _bloque_media(image_b64, image_type),
                             {"type": "text", "text": "Transcribi todo el contenido de esta imagen fielmente."}
                         ]}]
                     )
@@ -7393,7 +7416,7 @@ async def handle_fitness_agent(phone: str, text: str, image_b64: str = None, ima
 
     content = []
     if image_b64:
-        content.append({"type": "image", "source": {"type": "base64", "media_type": image_type or "image/jpeg", "data": image_b64}})
+        content.append(_bloque_media(image_b64, image_type))
     content.append({"type": "text", "text": text or "(ver imagen adjunta)"})
 
     system = f"""Sos Knot, asistente personal en WhatsApp. Hablas en español rioplatense, natural y conciso.
@@ -7823,7 +7846,7 @@ async def handle_deuda_agent(phone: str, text: str) -> str:
     amount = float(data.get("amount") or 0)
     categoria = data.get("categoria") or "Personal"
     notes = data.get("notes") or ""
-    period = now.strftime("%B %Y")
+    period = f"{['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'][now.month - 1]} {now.year}"
     if not provider:
         return "No entendí a quién le debés. ¿Podés aclarar?"
     ok, page_id = await _ds.create_finance_invoice(provider, amount, period, category=categoria)

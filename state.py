@@ -240,19 +240,26 @@ def quitar_ultimo_de_historial(phone: str, role: str, content: str):
 # Martin. Fuera de esa ventana el envio "sale bien" pero despues llega un aviso de
 # fallo (error 131047) y el mensaje nunca se entrega: el resumen de las 7, un
 # recordatorio. Se guardan aca y se reenvian apenas Martin escribe (se reabre la ventana).
-mensajes_no_entregados: list[str] = []
-_enviados_completos: dict[str, str] = {}
+# Cada pendiente es {"texto", "cuando"}. Los resúmenes (del día, nocturno, semanal)
+# se mandan con descartable=True y NO se guardan: Martin no quiere recibir a las 18:51
+# un "Buenos días" con la agenda de la mañana.
+mensajes_no_entregados: list[dict] = []
+_enviados_completos: dict[str, dict] = {}
 _ENVIADOS_CAP = 60
 
 
-def registrar_enviado(msg_id: str, text: str):
+def registrar_enviado(msg_id: str, text: str, descartable: bool = False):
     if not msg_id or not text:
         return
     if len(_enviados_completos) > _ENVIADOS_CAP:
         for k in list(_enviados_completos)[: _ENVIADOS_CAP // 2]:
             del _enviados_completos[k]
-    _enviados_completos[msg_id] = text
+    _enviados_completos[msg_id] = {"texto": text, "cuando": now_argentina(), "descartable": descartable}
 
 
 def texto_enviado(msg_id: str) -> str | None:
+    return (_enviados_completos.get(msg_id) or {}).get("texto")
+
+
+def info_enviado(msg_id: str) -> dict | None:
     return _enviados_completos.get(msg_id)

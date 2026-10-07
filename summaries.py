@@ -232,6 +232,20 @@ def format_weather_chat(w: dict, include_tomorrow: bool = False) -> str:
     return "\n".join(lines)
 
 
+_DIAS_CORTOS = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
+_MESES_ES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto",
+             "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+
+
+def _dia_corto(dt) -> str:
+    """'Lun', 'Mar'... strftime('%a') sale en inglés en el servidor ('Mon')."""
+    return _DIAS_CORTOS[dt.weekday()]
+
+
+def _mes_anio(dt) -> str:
+    return f"{_MESES_ES[dt.month - 1]} {dt.year}"
+
+
 # ── Gmail ─────────────────────────────────────────────────────────────────────
 
 async def get_gmail_summary(query_hint: str = None) -> str | None:
@@ -353,125 +367,177 @@ def _walk_email_parts(parts):
         yield from _walk_email_parts(p.get("parts"))
 
 
-async def get_invoices_from_gmail(now: datetime) -> list[dict]:
-    """Extrae facturas de servicios ABRIENDO los PDF adjuntos con visión y
-    devuelve datos estructurados y exactos (monto = total a pagar del PDF),
-    con el proveedor CANONIZADO contra los proveedores conocidos del usuario.
+# Mails de facturas ya leidos (ids de Gmail). Cada mail se lee UNA vez.
+_MAX_VISTOS = 400
+# Mails nuevos que se leen por corrida: lo que sobra queda para la próxima.
+_MAX_POR_CORRIDA = 15
 
-    Reemplaza el viejo flujo (resumen de texto -> Haiku), que perdía montos y
-    duplicaba facturas por variantes del nombre del proveedor.
+
+def _instrucciones_factura(today: str, canon: str) -> str:
+    return f"""Sos el extractor de facturas de servicios de Knot. Hoy es {today}.
+Te paso UN mail (remitente, asunto, fecha, texto) y, si tiene, el PDF adjunto (el PDF es la factura REAL).
+
+QUE ES UNA FACTURA: solo cuentan los avisos de algo POR PAGAR de un servicio, impuesto o expensa
+(luz, gas, agua, internet, telefono, expensas, monotributo, ingresos brutos, municipales).
+NO son facturas, devolvé [] para:
+- COMPROBANTES DE PAGO ya hecho: "constancia de pago", "comprobante de pago", "ticket de pago",
+  "pagaste tu servicio", "recibo", confirmaciones de Pronto Pago / Rapipago / Pago Fácil / banco /
+  Mercado Pago. Avisan que YA pagó: cargarlos inventa una deuda.
+- RESUMENES DE TARJETA de crédito (Visa, Mastercard, American Express, CencoPay, Naranja) y cuotas
+  o financiaciones de Mercado Pago: Martin no los registra porque las compras ya están cargadas una
+  por una y se contarían dos veces.
+- Publicidad, newsletters, avisos de trámites, alertas de seguridad.
+
+MONTO: el "TOTAL A PAGAR" final del PDF. No sumes renglones ni uses subtotales. Si solo hay texto y el
+total no está claro, amount=null.
+FORMATO DEL MONTO: en Argentina el punto separa miles y la coma decimales. "amount" va como número JSON
+en pesos, sin separador de miles y con punto decimal: "$ 22.966,00" -> 22966.00 ; "$ 30.898,4" -> 30898.40 ;
+"$ 1.234.567,89" -> 1234567.89. Nunca devuelvas 22.966 para veintidós mil.
+
+PERIODO: el mes que FACTURA (no el de vencimiento ni el de envío), en español: "Septiembre 2026".
+Si la factura cubre varios meses, el primero y aclaralo en "nota" ("bimestre 9-10", "trimestre 11-1").
+NUMERO: el número de factura o comprobante tal cual figura ("B-2001-2813644", "60-00059417"), o null.
+
+CANONIZACIÓN del proveedor: si matchea una empresa o alias del catálogo, devolvé el nombre de la EMPRESA
+del catálogo, sin variantes. Catálogo:
+{canon}
+Si no está en el catálogo, un nombre corto y consistente.
+
+Devolvé SOLO un JSON array (sin markdown), normalmente con 0 o 1 elemento:
+[{{"provider":"<canónico>","amount":<número o null>,"period":"<Mes YYYY>","due_date":"YYYY-MM-DD o null","numero":"<nro o null>","nota":"<aclaración corta o null>","category":"Recurrente"}}]"""
+
+
+async def get_invoices_from_gmail(now: datetime) -> list[dict]:
+    """Facturas de servicios llegadas por mail, leyendo cada mail UNA sola vez.
+
+    Antes se miraban los 12 mails más recientes de 40 días y se abrían 5 PDF en una
+    sola llamada: con bancos y Mercado Pago de por medio, las facturas reales quedaban
+    afuera. Ahora se recorren todos los mails nuevos (por id de Gmail, guardado en la
+    config) y se lee cada uno por separado, con su PDF. La primera vez arranca desde
+    ese momento: lo anterior se revisó a mano.
     """
-    providers = user_prefs.get("service_providers", {})  # {tipo: nombre}
-    provider_names = [v for v in providers.values() if v]
-    if provider_names:
-        providers_query = " OR ".join(f'"{n}"' for n in provider_names[:6])
-        base_query = f"newer_than:40d ({providers_query} OR factura OR comprobante OR vencimiento)"
-    else:
-        base_query = "newer_than:40d (factura OR comprobante OR boleta OR vencimiento)"
+    from config import save_user_config
+    vistos = list(user_prefs.get("facturas_mails_vistos") or [])
+    vistos_set = set(vistos)
+    desde = user_prefs.get("facturas_desde")
+    if not desde:
+        desde = now.strftime("%Y-%m-%d")
+        user_prefs["facturas_desde"] = desde
+        await save_user_config(MY_NUMBER)
+    try:
+        desde_ts = datetime.strptime(desde, "%Y-%m-%d").timestamp() * 1000 - 3 * 3600 * 1000
+    except ValueError:
+        desde_ts = 0
+
+    providers = user_prefs.get("service_providers", {})
+    nombres = [v for v in providers.values() if v]
+    for svc in getattr(_ds, "_services", []) or []:
+        if svc.get("empresa"):
+            nombres.append(svc["empresa"].split(" (")[0])
+    nombres = list(dict.fromkeys(n for n in nombres if n))[:15]
+    terminos = " OR ".join(f'"{n}"' for n in nombres)
+    base_query = ("newer_than:45d -category:promotions -category:social "
+                  f"(factura OR boleta OR vencimiento OR liquidacion OR expensas OR \"aviso de pago\""
+                  f"{' OR ' + terminos if terminos else ''})")
+
     access_token = await get_gcal_access_token()
     if not access_token:
         return []
+    facturas = []
+    nuevos_vistos = []
     try:
-        async with httpx.AsyncClient(timeout=25) as http:
+        async with httpx.AsyncClient(timeout=30) as http:
             headers = {"Authorization": f"Bearer {access_token}"}
-            r = await http.get(
-                "https://gmail.googleapis.com/gmail/v1/users/me/messages",
-                headers=headers, params={"q": base_query, "maxResults": 20}
-            )
-            if r.status_code != 200:
-                return []
-            messages = r.json().get("messages", [])
-            if not messages:
-                return []
-            pdf_blocks = []
-            email_ctx = []
-            n_pdfs = 0
-            for msg in messages[:12]:
-                full_r = await http.get(
-                    f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg['id']}",
-                    headers=headers, params={"format": "full"}
-                )
-                if full_r.status_code != 200:
-                    continue
-                body = full_r.json()
-                payload = body.get("payload", {})
-                hdrs = {h["name"]: h["value"] for h in payload.get("headers", [])}
-                subject = hdrs.get("Subject", "")
-                sender = hdrs.get("From", "")
-                snippet = body.get("snippet", "")[:200]
-                email_ctx.append(f"- De: {sender} | Asunto: {subject} | Preview: {snippet}")
-                if n_pdfs >= 5:
-                    continue
-                for part in _walk_email_parts(payload.get("parts")):
-                    mime = part.get("mimeType", "")
-                    filename = (part.get("filename", "") or "")
-                    is_pdf = mime == "application/pdf" or filename.lower().endswith(".pdf")
-                    if not is_pdf:
-                        continue
-                    att_id = part.get("body", {}).get("attachmentId")
-                    if not att_id:
-                        continue
-                    try:
-                        att_r = await http.get(
-                            f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg['id']}/attachments/{att_id}",
-                            headers=headers
-                        )
-                        if att_r.status_code == 200:
-                            pdf_b64 = att_r.json().get("data", "").replace("-", "+").replace("_", "/")
-                            if pdf_b64:
-                                pdf_blocks.append({"type": "document", "source": {
-                                    "type": "base64", "media_type": "application/pdf", "data": pdf_b64}})
-                                n_pdfs += 1
-                                break
-                    except Exception:
-                        pass
-                if n_pdfs >= 5:
+            ids, page_token = [], None
+            for _ in range(3):  # hasta 150 mails
+                params = {"q": base_query, "maxResults": 50}
+                if page_token:
+                    params["pageToken"] = page_token
+                r = await http.get("https://gmail.googleapis.com/gmail/v1/users/me/messages",
+                                   headers=headers, params=params)
+                if r.status_code != 200:
+                    print(f"[facturas] busqueda fallo: {r.status_code} {r.text[:150]}")
+                    return []
+                ids += [m["id"] for m in r.json().get("messages", [])]
+                page_token = r.json().get("nextPageToken")
+                if not page_token:
                     break
-            if not email_ctx and not pdf_blocks:
-                return []
-            # Catálogo de servicios con aliases (fuente de verdad para canonizar).
+            pendientes = [i for i in ids if i not in vistos_set]
+            # Del más viejo al más nuevo, para que una corrida cortada retome en orden.
+            pendientes.reverse()
+
             svc_lines = []
             for svc in getattr(_ds, "_services", []) or []:
                 al = ", ".join(svc.get("aliases", []))
                 svc_lines.append(f'- {svc.get("empresa") or svc.get("servicio")} (servicio: {svc.get("servicio")}; aliases: {al})')
-            canon = "\n".join(svc_lines) if svc_lines else ", ".join(f'"{v}"' for v in provider_names) or "(ninguno configurado todavía)"
-            today = now.strftime("%Y-%m-%d")
-            instr = f"""Sos el extractor de facturas de servicios de Knot. Hoy es {today}.
-Te paso los mails de facturas del último mes y, cuando hay, los PDF adjuntos (esos PDF son la factura REAL).
+            canon = "\n".join(svc_lines) or ", ".join(f'"{v}"' for v in nombres) or "(ninguno)"
+            instr = _instrucciones_factura(now.strftime("%Y-%m-%d"), canon)
 
-QUE ES UNA FACTURA: solo cuentan los avisos de algo POR PAGAR. Ignorá por completo los
-COMPROBANTES DE PAGO ya hecho: "constancia de pago", "comprobante de pago", "ticket de pago",
-"pagaste tu servicio", "recibo", confirmaciones de Pronto Pago / Rapipago / Pago Fácil / banco /
-Mercado Pago. Esos mails avisan que YA pagaste: si los cargás como factura, Knot le inventa una
-deuda al usuario. Tampoco cuentes como una sola factura un pago agrupado de varias.
-
-MONTO (clave): usá el "TOTAL A PAGAR" final del PDF. NO sumes renglones ni uses subtotales. Si una factura tiene descuentos o "devolución de anticipo", el total ya los contempla. Si solo hay texto del mail (sin PDF) y el total no aparece claro, poné amount=null.
-FORMATO DEL MONTO: las facturas argentinas usan punto para miles y coma para decimales. "amount" va como número JSON en pesos, SIN separador de miles y con punto decimal: "$ 22.966,00" -> 22966.00 ; "$ 1.234.567,89" -> 1234567.89. Nunca devuelvas 22.966 para veintidós mil.
-
-CANONIZACIÓN del proveedor: tenés este catálogo de servicios conocidos con sus aliases. Si la factura matchea cualquier alias/empresa, devolvé como "provider" el nombre de la EMPRESA del catálogo (no inventes variantes). Ej: una factura de "Interfast" o del "Consorcio ARIES VI" → provider de Expensas.
-Catálogo:
-{canon}
-Si es un proveedor nuevo que no está en el catálogo, elegí un nombre corto y consistente.
-
-Devolvé SOLO un JSON array (sin markdown). Un objeto por factura DISTINTA (no repitas la misma factura):
-{{"provider":"<canónico>","amount":<número o null>,"period":"<Mes YYYY>","due_date":"YYYY-MM-DD o null","category":"Recurrente"}}
-Si no hay ninguna factura, devolvé []."""
-            content = [{"type": "text", "text": instr + "\n\nMails:\n" + "\n".join(email_ctx)}] + pdf_blocks
-            resp = await claude_create(
-                model=SONNET_MODEL, max_tokens=700,
-                messages=[{"role": "user", "content": content}]
-            )
-            raw = resp.content[0].text.strip().strip("`")
-            if raw.lower().startswith("json"):
-                raw = raw[4:].strip()
-            try:
-                data = json.loads(raw) if raw.startswith("[") else []
-            except Exception:
-                data = []
-            return [d for d in data if isinstance(d, dict) and d.get("provider")]
+            leidos = 0
+            for msg_id in pendientes:
+                if leidos >= _MAX_POR_CORRIDA:
+                    break
+                full_r = await http.get(f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}",
+                                        headers=headers, params={"format": "full"})
+                if full_r.status_code != 200:
+                    continue  # no se marca: se reintenta la próxima
+                body = full_r.json()
+                if int(body.get("internalDate") or 0) < desde_ts:
+                    nuevos_vistos.append(msg_id)  # anterior al arranque: ya se revisó a mano
+                    continue
+                leidos += 1
+                payload = body.get("payload", {})
+                hdrs = {h["name"]: h["value"] for h in payload.get("headers", [])}
+                texto = _texto_de_mail(payload)[:4000]
+                pdf_block = None
+                for part in _walk_email_parts(payload.get("parts")):
+                    mime = part.get("mimeType", "")
+                    filename = (part.get("filename", "") or "")
+                    if not (mime == "application/pdf" or filename.lower().endswith(".pdf")):
+                        continue
+                    att_id = part.get("body", {}).get("attachmentId")
+                    if not att_id:
+                        continue
+                    att_r = await http.get(
+                        f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}/attachments/{att_id}",
+                        headers=headers)
+                    if att_r.status_code == 200:
+                        pdf_b64 = att_r.json().get("data", "").replace("-", "+").replace("_", "/")
+                        if pdf_b64:
+                            pdf_block = {"type": "document", "source": {
+                                "type": "base64", "media_type": "application/pdf", "data": pdf_b64}}
+                            break
+                mail_txt = (f"De: {hdrs.get('From', '')}\nAsunto: {hdrs.get('Subject', '')}\n"
+                            f"Fecha: {hdrs.get('Date', '')}\n\n{texto}")
+                content = [{"type": "text", "text": instr + "\n\nMAIL:\n" + mail_txt}]
+                if pdf_block:
+                    content.append(pdf_block)
+                try:
+                    resp = await claude_create(model=SONNET_MODEL, max_tokens=400,
+                                               messages=[{"role": "user", "content": content}])
+                    raw = resp.content[0].text.strip()
+                    raw = raw[raw.find("["):raw.rfind("]") + 1] if "[" in raw else "[]"
+                    data = json.loads(raw)
+                except Exception as e:
+                    print(f"[facturas] no pude leer el mail {msg_id}: {type(e).__name__}: {e}")
+                    continue  # no se marca: se reintenta
+                nuevos_vistos.append(msg_id)
+                fecha_mail = datetime.fromtimestamp(int(body.get("internalDate") or 0) / 1000 - 3 * 3600)
+                for d in data if isinstance(data, list) else []:
+                    if isinstance(d, dict) and d.get("provider"):
+                        d["mail_date"] = fecha_mail.strftime("%Y-%m-%d")
+                        d["mail_id"] = msg_id
+                        facturas.append(d)
     except Exception as _e:
-        print(f"[invoices] error: {type(_e).__name__}: {_e}")
-        return []
+        print(f"[facturas] error: {type(_e).__name__}: {_e}")
+    finally:
+        if nuevos_vistos:
+            user_prefs["facturas_mails_vistos"] = (vistos + nuevos_vistos)[-_MAX_VISTOS:]
+            try:
+                await save_user_config(MY_NUMBER)
+            except Exception as e:
+                print(f"[facturas] no pude guardar los mails vistos: {e}")
+    return facturas
 
 
 async def get_important_emails() -> str | None:
@@ -482,7 +548,7 @@ async def get_important_emails() -> str | None:
     # Excluir proveedores conocidos con -from: y palabras de facturas
     exclusions = " ".join(f'-from:"{n}"' for n in provider_names[:8] if n)
     base_query = (
-        f"newer_than:14d {exclusions} "
+        f"newer_than:14d is:unread -from:me {exclusions} "
         "-(factura OR comprobante OR vencimiento OR boleta OR invoice OR \"pago pendiente\" OR AFIP OR ARCA) "
         "-category:promotions -category:updates -category:social"
     ).strip()
@@ -542,14 +608,15 @@ async def get_important_emails() -> str | None:
                 system="""Sos Knot. Revisas la bandeja de entrada del usuario.
 Incluí un email si cumple CUALQUIERA de estas condiciones: lo envió una persona real (no un sistema automático), requiere respuesta o acción, menciona un turno, reunión o fecha, es sobre un proyecto o trabajo en curso, es una consulta, pedido o pregunta directa.
 Ignorá: newsletters, notificaciones automáticas de apps, publicidad, confirmaciones de compra sin acción, alertas de sistemas.
+Ignorá también los que el propio Martin (Martín Gentili Reus) se mandó a sí mismo.
 Para cada email relevante, devolvé DOS líneas con este formato exacto:
-- *Asunto* (De: nombre corto): resumen de 1 oración de qué dice o qué acción requiere.
+- *Asunto* (De: nombre corto): qué pide, en pocas palabras (máx 12).
   LINK_DEL_EMAIL
 Donde LINK_DEL_EMAIL es el valor del campo "Link:" del email, copiado exactamente.
 Ejemplo:
-- *mueble juani* (De: Martín): pregunta si podés pasar a buscarlo esta tarde.
+- *mueble juani* (De: Martín): ¿podés pasar a buscarlo hoy?
   https://mail.google.com/mail/u/0/#all/18f3a2b1c4d5e6f7
-Máximo 6 emails. Si no hay nada relevante respondé exactamente: NADA""" + _svc_ctx,
+Máximo 4 emails. Si no hay nada relevante respondé exactamente: NADA""" + _svc_ctx,
                 messages=[{"role": "user", "content": mail_text}]
             )
             result = resp.content[0].text.strip()
@@ -681,14 +748,16 @@ async def send_daily_summary(http, access_token: str, now: datetime):
             _loc_header = f" _(ultima ubicacion guardada: {_loc_name})_"
         elif _loc_src not in ("owntracks", "whatsapp") and _loc_name:
             _loc_header = f" _({_loc_name})_"
-        lines.append(f"🌡️ {w['temp']}C (sensacion {w['sensacion']}C) -- {w['emoji']} {w['desc']}{_loc_header}")
-        if w["lluvia"] > 0:
-            lines.append(f"🌧️ Lluvia ahora: {w['lluvia']}mm")
-        lines.append(f"💨 {w['wind_desc']} ({w['viento']} km/h)")
-        pronostico = f"Hoy: max {w['hoy_max']}C, min {w['hoy_min']}C"
+        # Corto: antes eran 5 líneas de clima y WhatsApp cortaba el mensaje con "Leer más".
+        if _loc_src == "restored":
+            _loc_header = ""  # "última ubicación guardada" es lo normal: no aporta
+        _clima = (f"{w['emoji']} {w['temp']}° (sensación {w['sensacion']}°) · "
+                  f"máx {w['hoy_max']}° / mín {w['hoy_min']}°")
         if w["hoy_lluvia"] > 0:
-            pronostico += f", 🌧️ {w['hoy_lluvia']}mm esperados"
-        lines.append(pronostico)
+            _clima += f" · 🌧️ {w['hoy_lluvia']}mm"
+        if w["viento"] >= 25:
+            _clima += f" · 💨 {w['viento']} km/h"
+        lines.append(_clima + _loc_header)
         try:
             clima_ctx = f"Temp actual: {w['temp']}C (sensacion {w['sensacion']}C). Max: {w['hoy_max']}C, min: {w['hoy_min']}C. Condicion: {w['desc']}. Viento: {w['viento']}km/h. Lluvia esperada: {w['hoy_lluvia']}mm."
             narrativa_resp = await claude_create(
@@ -723,7 +792,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                             s = e.get("start", {})
                             if "dateTime" in s:
                                 dt = datetime.strptime(s["dateTime"][:16], "%Y-%m-%dT%H:%M")
-                                lines.append(f"- {dt.strftime('%a %d/%m')} {dt.strftime('%H:%M')} -- {e.get('summary', '')}")
+                                lines.append(f"- {_dia_corto(dt)} {dt.strftime('%d/%m')} {dt.strftime('%H:%M')} -- {e.get('summary', '')}")
                             else:
                                 lines.append(f"- {s.get('date', '')[:10]} -- {e.get('summary', '')} (todo el dia)")
                         lines.append("")
@@ -805,9 +874,10 @@ async def send_daily_summary(http, access_token: str, now: datetime):
             except Exception:
                 pass
 
+    _idx_facturas = len(lines)
     mismatch_followups = []
     try:
-        period_str = now.strftime("%B %Y")
+        period_str = _mes_anio(now)
         # Leer las facturas ABRIENDO los PDF adjuntos (monto exacto + proveedor
         # canonizado), en vez de re-parsear un resumen de texto de 5 líneas.
         invoices = await get_invoices_from_gmail(now)
@@ -831,19 +901,16 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                         if 0.2 * _ref <= amount * 1000 <= 5 * _ref:
                             print(f"[facturas] {provider}: monto {amount} parece mal separado, uso {amount * 1000}")
                             amount = round(amount * 1000, 2)
-                ya_pagada = False
-                pago_dudoso = None
-                for h in historial:
-                    if amount and h.value_ars:
-                        diff = abs(h.value_ars - amount) / max(amount, 1)
-                        if diff <= 0.10:
-                            ya_pagada = True
-                            break
-                        elif diff > 0.10:
-                            pago_dudoso = h
-                if ya_pagada:
-                    continue
-                ok, page_id = await _ds.create_finance_invoice(provider, amount, period, due_date, inv.get("category", "Recurrente"))
+                # Antes: si el monto se parecía a uno de los 2 últimos pagos del proveedor,
+                # se daba por pagada y no se cargaba. Así se perdían todos los meses las
+                # facturas de monto fijo (Calfibra, EPAS). El control de repetidas vive
+                # ahora en create_finance_invoice: número de factura, período, o el mismo
+                # monto pagado hace pocos días.
+                ok, page_id = await _ds.create_finance_invoice(
+                    provider, amount, period, due_date, inv.get("category", "Recurrente"),
+                    numero=inv.get("numero"), nota=inv.get("nota"), mail_date=inv.get("mail_date"))
+                if not ok:
+                    print(f"[facturas] {provider} {period} ${amount}: no se carga ({page_id})")
                 if ok:
                     await _ds.create_factura_task(provider, amount, due_date, period, finance_page_id=page_id)
                     # Trigger #2: proveedor nuevo en Gmail (no estaba en service_providers ni tenía pagos previos)
@@ -873,11 +940,6 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                                 "action_intent": "add_provider",
                                 "payload": {"provider": provider},
                             })
-                if pago_dudoso and amount and page_id:
-                    mismatch_followups.append({
-                        "provider": provider, "invoice_amount": amount,
-                        "paid_amount": pago_dudoso.value_ars, "page_id": page_id,
-                    })
 
         impagas = await _ds.get_impaga_facturas()
         impaga_lines = []
@@ -907,11 +969,11 @@ async def send_daily_summary(http, access_token: str, now: datetime):
         import traceback; traceback.print_exc()
 
     # Sección "📬 Emails importantes": query independiente que excluye facturas/servicios
+    _idx_mails = len(lines)
     try:
         important_mails = await get_important_emails()
         if important_mails:
-            lines.append("")
-            lines.append("📬 *Emails importantes:*")
+            lines.append("📬 *Mails sin leer que importan:*")
             lines.append(important_mails)
     except Exception:
         pass
@@ -922,7 +984,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
             extras_prompt = "\n".join(f"- {e}" for e in extras)
             extra_resp = await claude_create(
                 model=SONNET_MODEL, max_tokens=300,
-                system=f"Sos Knot. Hoy es {now.strftime('%A %d/%m/%Y')}. Genera contenido breve (max 3 lineas por item) para los siguientes extras del Resumen Diario. Usas espanol rioplatense, tono natural y calido.",
+                system=f"Sos Knot. Hoy es {DIAS_SEMANA[now.weekday()]} {now.strftime('%d/%m/%Y')}. Genera contenido breve (max 3 lineas por item) para los siguientes extras del Resumen Diario. Usas espanol rioplatense, tono natural y calido.",
                 messages=[{"role": "user", "content": f"Genera estos extras para el resumen matutino:\n{extras_prompt}"}]
             )
             extra_text = extra_resp.content[0].text.strip()
@@ -932,9 +994,20 @@ async def send_daily_summary(http, access_token: str, now: datetime):
         except Exception:
             pass
 
-    msg_text = "\n".join(lines)
-    await send_message(MY_NUMBER, msg_text)
-    add_to_history(MY_NUMBER, "assistant", msg_text)
+    # En 2 o 3 mensajes cortos (clima y agenda / facturas / mails) en vez de uno largo
+    # que WhatsApp cortaba justo antes de los mails. descartable: si WhatsApp no los
+    # entrega (ventana de 24 h), no se reenvían a la tarde.
+    partes = [lines[:_idx_facturas], lines[_idx_facturas:_idx_mails], lines[_idx_mails:]]
+    partes = ["\n".join(p).strip() for p in partes]
+    if len(partes) > 1 and partes[1].startswith("✅"):
+        # "Facturas al día" no merece un mensaje propio
+        partes[0] = (partes[0] + "\n\n" + partes[1]).strip()
+        partes[1] = ""
+    partes = [p for p in partes if p]
+    if partes:
+        partes[-1] += "\n\n_Si querés más detalle de algo, pedímelo._"
+    for parte in partes:
+        await send_message(MY_NUMBER, parte, descartable=True)
 
     # Resolver mismatches de facturas interactivamente (uno a la vez)
     try:
@@ -1002,7 +1075,7 @@ async def send_resumen_nocturno_regular(http, access_token: str, now: datetime):
         eventos_str = "\n".join(lineas)
 
     w = await get_weather()
-    context = f"Hoy es {now.strftime('%A %d/%m/%Y')}. Hora: {now.strftime('%H:%M')}."
+    context = f"Hoy es {DIAS_SEMANA[now.weekday()]} {now.strftime('%d/%m/%Y')}. Hora: {now.strftime('%H:%M')}."
     if eventos_str:
         context += f"\nEventos de manana:\n{eventos_str}"
     else:
@@ -1029,8 +1102,7 @@ Conciso, calido, natural. Maximo 5 lineas.""",
         else:
             msg = "Buenas noches! Manana el dia esta libre. Que descanses"
 
-    await send_message(MY_NUMBER, msg)
-    add_to_history(MY_NUMBER, "assistant", msg)
+    await send_message(MY_NUMBER, msg, descartable=True)
     await _remind_pending_invoice_confirmations("nocturno")
 
 
@@ -1063,7 +1135,7 @@ async def send_resumen_nocturno_dominical(http, access_token: str, now: datetime
                 s = e.get("start", {})
                 if "dateTime" in s:
                     dt = datetime.strptime(s["dateTime"][:16], "%Y-%m-%dT%H:%M")
-                    lines.append(f"- {dt.strftime('%a %d/%m')} {dt.strftime('%H:%M')} — {e.get('summary','')}")
+                    lines.append(f"- {_dia_corto(dt)} {dt.strftime('%d/%m')} {dt.strftime('%H:%M')} — {e.get('summary','')}")
                 else:
                     lines.append(f"- {s.get('date','')[:10]} — {e.get('summary','')} (todo el dia)")
             lines.append("")
@@ -1170,8 +1242,7 @@ async def send_resumen_nocturno_dominical(http, access_token: str, now: datetime
     lines.append("_• Tus tasks pendientes_")
 
     msg = "\n".join(lines)
-    await send_message(MY_NUMBER, msg)
-    add_to_history(MY_NUMBER, "assistant", msg)
+    await send_message(MY_NUMBER, msg, descartable=True)
 
 def _texto_de_mail(payload: dict) -> str:
     """Cuerpo legible de un mail de Gmail: prefiere text/plain, si no limpia el HTML."""
