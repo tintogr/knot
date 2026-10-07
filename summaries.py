@@ -403,8 +403,87 @@ del catálogo, sin variantes. Catálogo:
 {canon}
 Si no está en el catálogo, un nombre corto y consistente.
 
+DÉBITO AUTOMÁTICO: si la factura dice que se cobra por débito automático, "debito_automatico": true.
+Además hay dos avisos que NO son facturas pero importan (devolvelos con su "tipo"):
+- "aviso_debito": avisa que en una fecha se va a debitar una factura ("el jueves 08 de octubre se te
+  debitará..."). Poné "fecha_debito".
+- "debito_rechazado": avisa que un débito automático fue RECHAZADO (por el banco, falta de fondos,
+  etc). Poné en "nota" qué se rechazó (período, anticipo, monto si figura).
+
 Devolvé SOLO un JSON array (sin markdown), normalmente con 0 o 1 elemento:
-[{{"provider":"<canónico>","amount":<número o null>,"period":"<Mes YYYY>","due_date":"YYYY-MM-DD o null","numero":"<nro o null>","nota":"<aclaración corta o null>","category":"Recurrente"}}]"""
+[{{"tipo":"factura","provider":"<canónico>","amount":<número o null>,"period":"<Mes YYYY>","due_date":"YYYY-MM-DD o null","numero":"<nro o null>","debito_automatico":false,"nota":"<aclaración corta o null>","category":"Recurrente"}}]
+[{{"tipo":"aviso_debito","provider":"<canónico>","fecha_debito":"YYYY-MM-DD","amount":<número o null>}}]
+[{{"tipo":"debito_rechazado","provider":"<canónico>","nota":"<qué se rechazó>","amount":<número o null>}}]"""
+
+
+def _norm_prov(t: str) -> set:
+    import unicodedata, re as _re
+    t = "".join(c for c in unicodedata.normalize("NFD", (t or "").lower()) if unicodedata.category(c) != "Mn")
+    return {w for w in _re.sub(r"[^a-z0-9]+", " ", t).split() if len(w) >= 4 and w not in ("factura", "debito")}
+
+
+def _misma_empresa(a: str, b: str) -> bool:
+    if _norm_prov(a) & _norm_prov(b):
+        return True
+    sa, sb = _ds.service_of(a or ""), _ds.service_of(b or "")
+    return bool(sa and sb and sa.get("servicio") == sb.get("servicio"))
+
+
+async def _procesar_avisos_debito(avisos: list, now: datetime) -> None:
+    """Aviso de débito: anota en la factura impaga cuándo se debita.
+    Débito rechazado: avisa a Martin en el momento (no es descartable) y lo anota en la
+    factura para que no se dé por pagada. Así se vencieron julio y septiembre de IIBB
+    sin que nadie se enterara."""
+    if not avisos:
+        return
+    impagas = await _ds.get_impaga_facturas()
+    for a in avisos:
+        prov = a.get("provider") or "?"
+        destino = next((i for i in impagas if _misma_empresa(prov, i.name)), None)
+        if a.get("tipo") == "aviso_debito" and a.get("fecha_debito"):
+            f = a["fecha_debito"]
+            if destino and "se debita el" not in (destino.notes or ""):
+                nota = (destino.notes or "") + f" · se debita el {f[8:10]}/{f[5:7]}/{f[:4]}"
+                await _ds.update_expense(destino.id, {"notes": nota.strip(" ·")})
+        elif a.get("tipo") == "debito_rechazado":
+            detalle = a.get("nota") or ""
+            monto = f" (${float(a['amount']):,.0f})" if a.get("amount") else ""
+            msg = (f"⚠️ *Te rechazaron el débito automático de {prov}*{monto}."
+                   + (f"\n{detalle}" if detalle else "")
+                   + "\nHay que pagarlo a mano o va a quedar vencido.")
+            if destino:
+                nota = (destino.notes or "") + f" · débito rechazado ({now.strftime('%d/%m')})"
+                await _ds.update_expense(destino.id, {"notes": nota.strip(" ·")})
+                msg += f"\nLa tengo como impaga: *{destino.name}*."
+            await send_message(MY_NUMBER, msg)
+
+
+async def _marcar_debitos_cumplidos(now: datetime) -> list[str]:
+    """Las facturas con débito automático se dan por pagadas recién 2 días después de la
+    fecha de débito (o del vencimiento) y solo si no llegó un aviso de rechazo.
+    Devuelve las líneas para el saludo de la mañana."""
+    import re as _re
+    from datetime import date as _date
+    hechas = []
+    for f in await _ds.get_impaga_facturas():
+        notas = f.notes or ""
+        if "débito automático" not in notas.lower() or "rechazado" in notas.lower():
+            continue
+        m = _re.search(r"(?:se debita el|débito automático el)\s+(\d{1,2})/(\d{1,2})/(\d{4})", notas, _re.I)
+        try:
+            fecha = (_date(int(m.group(3)), int(m.group(2)), int(m.group(1))) if m
+                     else _ds.vencimiento_de(notas))
+        except ValueError:
+            fecha = None
+        if not fecha or (now.date() - fecha).days < 2:
+            continue
+        ok = await _ds.mark_finance_paid(
+            f.id, f.value_ars, None,
+            f"Pagada por débito automático el {fecha.strftime('%d/%m/%Y')} (no llegó aviso de rechazo).")
+        if ok:
+            await _ds.update_expense(f.id, {"date": fecha.strftime("%Y-%m-%d")})
+            hechas.append(f"- ✅ {f.name} ${f.value_ars:,.0f}")
+    return hechas
 
 
 async def get_invoices_from_gmail(now: datetime) -> list[dict]:
@@ -437,7 +516,8 @@ async def get_invoices_from_gmail(now: datetime) -> list[dict]:
     nombres = list(dict.fromkeys(n for n in nombres if n))[:15]
     terminos = " OR ".join(f'"{n}"' for n in nombres)
     base_query = ("newer_than:45d -category:promotions -category:social "
-                  f"(factura OR boleta OR vencimiento OR liquidacion OR expensas OR \"aviso de pago\""
+                  f"(factura OR boleta OR vencimiento OR liquidacion OR expensas OR \"aviso de pago\" "
+                  f"OR \"debito automatico\" OR \"débito automático\""
                   f"{' OR ' + terminos if terminos else ''})")
 
     access_token = await get_gcal_access_token()
@@ -883,6 +963,9 @@ async def send_daily_summary(http, access_token: str, now: datetime):
         invoices = await get_invoices_from_gmail(now)
         if invoices:
             mismatch_followups = []
+            avisos_debito = [i for i in invoices if i.get("tipo") in ("aviso_debito", "debito_rechazado")]
+            invoices = [i for i in invoices if i.get("tipo", "factura") == "factura"]
+            await _procesar_avisos_debito(avisos_debito, now)
             for inv in invoices:
                 provider = inv.get("provider", "")
                 amount = float(inv.get("amount") or 0)
@@ -906,9 +989,12 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                 # facturas de monto fijo (Calfibra, EPAS). El control de repetidas vive
                 # ahora en create_finance_invoice: número de factura, período, o el mismo
                 # monto pagado hace pocos días.
+                _nota = inv.get("nota")
+                if inv.get("debito_automatico"):
+                    _nota = ("débito automático" + (f" · {_nota}" if _nota else ""))
                 ok, page_id = await _ds.create_finance_invoice(
                     provider, amount, period, due_date, inv.get("category", "Recurrente"),
-                    numero=inv.get("numero"), nota=inv.get("nota"), mail_date=inv.get("mail_date"))
+                    numero=inv.get("numero"), nota=_nota, mail_date=inv.get("mail_date"))
                 if not ok:
                     print(f"[facturas] {provider} {period} ${amount}: no se carga ({page_id})")
                 if ok:
@@ -941,6 +1027,11 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                                 "payload": {"provider": provider},
                             })
 
+        debitadas = await _marcar_debitos_cumplidos(now)
+        try:
+            await _ds.sincronizar_tareas_facturas()
+        except Exception as e:
+            print(f"[tareas facturas] {type(e).__name__}: {e}")
         impagas = await _ds.get_impaga_facturas()
         impaga_lines = []
         for imp in (impagas or []):
@@ -953,11 +1044,23 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                     dias_str = f" ⚠️ _({dias}d)_" if dias > 30 else f" _({dias}d)_"
                 else:
                     dias_str = ""
+                _vence = _ds.vencimiento_de(getattr(imp, "notes", "") or "")
+                if _vence:
+                    _dv = (_vence - now.date()).days
+                    dias_str = (f" ⚠️ _venció el {_vence.strftime('%d/%m')}_" if _dv < 0
+                                else " ⚠️ _vence hoy_" if _dv == 0
+                                else f" _vence {_dia_corto(_vence)} {_vence.strftime('%d/%m')}_")
+                if "débito automático" in (getattr(imp, "notes", "") or "").lower():
+                    dias_str += " _(débito automático)_"
                 line = f"- {imp.name} {monto}{dias_str}".strip()
                 if line and line != "-":
                     impaga_lines.append(line)
             except Exception:
                 pass
+        if debitadas:
+            lines.append("")
+            lines.append("*Se debitaron solas:*")
+            lines.extend(debitadas)
         if impaga_lines:
             lines.append("")
             lines.append("*Facturas pendientes:*")

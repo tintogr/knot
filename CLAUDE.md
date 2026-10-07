@@ -73,6 +73,13 @@ proveedor + **período** escrito en el nombre, o mismo monto (±1%) a **≤20 d�
 al último pago" (así se perdían todos los meses Calfibra y EPAS).
 **Una factura = un registro:** si un pago que reporta Martin corresponde a una Impaga, el pago pasa a la
 factura (monto, método, fecha del pago) y el gasto suelto se archiva (`_juntar_pago_con_factura`).
+**Tareas "💰 Pagar ..."**: acompañan a cada Impaga (Martin lo quiere así). `sincronizar_tareas_facturas` corre
+cada mañana: crea la tarea si falta y archiva las que están Listo o cuya factura ya no está Impaga.
+Solo toca tareas cuyo nombre empieza con "💰 Pagar".
+**Débito automático** (Calfibra): la factura nace Impaga con "débito automático" en Notes y se marca
+Pagada 2 días después de la fecha de débito si no llegó un mail de rechazo. Un **débito rechazado** (IIBB
+Río Negro, 05/10) se avisa en el momento y se anota en la factura. Los préstamos: ingreso con categoría
+Préstamo + egreso Impaga "Devolver ..." (balance 0 al pagarlo).
 
 ## Contexto que Knot usa para clasificar
 - **Rafael Lorenzo** = jefe de Martin → sus transferencias por MP = **Sueldo**.

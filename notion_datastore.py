@@ -1920,6 +1920,71 @@ class NotionDataStore:
         })
         return True, task.id
 
+    @staticmethod
+    def vencimiento_de(notes: str):
+        """Fecha de vencimiento escrita en las notas ('vence 16/10/2026'), o None."""
+        import re
+        from datetime import date as _date
+        m = re.search(r"vence\s+(\d{1,2})/(\d{1,2})/(\d{4})", notes or "", re.I)
+        if not m:
+            return None
+        try:
+            return _date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        except ValueError:
+            return None
+
+    async def sincronizar_tareas_facturas(self) -> tuple[int, int]:
+        """Cada factura Impaga tiene su tarea "💰 Pagar ..." y la tarea desaparece cuando
+        la factura se paga, se pague por donde se pague (Knot, a mano en Notion, débito
+        automático). Antes solo se cerraba si el pago entraba por cierto camino de
+        Knot y quedaban tareas viejas colgadas. Devuelve (archivadas, creadas)."""
+        archivadas = creadas = 0
+        tareas = await self._query_db("tasks", filter_obj={"and": [
+            {"property": "Category", "select": {"equals": "Finanzas"}},
+            {"property": "Source", "select": {"equals": "Knot"}},
+        ]}, max_items=300)
+        impagas = await self._query_db("finances", filter_obj={
+            "property": "Estado", "select": {"equals": "Impaga"}}, max_items=100)
+        impagas = [self._parse_expense(p) for p in impagas]
+        ids_impagas = {i.id.replace("-", "") for i in impagas}
+        con_tarea = set()
+        for t in tareas:
+            props = t.get("properties", {})
+            try:
+                meta = json.loads(_get_text(props, "Notes") or "{}")
+            except Exception:
+                meta = {}
+            if not _get_title(props).startswith("\U0001f4b0 Pagar"):
+                continue  # solo las tareas de facturas; las demás de Finanzas no se tocan
+            fid = (meta.get("finance_page_id") or "").replace("-", "")
+            listo = _get_status(props, "Status") == "Listo"
+            if fid and fid in ids_impagas and not listo:
+                con_tarea.add(fid)
+                continue
+            # Lista, sin factura asociada, o su factura ya no está impaga: se archiva.
+            if await self._archive_page(t["id"]):
+                archivadas += 1
+        for f in impagas:
+            if f.id.replace("-", "") in con_tarea or not (f.value_ars or 0) > 0:
+                continue
+            nombre = f.name or "factura"
+            if nombre.lower().startswith("factura "):
+                nombre = nombre[8:]
+            vence = self.vencimiento_de(f.notes)
+            await self.create_task({
+                "name": f"\U0001f4b0 Pagar {nombre}",
+                "category": "Finanzas",
+                "source": "Knot",
+                "notes": json.dumps({"provider": nombre, "amount": f.value_ars, "period": "",
+                                     "finance_page_id": f.id}, ensure_ascii=False),
+                "due_date": vence.strftime("%Y-%m-%d") if vence else "",
+                "priority": "Media",
+            })
+            creadas += 1
+        if archivadas or creadas:
+            print(f"[tareas facturas] {archivadas} archivadas, {creadas} creadas")
+        return archivadas, creadas
+
     async def mark_factura_task_paid(self, page_id: str) -> bool:
         """Archive a paid bill task so it disappears from Tasks DB."""
         try:
