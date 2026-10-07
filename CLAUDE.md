@@ -76,9 +76,12 @@ factura (monto, método, fecha del pago) y el gasto suelto se archiva (`_juntar_
 **Tareas "💰 Pagar ..."**: acompañan a cada Impaga (Martin lo quiere así). `sincronizar_tareas_facturas` corre
 cada mañana: crea la tarea si falta y archiva las que están Listo o cuya factura ya no está Impaga.
 Solo toca tareas cuyo nombre empieza con "💰 Pagar".
-**Débito automático** (Calfibra): la factura nace Impaga con "débito automático" en Notes y se marca
-Pagada 2 días después de la fecha de débito si no llegó un mail de rechazo. Un **débito rechazado** (IIBB
-Río Negro, 05/10) se avisa en el momento y se anota en la factura. Los préstamos: ingreso con categoría
+**Débito automático** (Calfibra; decidido por Martin): cuando llega el mail "se te debitará el X" la
+factura pasa a **Pagada en el acto** (fecha = la del débito). Si después llega un **rechazo**, vuelve a
+Impaga, se anota "débito RECHAZADO" y se avisa en el momento; sigue en el saludo y en Tareas hasta que se
+pague. Respaldo: sin aviso, se da por pagada 2 días después del vencimiento/débito si no hubo rechazo.
+Las deudas con personas (categoría Préstamo) solo se saldan si el agente de gastos las vincula
+explícitamente (`paga_impaga_id`); nunca por coincidencia de palabras. Los préstamos: ingreso con categoría
 Préstamo + egreso Impaga "Devolver ..." (balance 0 al pagarlo).
 
 ## Contexto que Knot usa para clasificar

@@ -1323,6 +1323,7 @@ Si un gasto que el usuario manda ya esta en YA REGISTRADOS pero con un dato dist
 - Si hay ambiguedad (ej: "compre algo" sin monto ni imagen) -> pregunta que fue y cuanto.
 
 PRESTAMOS: si le prestaron plata ("le pedí 200 a mi viejo", "me prestó X"), es un INGRESO con categoria Préstamo y prestamo_de = a quién se la tiene que devolver. Knot anota solo la deuda para devolverla. Devolver un préstamo es un EGRESO categoria Préstamo con paga_impaga_id de la deuda. Un mismo mensaje puede traer las dos cosas: registrá cada una por separado.
+Si dice que le pagó o devolvió plata a una persona y NO hay una deuda pendiente con ESA persona (mirá PERSONAS QUE CONOCE MARTIN para saber quién es quién), registralo igual como EGRESO con paga_impaga_id null, NO toques otras deudas, y preguntale en el texto qué fue, aclarando con quién sí tiene deudas (ej: "¿Qué 100 le devolviste a Juan? Solo tengo anotado que le debés $100.000 a tu papá").
 
 Categorias disponibles: Supermercado, Sueldo, Recurrente, Servicio, Transporte, Vianda, Salud, Salud Mental, Salida, Birra, Ocio, Compras, Depto, Plantas, Viajes, Venta, Préstamo.
 Recurrente = pagos que se repiten todos los meses (alquiler, luz, gas, internet, streaming, gimnasio, suscripciones fijas). Servicio = pago puntual de un servicio no recurrente (factura extra, credito adicional, uso puntual — ej: Anthropic extra usage, multa, servicio tecnico). Depto = compras fisicas para el depto (muebles, materiales, herramientas).
@@ -1520,6 +1521,11 @@ Emoji: elegi el mas especifico segun el contexto real."""
                 periodo_pago = data.get("periodo_factura")
                 candidatos = ([data["_impaga_elegida"]] if data.get("_impaga_elegida")
                               else await _find_invoice_candidates(name_lower))
+                if not data.get("_impaga_elegida"):
+                    # Las deudas con personas solo se pagan si el agente las vinculó a
+                    # propósito: "le devolví 100 a Juan" no puede saldar la deuda con papá
+                    # porque los dos nombres digan "préstamo".
+                    candidatos = [c for c in candidatos if "Préstamo" not in (c.categories or [])]
                 # Si el comprobante dice de que periodo es, descartar las facturas de
                 # otro mes: si no, se marcaba pagada la unica impaga que hubiera,
                 # aunque el pago fuera de otro periodo.

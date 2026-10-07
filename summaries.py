@@ -429,33 +429,55 @@ def _misma_empresa(a: str, b: str) -> bool:
     return bool(sa and sb and sa.get("servicio") == sb.get("servicio"))
 
 
-async def _procesar_avisos_debito(avisos: list, now: datetime) -> None:
-    """Aviso de débito: anota en la factura impaga cuándo se debita.
-    Débito rechazado: avisa a Martin en el momento (no es descartable) y lo anota en la
-    factura para que no se dé por pagada. Así se vencieron julio y septiembre de IIBB
-    sin que nadie se enterara."""
+async def _procesar_avisos_debito(avisos: list, now: datetime) -> list[str]:
+    """Lo que decidió Martin para los débitos automáticos:
+    - Aviso de débito ("el 08/10 se te debitará"): la factura pasa a Pagada en el acto,
+      con la fecha del débito.
+    - Débito rechazado: la factura vuelve a Impaga (o queda Impaga), se anota el rechazo y
+      se le avisa en el momento (no es descartable). Después sigue apareciendo en el saludo
+      y en Tareas hasta que la pague. Así se vencieron julio y septiembre de IIBB sin aviso.
+    Devuelve las líneas para el saludo de la mañana."""
+    lineas = []
     if not avisos:
-        return
+        return lineas
     impagas = await _ds.get_impaga_facturas()
     for a in avisos:
         prov = a.get("provider") or "?"
         destino = next((i for i in impagas if _misma_empresa(prov, i.name)), None)
-        if a.get("tipo") == "aviso_debito" and a.get("fecha_debito"):
-            f = a["fecha_debito"]
-            if destino and "se debita el" not in (destino.notes or ""):
-                nota = (destino.notes or "") + f" · se debita el {f[8:10]}/{f[5:7]}/{f[:4]}"
-                await _ds.update_expense(destino.id, {"notes": nota.strip(" ·")})
+        if a.get("tipo") == "aviso_debito":
+            f = a.get("fecha_debito") or now.strftime("%Y-%m-%d")
+            if not destino:
+                print(f"[debitos] aviso de débito de {prov} sin factura impaga para marcar")
+                continue
+            fecha = f"{f[8:10]}/{f[5:7]}/{f[:4]}"
+            ok = await _ds.mark_finance_paid(
+                destino.id, destino.value_ars, None,
+                f"Pagada por débito automático el {fecha} (avisado por mail). Si llega un rechazo vuelve a Impaga.")
+            if ok:
+                await _ds.update_expense(destino.id, {"date": f[:10]})
+                impagas = [i for i in impagas if i.id != destino.id]
+                lineas.append(f"- ✅ {destino.name} ${destino.value_ars:,.0f} _(se debita el {fecha[:5]})_")
         elif a.get("tipo") == "debito_rechazado":
+            if not destino:
+                # Puede estar ya marcada Pagada por el aviso de débito: volverla a Impaga.
+                for tok in _norm_prov(prov):
+                    for h in await _ds.get_finance_history_by_provider(tok, limit=5):
+                        if "débito automático" in (h.notes or "").lower():
+                            destino = h
+                            break
+                    if destino:
+                        break
             detalle = a.get("nota") or ""
             monto = f" (${float(a['amount']):,.0f})" if a.get("amount") else ""
             msg = (f"⚠️ *Te rechazaron el débito automático de {prov}*{monto}."
                    + (f"\n{detalle}" if detalle else "")
                    + "\nHay que pagarlo a mano o va a quedar vencido.")
             if destino:
-                nota = (destino.notes or "") + f" · débito rechazado ({now.strftime('%d/%m')})"
-                await _ds.update_expense(destino.id, {"notes": nota.strip(" ·")})
-                msg += f"\nLa tengo como impaga: *{destino.name}*."
+                nota = (destino.notes or "") + f" · débito RECHAZADO ({now.strftime('%d/%m')})"
+                await _ds.update_expense(destino.id, {"estado": "Impaga", "notes": nota.strip(" ·")})
+                msg += f"\nLa volví a poner como impaga: *{destino.name}*. Te la recuerdo hasta que la pagues."
             await send_message(MY_NUMBER, msg)
+    return lineas
 
 
 async def _marcar_debitos_cumplidos(now: datetime) -> list[str]:
@@ -956,6 +978,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
 
     _idx_facturas = len(lines)
     mismatch_followups = []
+    debitos_avisados = []
     try:
         period_str = _mes_anio(now)
         # Leer las facturas ABRIENDO los PDF adjuntos (monto exacto + proveedor
@@ -965,7 +988,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
             mismatch_followups = []
             avisos_debito = [i for i in invoices if i.get("tipo") in ("aviso_debito", "debito_rechazado")]
             invoices = [i for i in invoices if i.get("tipo", "factura") == "factura"]
-            await _procesar_avisos_debito(avisos_debito, now)
+            debitos_avisados = await _procesar_avisos_debito(avisos_debito, now)
             for inv in invoices:
                 provider = inv.get("provider", "")
                 amount = float(inv.get("amount") or 0)
@@ -1027,7 +1050,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                                 "payload": {"provider": provider},
                             })
 
-        debitadas = await _marcar_debitos_cumplidos(now)
+        debitadas = debitos_avisados + await _marcar_debitos_cumplidos(now)
         try:
             await _ds.sincronizar_tareas_facturas()
         except Exception as e:
@@ -1059,7 +1082,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                 pass
         if debitadas:
             lines.append("")
-            lines.append("*Se debitaron solas:*")
+            lines.append("*Débitos automáticos (ya las doy por pagadas):*")
             lines.extend(debitadas)
         if impaga_lines:
             lines.append("")
