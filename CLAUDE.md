@@ -59,7 +59,20 @@ con invitados ni cumpleaños. Google los guarda 30 días en la papelera.
   Meta lo aplicara, se pierde el número del bot, no el WhatsApp personal de Martin.
 - Texto libre solo dentro de las **24 h** desde el último mensaje de Martin. Fuera de eso la API acepta el
   envío pero después avisa **error 131047** por webhook (`statuses`) y el mensaje no llega. Knot lo detecta,
-  lo guarda en `mensajes_no_entregados` y lo reenvía apenas Martin escribe. `send_message` devuelve bool.
+  lo guarda en `mensajes_no_entregados` y lo reenvía apenas Martin escribe (con la hora, solo si tiene
+  menos de un día). Los resúmenes se mandan con `send_message(..., descartable=True)` y **no** se reenvían:
+  Martin quiere los resúmenes del día en el día. `send_message` devuelve bool.
+
+## Facturas por mail (reescrito 07/10/2026)
+`get_invoices_from_gmail` lee **cada mail una sola vez** (ids en `user_prefs["facturas_mails_vistos"]`),
+uno por llamada con su PDF, hasta 15 por corrida (corre con el resumen diario). Arranca desde
+`user_prefs["facturas_desde"]` (lo anterior se revisó a mano). No son facturas: comprobantes de pago,
+resúmenes de tarjeta, CencoPay, cuotas de Mercado Pago (las compras ya están cargadas).
+`create_finance_invoice` da por repetida una factura solo por: mismo **número** (en Notes), mismo
+proveedor + **período** escrito en el nombre, o mismo monto (±1%) a **≤20 días**. Nunca por "monto parecido
+al último pago" (así se perdían todos los meses Calfibra y EPAS).
+**Una factura = un registro:** si un pago que reporta Martin corresponde a una Impaga, el pago pasa a la
+factura (monto, método, fecha del pago) y el gasto suelto se archiva (`_juntar_pago_con_factura`).
 
 ## Contexto que Knot usa para clasificar
 - **Rafael Lorenzo** = jefe de Martin → sus transferencias por MP = **Sueldo**.
@@ -71,7 +84,7 @@ con invitados ni cumpleaños. Google los guarda 30 días en la papelera.
 - Agosto–septiembre (bitácora §10): anti-duplicados persistente, gastos nacen `Pagada`, marcar pagada/impaga y cambiar fecha desde WhatsApp, marcar facturas pagadas **de verdad** (bug de `Method`), match de facturas por período, montos con punto de miles, recordatorios que miran agenda + web y se pueden deshacer, borrado seguro (un reclamo no es una orden), preguntar en vez de inventar ubicaciones.
 
 ## Hoja de ruta pendiente
-0. **Modelo "una factura = un registro"** (decidido por Martin): la factura es el único registro; Impaga no suma ni resta, Pagada resta; los pagos parciales se aclaran en nombre y notas. **Hecho:** Impaga no suma ni resta, ni en Knot (`get_financial_summary`) ni en Notion (fórmulas `Expenses` y `ARS`, gráfico por categoría). **Falta:** que al pagar una factura existente Knot la marque en vez de crear un gasto aparte (hoy genera doble conteo).
+0. **Modelo "una factura = un registro"** (decidido por Martin): la factura es el único registro; Impaga no suma ni resta, Pagada resta; los pagos parciales se aclaran en nombre y notas. **Hecho:** Impaga no suma ni resta, ni en Knot (`get_financial_summary`) ni en Notion (fórmulas `Expenses` y `ARS`, gráfico por categoría). **Hecho también** (07/10): al pagar una factura el pago se junta con ella y no queda un gasto aparte.
 1. **Aprendizaje de aliases**: cuando Martin aclara un proveedor nuevo, agregar el alias a la DB Servicios solo.
 2. **Recordatorios automáticos** de servicios con `Llega por mail = ☐` (EPAS, Monotributo) usando `Vence dia`.
 3. **Comparar facturas mes a mes** y explicar subas (ej: "¿por qué la luz salió cara?") — se apoya en la lectura de PDFs.
