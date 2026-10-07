@@ -43,6 +43,10 @@ async def load_user_config(wa_number: str):
             user_prefs["pending_invoice_confirmations"] = cfg.pending_invoice_confirmations
         if cfg.domain_profiles:
             user_prefs.setdefault("domain_profiles", {}).update(cfg.domain_profiles)
+        # Personas: si la columna está vacía, arranca con las que ya se conocen.
+        from state import PERSONAS_INICIALES
+        user_prefs["personas"] = cfg.personas or dict(PERSONAS_INICIALES)
+        user_prefs["knot_state"] = cfg.knot_state or {}
         user_prefs["_config_page_id"] = page_id
         if cfg.saved_lat is not None and cfg.saved_lon is not None:
             # Siempre guardar en user_prefs como fallback
@@ -95,6 +99,8 @@ async def save_user_config(wa_number: str):
             feature_hints=user_prefs.get("feature_hints", {}),
             generative_lists=user_prefs.get("generative_lists", {}),
             pending_invoice_confirmations=user_prefs.get("pending_invoice_confirmations", []),
+            personas=user_prefs.get("personas"),
+            knot_state=user_prefs.get("knot_state"),
         )
         await _ds.save_config(page_id, cfg)
     except Exception:

@@ -64,9 +64,9 @@ con invitados ni cumpleaños. Google los guarda 30 días en la papelera.
   Martin quiere los resúmenes del día en el día. `send_message` devuelve bool.
 
 ## Facturas por mail (reescrito 07/10/2026)
-`get_invoices_from_gmail` lee **cada mail una sola vez** (ids en `user_prefs["facturas_mails_vistos"]`),
-uno por llamada con su PDF, hasta 15 por corrida (corre con el resumen diario). Arranca desde
-`user_prefs["facturas_desde"]` (lo anterior se revisó a mano). No son facturas: comprobantes de pago,
+`get_invoices_from_gmail` lee **cada mail una sola vez**: busca los posteriores a `knot_state.facturas_desde_ms`
+(columna Estado Knot), uno por llamada con su PDF, hasta 15 por corrida (corre con el resumen diario), y si
+uno falla corta ahí para reintentarlo. Lo anterior al 07/10/2026 16:00 se revisó a mano. No son facturas: comprobantes de pago,
 resúmenes de tarjeta, CencoPay, cuotas de Mercado Pago (las compras ya están cargadas).
 `create_finance_invoice` da por repetida una factura solo por: mismo **número** (en Notes), mismo
 proveedor + **período** escrito en el nombre, o mismo monto (±1%) a **≤20 días**. Nunca por "monto parecido
@@ -83,6 +83,17 @@ pague. Respaldo: sin aviso, se da por pagada 2 días después del vencimiento/d�
 Las deudas con personas (categoría Préstamo) solo se saldan si el agente de gastos las vincula
 explícitamente (`paga_impaga_id`); nunca por coincidencia de palabras. Los préstamos: ingreso con categoría
 Préstamo + egreso Impaga "Devolver ..." (balance 0 al pagarlo).
+
+## Knot Config (la "base de mis datos" de Martin)
+DB `⚙️ Knot Config` (data source `97780908-47dc-41b1-82d7-ff1fe2021465`), una fila por usuario: perfiles por
+dominio, lugares, comercios, proveedores, etc. Columnas agregadas el 07/10/2026:
+- **Personas** (JSON): quién es quién (`{"Fabian": {"relacion": "papá", "le_dice": [...]}}`). Si está vacía
+  arranca con `PERSONAS_INICIALES` (state.py). La ven el agente de entrada y el de gastos (`personas_ctx()`).
+  Cuando Martin dice quién es alguien, el agente de entrada devuelve `"persona"` y se guarda (`_guardar_persona`).
+- **Estado Knot** (JSON, interno): `facturas_desde_ms` = fecha del último mail de factura leído.
+`save_user_config` solo guarda los campos de `UserConfig`: **todo estado que tenga que sobrevivir a un
+reinicio de Render tiene que estar ahí** (antes `facturas_mails_vistos` se perdía en cada deploy).
+El conector de Notion de Claude Code rechaza escribir texto que empiece con "{" en esas columnas.
 
 ## Contexto que Knot usa para clasificar
 - **Rafael Lorenzo** = jefe de Martin → sus transferencias por MP = **Sueldo**.

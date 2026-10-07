@@ -38,17 +38,29 @@ DAILY_SUMMARY_HOUR = int(os.environ.get("DAILY_SUMMARY_HOUR", "8"))
 
 # ── Modelos de Claude (único punto de cambio cuando Anthropic retira uno) ──────
 # Se pueden overridear por env var sin tocar código.
-# Quién es quién para Martin. Los agentes no tenían esto en ningún lado: "le pagué a
-# Fabian" y "le devolví a mi viejo" son la misma persona.
-PERSONAS_CONOCIDAS = {
-    "Fabian (Hector Fabian Gentili)": "papá de Martin; también le dice 'mi viejo'",
-    "Rafael Lorenzo": "jefe de Martin; sus transferencias son Sueldo",
+# Quién es quién para Martin. Vive en la columna "Personas" de Knot Config (la lee
+# load_user_config); estas son las que se cargan si la columna está vacía.
+PERSONAS_INICIALES = {
+    "Fabian": {"relacion": "papá", "nombre_completo": "Hector Fabian Gentili", "le_dice": ["papá", "mi viejo"]},
+    "Rafael Lorenzo": {"relacion": "jefe", "notas": "sus transferencias son Sueldo"},
 }
 
 
 def personas_ctx() -> str:
-    return ("\nPERSONAS QUE CONOCE MARTIN:\n"
-            + "\n".join(f"  - {k}: {v}" for k, v in PERSONAS_CONOCIDAS.items()) + "\n")
+    personas = user_prefs.get("personas") or PERSONAS_INICIALES
+    lineas = []
+    for nombre, d in personas.items():
+        d = d if isinstance(d, dict) else {"relacion": str(d)}
+        extra = []
+        if d.get("nombre_completo"):
+            extra.append(d["nombre_completo"])
+        if d.get("le_dice"):
+            extra.append("le dice " + " / ".join(f"'{x}'" for x in d["le_dice"]))
+        if d.get("notas"):
+            extra.append(d["notas"])
+        lineas.append(f"  - {nombre}: {d.get('relacion', '?')}" + (f" ({'; '.join(extra)})" if extra else ""))
+    return ("\nPERSONAS QUE CONOCE MARTIN (si nombra a alguien que no está acá en algo de plata o "
+            "importante, preguntale quién es):\n" + "\n".join(lineas) + "\n")
 
 
 SONNET_MODEL = os.environ.get("SONNET_MODEL", "claude-sonnet-4-6")

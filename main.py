@@ -2599,7 +2599,11 @@ Reglas:
 
 Respondé SOLO un JSON, sin markdown:
 {{"modulo": "NOMBRE_DEL_MODULO" o null, "mensaje": "texto para el módulo", "respuesta": "texto para Martin" o null,
- "imagen": "si mandó imagen: qué muestra, en una línea (queda en la conversación); si no, null"}}"""
+ "imagen": "si mandó imagen: qué muestra, en una línea (queda en la conversación); si no, null",
+ "persona": {{"nombre": "...", "relacion": "...", "nombre_completo": "..." o null, "le_dice": ["..."] o []}} o null}}
+"persona": SOLO si en este mensaje Martin dice explícitamente quién es alguien ("Juan es mi primo",
+"Anita es mi novia", "Claudia es mi mamá", o te contesta quién es alguien que preguntaste). Se guarda en su
+lista de personas. Nunca lo deduzcas vos. Si además no pide nada más, contestá en "respuesta" confirmando."""
     contenido = (f"Conversación reciente:\n{_conversacion_reciente(phone)}\n\n"
                  f"Mensaje nuevo de Martin: {text or '(manda una imagen sin texto)'}"
                  + (" [viene con imagen adjunta]" if has_image else ""))
@@ -2616,8 +2620,29 @@ Respondé SOLO un JSON, sin markdown:
         raise ValueError(f"el agente de entrada no devolvio JSON: {crudo[:120]}")
     datos = json.loads(crudo[ini:fin + 1])
     modulo = (datos.get("modulo") or "").strip().upper() or None
+    if isinstance(datos.get("persona"), dict) and (datos["persona"].get("nombre") or "").strip():
+        await _guardar_persona(datos["persona"])
     return {"modulo": modulo, "mensaje": datos.get("mensaje") or text, "respuesta": datos.get("respuesta"),
             "imagen": datos.get("imagen") if has_image else None}
+
+
+async def _guardar_persona(p: dict) -> None:
+    """Agrega o actualiza a alguien en la columna Personas de la config."""
+    nombre = p["nombre"].strip()
+    personas = user_prefs.setdefault("personas", {})
+    actual = personas.get(nombre) if isinstance(personas.get(nombre), dict) else {}
+    nuevo = dict(actual)
+    for k in ("relacion", "nombre_completo", "notas"):
+        if p.get(k):
+            nuevo[k] = p[k]
+    if p.get("le_dice"):
+        nuevo["le_dice"] = sorted(set((actual.get("le_dice") or []) + list(p["le_dice"])))
+    personas[nombre] = nuevo
+    print(f"[personas] {nombre}: {nuevo}")
+    try:
+        await save_user_config(MY_NUMBER)
+    except Exception as e:
+        print(f"[personas] no pude guardar: {e}")
 
 
 async def _decidir_ruta(phone: str, text: str, has_image: bool, history: list, image_b64=None,

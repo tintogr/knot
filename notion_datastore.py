@@ -171,6 +171,8 @@ except ImportError:
         feature_hints: dict = None  # {trigger_id: {first_suggested_at, accepted, dismissed_count, disabled}}
         generative_lists: dict = None  # {name: db_id}
         pending_invoice_confirmations: list = None  # [{id, situation, provider, ...}]
+        personas: dict = None       # {"Fabian": {"relacion": "papá", "le_dice": [...]}}
+        knot_state: dict = None     # estado interno: {"facturas_desde_ms": ...}
 
     @dataclass
     class PaymentMethod:
@@ -220,7 +222,23 @@ def _get_title(props: dict, field: str = "Name") -> str:
 def _get_text(props: dict, field: str) -> str:
     """Extract text from a rich_text field."""
     rt = props.get(field, {}).get("rich_text", [])
-    return rt[0]["plain_text"] if rt else ""
+    # Un texto de más de 2000 caracteres viene partido en varios fragmentos.
+    return "".join(r.get("plain_text", "") for r in rt) if rt else ""
+
+
+def _rich_text_largo(texto: str) -> list:
+    """rich_text en fragmentos de 2000 caracteres (el límite de Notion por fragmento)."""
+    texto = texto or ""
+    return [{"text": {"content": texto[i:i + 2000]}} for i in range(0, len(texto), 2000)][:100] or \
+        [{"text": {"content": ""}}]
+
+
+def _load_json_dict(props: dict, field: str) -> dict:
+    try:
+        v = json.loads(_get_text(props, field) or "{}")
+        return v if isinstance(v, dict) else {}
+    except Exception:
+        return {}
 
 
 def _get_number(props: dict, field: str) -> float | None:
@@ -2503,6 +2521,8 @@ class NotionDataStore:
             feature_hints=feature_hints or None,
             generative_lists=generative_lists or None,
             pending_invoice_confirmations=_load_json_list(props, "Pending Invoice Confirmations"),
+            personas=_load_json_dict(props, "Personas"),
+            knot_state=_load_json_dict(props, "Estado Knot"),
         )
         return config, page["id"]
 
@@ -2545,10 +2565,22 @@ class NotionDataStore:
         if config.resumen_nocturno_hour is not None:
             props["Resumen Nocturno Hour"] = {"number": config.resumen_nocturno_hour}
 
+        # Columnas agregadas en oct 2026: van aparte para que, si faltaran en otra
+        # copia de la base, no hagan fallar el guardado de todo lo demás.
+        extra = {}
+        if config.personas is not None:
+            extra["Personas"] = {"rich_text": _rich_text_largo(json.dumps(config.personas, ensure_ascii=False))}
+        if config.knot_state is not None:
+            extra["Estado Knot"] = {"rich_text": _rich_text_largo(json.dumps(config.knot_state, ensure_ascii=False))}
         try:
             await self._update_page(page_id, props)
         except Exception:
             return False
+        if extra:
+            try:
+                await self._update_page(page_id, extra)
+            except Exception as e:
+                print(f"[save_config] no pude guardar Personas/Estado Knot: {str(e)[:150]}")
         if config.last_summary_date:
             try:
                 await self._update_page(page_id, {"Last Summary Date": {"rich_text": [{"text": {"content": config.last_summary_date}}]}})

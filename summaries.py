@@ -367,8 +367,10 @@ def _walk_email_parts(parts):
         yield from _walk_email_parts(p.get("parts"))
 
 
-# Mails de facturas ya leidos (ids de Gmail). Cada mail se lee UNA vez.
+# Mails de facturas ya leidos (ids de Gmail, caché de la sesión). Cada mail se lee UNA vez.
 _MAX_VISTOS = 400
+# Lo anterior a esto (07/10/2026 16:00 hora argentina) se revisó a mano.
+_FACTURAS_DESDE_INICIAL_MS = 1791399600000
 # Mails nuevos que se leen por corrida: lo que sobra queda para la próxima.
 _MAX_POR_CORRIDA = 15
 
@@ -513,23 +515,16 @@ async def get_invoices_from_gmail(now: datetime) -> list[dict]:
 
     Antes se miraban los 12 mails más recientes de 40 días y se abrían 5 PDF en una
     sola llamada: con bancos y Mercado Pago de por medio, las facturas reales quedaban
-    afuera. Ahora se recorren todos los mails nuevos (por id de Gmail, guardado en la
-    config) y se lee cada uno por separado, con su PDF. La primera vez arranca desde
-    ese momento: lo anterior se revisó a mano.
+    afuera. Ahora se recorren todos los mails posteriores al último leído (su fecha se
+    guarda en "Estado Knot" de la config) y se lee cada uno por separado, con su PDF.
+    Si uno falla, se corta ahí para reintentarlo la próxima vez.
     """
     from config import save_user_config
-    vistos = list(user_prefs.get("facturas_mails_vistos") or [])
-    vistos_set = set(vistos)
-    desde = user_prefs.get("facturas_desde")
-    if not desde:
-        desde = now.strftime("%Y-%m-%d")
-        user_prefs["facturas_desde"] = desde
-        await save_user_config(MY_NUMBER)
-    try:
-        desde_ts = datetime.strptime(desde, "%Y-%m-%d").timestamp() * 1000 - 3 * 3600 * 1000
-    except ValueError:
-        desde_ts = 0
-
+    # Hasta dónde se leyó: fecha (ms) del último mail procesado, guardada en la columna
+    # "Estado Knot" de la config para que sobreviva a los reinicios de Render.
+    estado = user_prefs.setdefault("knot_state", {})
+    desde_ts = int(estado.get("facturas_desde_ms") or _FACTURAS_DESDE_INICIAL_MS)
+    vistos_set = set(user_prefs.get("facturas_mails_vistos") or [])  # caché de esta sesión
     providers = user_prefs.get("service_providers", {})
     nombres = [v for v in providers.values() if v]
     for svc in getattr(_ds, "_services", []) or []:
@@ -537,7 +532,7 @@ async def get_invoices_from_gmail(now: datetime) -> list[dict]:
             nombres.append(svc["empresa"].split(" (")[0])
     nombres = list(dict.fromkeys(n for n in nombres if n))[:15]
     terminos = " OR ".join(f'"{n}"' for n in nombres)
-    base_query = ("newer_than:45d -category:promotions -category:social "
+    base_query = (f"after:{desde_ts // 1000 - 60} -category:promotions -category:social "
                   f"(factura OR boleta OR vencimiento OR liquidacion OR expensas OR \"aviso de pago\" "
                   f"OR \"debito automatico\" OR \"débito automático\""
                   f"{' OR ' + terminos if terminos else ''})")
@@ -547,6 +542,7 @@ async def get_invoices_from_gmail(now: datetime) -> list[dict]:
         return []
     facturas = []
     nuevos_vistos = []
+    nuevo_desde = desde_ts
     try:
         async with httpx.AsyncClient(timeout=30) as http:
             headers = {"Authorization": f"Bearer {access_token}"}
@@ -582,10 +578,11 @@ async def get_invoices_from_gmail(now: datetime) -> list[dict]:
                 full_r = await http.get(f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{msg_id}",
                                         headers=headers, params={"format": "full"})
                 if full_r.status_code != 200:
-                    continue  # no se marca: se reintenta la próxima
+                    break  # se corta acá para no saltearlo: se reintenta la próxima
                 body = full_r.json()
-                if int(body.get("internalDate") or 0) < desde_ts:
-                    nuevos_vistos.append(msg_id)  # anterior al arranque: ya se revisó a mano
+                _ts = int(body.get("internalDate") or 0)
+                if _ts <= desde_ts:
+                    nuevos_vistos.append(msg_id)  # ya leído en una corrida anterior
                     continue
                 leidos += 1
                 payload = body.get("payload", {})
@@ -622,8 +619,9 @@ async def get_invoices_from_gmail(now: datetime) -> list[dict]:
                     data = json.loads(raw)
                 except Exception as e:
                     print(f"[facturas] no pude leer el mail {msg_id}: {type(e).__name__}: {e}")
-                    continue  # no se marca: se reintenta
+                    break  # no se avanza: se reintenta la próxima
                 nuevos_vistos.append(msg_id)
+                nuevo_desde = max(nuevo_desde, _ts)
                 fecha_mail = datetime.fromtimestamp(int(body.get("internalDate") or 0) / 1000 - 3 * 3600)
                 for d in data if isinstance(data, list) else []:
                     if isinstance(d, dict) and d.get("provider"):
@@ -634,11 +632,13 @@ async def get_invoices_from_gmail(now: datetime) -> list[dict]:
         print(f"[facturas] error: {type(_e).__name__}: {_e}")
     finally:
         if nuevos_vistos:
-            user_prefs["facturas_mails_vistos"] = (vistos + nuevos_vistos)[-_MAX_VISTOS:]
+            user_prefs["facturas_mails_vistos"] = list(vistos_set | set(nuevos_vistos))[-_MAX_VISTOS:]
+        if nuevo_desde > desde_ts or not estado.get("facturas_desde_ms"):
+            estado["facturas_desde_ms"] = nuevo_desde
             try:
                 await save_user_config(MY_NUMBER)
             except Exception as e:
-                print(f"[facturas] no pude guardar los mails vistos: {e}")
+                print(f"[facturas] no pude guardar hasta dónde leí: {e}")
     return facturas
 
 
