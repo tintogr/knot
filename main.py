@@ -7976,6 +7976,12 @@ async def _run_once_migrations():
             print(f"[Migration] {n} registros sin categoria actualizados a Recurrente")
     except Exception as e:
         print(f"[Migration] Error: {e}")
+    try:
+        n = await _ds.migrate_empty_estado_to_pagada()
+        if n:
+            print(f"[Migration] {n} movimientos sin Estado marcados como Pagada")
+    except Exception as e:
+        print(f"[Migration estado] Error: {e}")
 
 
 _OSM_DAY = {"Mo": 0, "Tu": 1, "We": 2, "Th": 3, "Fr": 4, "Sa": 5, "Su": 6}

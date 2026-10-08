@@ -53,6 +53,10 @@ PERSONAS_INICIALES = {
     "Fer": {"relacion": "amigo"},
     "Rafael Lorenzo": {"relacion": "jefe", "notas": "sus transferencias son Sueldo"},
     "Ruth": {"relacion": "cliente"},
+    "Tincho": {"relacion": "amigo y ex compañero de trabajo",
+               "notas": "comparten Render y Photoshop (pagan a medias); vendieron pizzas juntos en 2024; "
+                        "trabajaron juntos en LBL hasta agosto 2026"},
+    "Olivia": {"relacion": "su gata"},
 }
 
 

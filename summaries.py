@@ -1013,6 +1013,9 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                 # ahora en create_finance_invoice: número de factura, período, o el mismo
                 # monto pagado hace pocos días.
                 _nota = inv.get("nota")
+                _svc = _ds.service_of(provider)
+                if _svc and _svc.get("debito_automatico"):
+                    inv["debito_automatico"] = True
                 if inv.get("debito_automatico"):
                     _nota = ("débito automático" + (f" · {_nota}" if _nota else ""))
                 ok, page_id = await _ds.create_finance_invoice(

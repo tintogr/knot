@@ -525,6 +525,7 @@ class NotionDataStore:
                 "frecuencia": _sel("Frecuencia"),
                 "vence_dia": props.get("Vence dia", {}).get("number"),
                 "llega_por_mail": bool(props.get("Llega por mail", {}).get("checkbox")),
+                "debito_automatico": bool(props.get("Débito automático", {}).get("checkbox")),
                 "activo": bool(props.get("Activo", {}).get("checkbox")),
             })
         self._services = out
@@ -953,6 +954,34 @@ class NotionDataStore:
             await self._update_page(page_id, {"Uses": {"number": current_uses + 1}})
         except Exception:
             pass
+
+    async def migrate_empty_estado_to_pagada(self) -> int:
+        """Los movimientos viejos (antes de que existiera Estado) quedaron vacíos: Knot
+        ya los trataba como pagados, ahora también figuran así en Notion. Solo toca los
+        vacíos, así que correrlo de nuevo no cambia nada."""
+        updated = 0
+        for _ in range(20):  # tope por si algo no se guardara y el filtro devolviera siempre lo mismo
+            r = await self._http.post(
+                f"{NOTION_API}/databases/{self._db('finances')}/query",
+                headers=self._headers_cache,
+                json={"page_size": 100, "filter": {"property": "Estado", "select": {"is_empty": True}}},
+            )
+            if r.status_code != 200:
+                print(f"[Migration estado] {r.status_code}: {r.text[:150]}")
+                break
+            data = r.json()
+            pages = data.get("results", [])
+            for page in pages:
+                try:
+                    await self._update_page(page["id"], {"Estado": {"select": {"name": "Pagada"}}})
+                    updated += 1
+                except Exception as e:
+                    print(f"[Migration estado] {page['id']}: {str(e)[:120]}")
+                    return updated
+            # Siempre se vuelve a pedir la primera página: las ya marcadas dejan de cumplir el filtro.
+            if not pages or not data.get("has_more") and len(pages) < 100:
+                break
+        return updated
 
     async def migrate_empty_categories_to_recurrente(self) -> int:
         """One-time migration: set Category=Recurrente on all Finance records with empty Category."""
