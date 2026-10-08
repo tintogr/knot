@@ -7671,15 +7671,25 @@ async def _cron_job_inner():
     _curr_min = now.hour * 60 + now.minute
     _last_daily = _last_summary_sent.get("daily")
     _sent_today = bool(_last_daily and _last_daily.date() == now.date())
-    # Also check persisted date from Notion to survive restarts
+    # Fecha del último saludo guardada en "Estado Knot" (sobrevive a los reinicios de
+    # Render). La columna "Last Summary Date" nunca se llegaba a guardar.
     if not _sent_today:
-        _persisted_date = user_prefs.get("_last_summary_date")
-        if _persisted_date == now.date().isoformat():
+        if (user_prefs.get("knot_state") or {}).get("ultimo_resumen") == now.date().isoformat():
             _sent_today = True
-    if 0 <= (_curr_min - _sched_min) <= 3 and not _sent_today:
-        # Mark BEFORE sending to prevent concurrent double-sends
+    # Hasta 3 horas tarde: antes la ventana era de 3 minutos y si Knot se estaba
+    # reiniciando justo a esa hora, ese día no corría nada (ni el saludo, ni la lectura
+    # de facturas, ni los débitos, ni las tareas).
+    if 0 <= (_curr_min - _sched_min) <= 180 and not _sent_today:
+        # Marcar ANTES de mandar, y guardarlo, para no mandarlo dos veces
         _last_summary_sent["daily"] = now
         user_prefs["_last_summary_date"] = now.date().isoformat()
+        user_prefs.setdefault("knot_state", {})["ultimo_resumen"] = now.date().isoformat()
+        try:
+            await save_user_config(MY_NUMBER)
+        except Exception as _e:
+            print(f"[cron] no pude guardar la fecha del saludo: {_e}")
+        if (user_prefs.get("knot_state") or {}).get("ultimo_resumen") != now.date().isoformat():
+            print("[cron] no quedó guardada la fecha del saludo")
         try:
             access_token_summary = await get_gcal_access_token()
             async with httpx.AsyncClient() as http_summary:
