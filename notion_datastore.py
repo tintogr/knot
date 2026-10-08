@@ -983,6 +983,33 @@ class NotionDataStore:
                 break
         return updated
 
+    async def migrate_store_super_a_supermercado(self) -> int:
+        """Shopping tenía dos comercios para lo mismo: 'Super' y 'Supermercado'. Queda
+        solo 'Supermercado'. Solo toca los que tienen 'Super'."""
+        updated = 0
+        for _ in range(10):
+            r = await self._http.post(
+                f"{NOTION_API}/databases/{self._db('shopping')}/query",
+                headers=self._headers_cache,
+                json={"page_size": 100, "filter": {"property": "Store", "multi_select": {"contains": "Super"}}},
+            )
+            if r.status_code != 200:
+                print(f"[Migration store] {r.status_code}: {r.text[:150]}")
+                break
+            pages = r.json().get("results", [])
+            if not pages:
+                break
+            for page in pages:
+                tiendas = [o.get("name") for o in page.get("properties", {}).get("Store", {}).get("multi_select", [])]
+                nuevas = list(dict.fromkeys("Supermercado" if t == "Super" else t for t in tiendas))
+                try:
+                    await self._update_page(page["id"], {"Store": {"multi_select": [{"name": t} for t in nuevas]}})
+                    updated += 1
+                except Exception as e:
+                    print(f"[Migration store] {page['id']}: {str(e)[:120]}")
+                    return updated
+        return updated
+
     async def migrate_empty_categories_to_recurrente(self) -> int:
         """One-time migration: set Category=Recurrente on all Finance records with empty Category."""
         updated = 0

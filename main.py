@@ -566,7 +566,7 @@ async def check_shopping_proximity():
         return None
     # Mapeo de tipos de tienda Matrics -> tipos OSM
     store_type_map = {
-        "Super":      ["supermarket", "convenience"],
+        "Supermercado": ["supermarket", "convenience"],
         "Panaderia":  ["bakery"],
         "Verduleria": ["greengrocer", "farm"],
         "Farmacia":   ["supermarket"],  # pharmacy se busca via amenity siempre
@@ -7982,6 +7982,12 @@ async def _run_once_migrations():
             print(f"[Migration] {n} movimientos sin Estado marcados como Pagada")
     except Exception as e:
         print(f"[Migration estado] Error: {e}")
+    try:
+        n = await _ds.migrate_store_super_a_supermercado()
+        if n:
+            print(f"[Migration] {n} productos de Shopping pasaron de 'Super' a 'Supermercado'")
+    except Exception as e:
+        print(f"[Migration store] Error: {e}")
 
 
 _OSM_DAY = {"Mo": 0, "Tu": 1, "We": 2, "Th": 3, "Fr": 4, "Sa": 5, "Su": 6}
@@ -8417,7 +8423,7 @@ SHOPPING_CATEGORIES = ["Frutas y verduras", "Enlatado", "Infusion", "Lacteo", "E
                        "Limpieza", "Panificado", "Herramienta", "Construccion", "Higiene",
                        "Electronica", "Carne", "Galletitas", "Alcohol", "Bebida", "Fiambre",
                        "Grano", "Comida", "Cosmetica"]
-SHOPPING_STORES    = ["Super", "Panaderia", "Verduleria", "Dietetica", "Farmacia", "Drogueria", "Ferreteria"]
+SHOPPING_STORES    = ["Supermercado", "Panaderia", "Verduleria", "Dietetica", "Farmacia", "Drogueria", "Ferreteria"]
 SHOPPING_FREQUENCY = ["Often", "Monthly", "Annual", "One time"]
 
 async def get_ingredients_and_enrich(recipe_name: str, recipe_text: str = None) -> tuple[list[dict], bool]:
