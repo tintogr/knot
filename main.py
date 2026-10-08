@@ -1409,6 +1409,17 @@ Emoji: elegi el mas especifico segun el contexto real."""
     # Pagos que el modelo vinculó a una factura/deuda y préstamos recibidos.
     _juntados = {}      # page_id del gasto -> línea para la respuesta
     _extra_lines = []
+    # Servicios que no se pagan todos los meses: correr su "Pagado hasta".
+    for _pid, _d, _ok in created_entries:
+        if _ok and _pid and "EGRESO" in (_d.get("in_out") or "").upper():
+            try:
+                _hasta = await _ds.registrar_pago_servicio(_d.get("name") or "", _d.get("date") or now.strftime("%Y-%m-%d"))
+                if _hasta:
+                    _svc = _ds.service_of(_d.get("name") or "") or {}
+                    _extra_lines.append(f"📅 Anoté *{_svc.get('servicio', _d.get('name'))}* pago hasta el "
+                                        f"{_hasta[8:10]}/{_hasta[5:7]}/{_hasta[:4]}. Te aviso una semana antes.")
+            except Exception as _e:
+                print(f"[servicios recurrentes] no pude actualizar 'pagado hasta': {_e}")
     _impagas_por_id = {i.id.replace("-", ""): i for i in _impagas}
     for _pid, _d, _ok in created_entries:
         if not (_ok and _pid):

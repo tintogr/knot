@@ -1058,6 +1058,11 @@ async def send_daily_summary(http, access_token: str, now: datetime):
             await _ds.sincronizar_tareas_facturas()
         except Exception as e:
             print(f"[tareas facturas] {type(e).__name__}: {e}")
+        recurrentes = {}
+        try:
+            recurrentes = await _ds.sincronizar_servicios_recurrentes(now.date())
+        except Exception as e:
+            print(f"[servicios recurrentes] {type(e).__name__}: {e}")
         impagas = await _ds.get_impaga_facturas()
         impaga_lines = []
         for imp in (impagas or []):
@@ -1087,6 +1092,11 @@ async def send_daily_summary(http, access_token: str, now: datetime):
             lines.append("")
             lines.append("*Débitos automáticos (ya las doy por pagadas):*")
             lines.extend(debitadas)
+        for _nom, _vence in sorted(recurrentes.items(), key=lambda x: x[1]):
+            _dv = (_vence - now.date()).days
+            _cuando = (f"⚠️ _venció el {_vence.strftime('%d/%m')}_" if _dv < 0 else "⚠️ _vence hoy_" if _dv == 0
+                       else f"_vence {_dia_corto(_vence)} {_vence.strftime('%d/%m')}_")
+            impaga_lines.append(f"- {_nom} {_cuando}")
         if impaga_lines:
             lines.append("")
             lines.append("*Facturas pendientes:*")

@@ -527,9 +527,110 @@ class NotionDataStore:
                 "llega_por_mail": bool(props.get("Llega por mail", {}).get("checkbox")),
                 "debito_automatico": bool(props.get("Débito automático", {}).get("checkbox")),
                 "activo": bool(props.get("Activo", {}).get("checkbox")),
+                "id": p.get("id"),
+                "pagado_hasta": ((props.get("Pagado hasta", {}) or {}).get("date") or {}).get("start"),
             })
         self._services = out
         return out
+
+    # ── Servicios que se repiten (trimestrales, semestrales, sin mail) ─────────
+    MESES_FRECUENCIA = {"Mensual": 1, "Bimestral": 2, "Trimestral": 3, "Semestral": 6, "Anual": 12}
+
+    @staticmethod
+    def _sumar_meses(d, n: int):
+        import calendar
+        m = d.month - 1 + n
+        y, m = d.year + m // 12, m % 12 + 1
+        return d.replace(year=y, month=m, day=min(d.day, calendar.monthrange(y, m)[1]))
+
+    async def registrar_pago_servicio(self, texto: str, fecha_pago: str) -> str | None:
+        """Si el pago es de un servicio que no se paga todos los meses (EPAS trimestral,
+        Real-Debrid semestral), corre su "Pagado hasta" un período. Devuelve la nueva
+        fecha (YYYY-MM-DD) o None si no corresponde."""
+        from datetime import date as _date
+        svc = self.service_of(texto or "")
+        meses = self.MESES_FRECUENCIA.get((svc or {}).get("frecuencia") or "")
+        if not svc or not meses or meses == 1 or not svc.get("id"):
+            return None
+        try:
+            pago = _date.fromisoformat(fecha_pago[:10])
+        except (TypeError, ValueError):
+            return None
+        base = pago
+        if svc.get("pagado_hasta"):
+            try:
+                base = max(pago, _date.fromisoformat(svc["pagado_hasta"][:10]))
+            except ValueError:
+                pass
+        nueva = self._sumar_meses(base, meses).isoformat()
+        await self._update_page(svc["id"], {"Pagado hasta": {"date": {"start": nueva}}})
+        svc["pagado_hasta"] = nueva
+        return nueva
+
+    async def sincronizar_servicios_recurrentes(self, hoy) -> dict:
+        """Tareas "🔁 Pagar ..." para lo que no llega como factura todos los meses:
+        - servicios trimestrales/semestrales/anuales: una semana antes de que se termine
+          su "Pagado hasta";
+        - mensuales que no llegan por mail ni se debitan (Monotributo): desde 5 días antes
+          del vencimiento si este mes no hay un pago cargado.
+        La tarea se archiva sola cuando el servicio queda pago. Devuelve {nombre: vencimiento}
+        de los que hay que pagar (para el saludo de la mañana)."""
+        from datetime import date as _date, timedelta as _td
+        if not self._services:
+            await self.load_services()
+        tareas = await self._query_db("tasks", filter_obj={"and": [
+            {"property": "Category", "select": {"equals": "Finanzas"}},
+            {"property": "Source", "select": {"equals": "Knot"}},
+            {"property": "Status", "status": {"does_not_equal": "Listo"}},
+        ]}, max_items=200)
+        abiertas = {}
+        for t in tareas:
+            nombre = _get_title(t.get("properties", {}))
+            if nombre.startswith("\U0001f501 Pagar"):
+                abiertas[nombre] = t["id"]
+        vigentes = {}  # nombre de tarea -> fecha de vencimiento
+        for svc in self._services:
+            if not svc.get("activo"):
+                continue
+            meses = self.MESES_FRECUENCIA.get(svc.get("frecuencia") or "")
+            nombre = f"\U0001f501 Pagar {svc['servicio']}" + (f" ({svc['empresa']})" if svc.get("empresa") else "")
+            if meses and meses > 1 and svc.get("pagado_hasta"):
+                try:
+                    hasta = _date.fromisoformat(svc["pagado_hasta"][:10])
+                except ValueError:
+                    continue
+                if hoy >= hasta - _td(days=7):
+                    vigentes[nombre] = hasta
+            elif meses == 1 and not svc.get("llega_por_mail") and not svc.get("debito_automatico") \
+                    and svc.get("vence_dia"):
+                import calendar
+                dia = min(int(svc["vence_dia"]), calendar.monthrange(hoy.year, hoy.month)[1])
+                vence = hoy.replace(day=dia)
+                if hoy < vence - _td(days=5):
+                    continue
+                pagos = []
+                for tok in [svc["servicio"]] + [a for a in svc.get("aliases", []) if len(a) >= 4][:3]:
+                    pagos += await self.get_finance_history_by_provider(tok, limit=5)
+                pagado_este_mes = any(
+                    str(getattr(e, "date", "") or "")[:7] == hoy.strftime("%Y-%m") for e in pagos)
+                if not pagado_este_mes:
+                    vigentes[nombre] = vence
+        creadas = archivadas = 0
+        for nombre, vence in vigentes.items():
+            if nombre in abiertas:
+                continue
+            await self.create_task({
+                "name": nombre, "category": "Finanzas", "source": "Knot",
+                "due_date": vence.isoformat(), "priority": "Media",
+                "notes": "Recordatorio de servicio (no llega factura). Se borra solo cuando lo pagás.",
+            })
+            creadas += 1
+        for nombre, tid in abiertas.items():
+            if nombre not in vigentes and await self._archive_page(tid):
+                archivadas += 1
+        if creadas or archivadas:
+            print(f"[servicios recurrentes] {creadas} tareas creadas, {archivadas} archivadas")
+        return vigentes
 
     def service_of(self, text: str):
         """Devuelve el servicio (dict) cuyo alias/empresa/nombre aparece en `text`,

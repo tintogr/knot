@@ -84,6 +84,13 @@ Las deudas con personas (categoría Préstamo) solo se saldan si el agente de ga
 explícitamente (`paga_impaga_id`); nunca por coincidencia de palabras. Los préstamos: ingreso con categoría
 Préstamo + egreso Impaga "Devolver ..." (balance 0 al pagarlo).
 
+**Servicios que se repiten** (07-08/10/2026): al registrar un pago de un servicio no mensual (EPAS trimestral,
+Real-Debrid semestral) `registrar_pago_servicio` corre su **Pagado hasta** un período. Cada mañana
+`sincronizar_servicios_recurrentes` crea tareas **"🔁 Pagar ..."** una semana antes de que termine el
+"Pagado hasta", y para mensuales sin mail ni débito (Monotributo) desde 5 días antes del vencimiento si no hay
+pago ese mes; las archiva cuando quedan pagos. Aparecen en el saludo junto a las facturas.
+Medio de pago: Martin **no** quiere preguntas a la noche; se pregunta en el momento o se deduce del texto/comprobante.
+
 ## Knot Config (la "base de mis datos" de Martin)
 DB `⚙️ Knot Config` (data source `97780908-47dc-41b1-82d7-ff1fe2021465`), una fila por usuario: perfiles por
 dominio, lugares, comercios, proveedores, etc. Columnas agregadas el 07/10/2026:
