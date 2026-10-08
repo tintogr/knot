@@ -1894,7 +1894,7 @@ async def create_notion_entry(data: dict, exchange_rate: float) -> tuple[bool, s
             "payment_method_id": matched_pm.id if matched_pm else None,
             # Un gasto que el usuario reporta ya lo pagó. Las deudas/facturas pendientes
             # nacen Impaga por otro camino (create_finance_invoice).
-            "estado":           "Pagada" if "EGRESO" in (data.get("in_out") or "").upper() else None,
+            "estado":           "Pagada",  # ingresos también: nada queda con Estado vacío
         })
         _recent_creations[_dup_key] = _now
         last_touched[MY_NUMBER] = {"page_id": entry.id, "name": data["name"]}
