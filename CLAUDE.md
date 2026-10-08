@@ -123,3 +123,8 @@ El conector de Notion de Claude Code rechaza escribir texto que empiece con "{" 
 - **Montos argentinos**: punto = miles, coma = decimales. Especificarlo siempre al pedirle un número al modelo.
 - Conector de Notion de Claude Code: **no puede** borrar ni archivar páginas (pasarle a Martin el link) ni **leer** fórmulas (`formulaCode://` no se puede fetchear). **Solución:** al arrancar, Knot copia el texto de las fórmulas de Finanzas a un bloque de código en su página de config (`_ds.publicar_formulas`, página `32f91eb6-2a81-8149-a220-ca06efece020`); leer ese bloque antes de editar una fórmula. **Sí puede** editar esquema y fórmulas (`notion-update-data-source` con `ALTER COLUMN ... SET FORMULA(...)`) y filtros/config de vistas (`notion-update-view`). Verificar antes de afirmar que algo no se puede.
 - Martin prefiere que Knot **pregunte cuando no está seguro** antes que inventar o actuar solo.
+- Notion devuelve **`null`** (no ausente) en `icon`, `select`, etc. cuando están vacíos: usar `(page.get("icon") or {})`,
+  nunca `page.get("icon", {})`. Un registro sin ícono hacía que `get_impaga_facturas` devolviera `[]` en silencio.
+- Otros (el asistente del contador, Martin a mano) también escriben en Finanzas: el código tiene que tolerar
+  registros incompletos.
+- El saludo de la mañana tiene hasta 3 h de margen y guarda `knot_state.ultimo_resumen` (no se manda dos veces).
