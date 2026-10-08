@@ -796,7 +796,7 @@ class NotionDataStore:
             date=_get_date(props, "Date"),
             time=None,
             client=_get_multi_select(props, "Client"),
-            emoji=page.get("icon", {}).get("emoji", ""),
+            emoji=(page.get("icon") or {}).get("emoji", ""),
             notes=_get_text(props, "Notes") or None,
             liters=_get_number(props, "Liters"),
             estado=_get_select(props, "Estado") or None,
@@ -1153,7 +1153,7 @@ class NotionDataStore:
             category=_get_select(props, "Category") or None,
             stores=_get_multi_select(props, "Store"),
             frequency=_get_status(props, "Frequency") or None,
-            emoji=page.get("icon", {}).get("emoji", ""),
+            emoji=(page.get("icon") or {}).get("emoji", ""),
             notes=_get_text(props, "Notes") or None,
         )
 
@@ -1377,7 +1377,7 @@ class NotionDataStore:
             purchase_date=_get_date(props, "Purchase Date") or None,
             price=_get_number(props, "Price"),
             notes=_get_text(props, "Notes") or None,
-            emoji=page.get("icon", {}).get("emoji", ""),
+            emoji=(page.get("icon") or {}).get("emoji", ""),
             last_watering=_get_date(props, "Last Watering") or None,
         )
 
@@ -2081,7 +2081,7 @@ class NotionDataStore:
             status=_get_status(props, "Status"),
             priority=_get_select(props, "Priority") or None,
             description=_get_text(props, "Description") or None,
-            emoji=page.get("icon", {}).get("emoji", ""),
+            emoji=(page.get("icon") or {}).get("emoji", ""),
         )
 
     async def create_project(self, data: dict) -> ProjectEntry:
