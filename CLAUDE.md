@@ -97,7 +97,7 @@ Medio de pago: Martin **no** quiere preguntas a la noche; se pregunta en el mome
 DB `⚙️ Knot Config` (data source `97780908-47dc-41b1-82d7-ff1fe2021465`), una fila por usuario: perfiles por
 dominio, lugares, comercios, proveedores, etc. Columnas agregadas el 07/10/2026:
 - **Personas** (JSON): quién es quién (`{"Fabian": {"relacion": "papá", "le_dice": [...]}}`). Si está vacía
-  arranca con `PERSONAS_INICIALES` (state.py). La ven el agente de entrada y el de gastos (`personas_ctx()`).
+  queda vacía (ningún dato del usuario en el código, regla de Martin). La ven el agente de entrada y el de gastos (`personas_ctx()`).
   Cuando Martin dice quién es alguien, el agente de entrada devuelve `"persona"` y se guarda (`_guardar_persona`).
 - **Estado Knot** (JSON, interno): `facturas_desde_ms` = fecha del último mail de factura leído.
 `save_user_config` solo guarda los campos de `UserConfig`: **todo estado que tenga que sobrevivir a un

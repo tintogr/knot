@@ -38,30 +38,15 @@ DAILY_SUMMARY_HOUR = int(os.environ.get("DAILY_SUMMARY_HOUR", "8"))
 
 # ── Modelos de Claude (único punto de cambio cuando Anthropic retira uno) ──────
 # Se pueden overridear por env var sin tocar código.
-# Quién es quién para Martin. Vive en la columna "Personas" de Knot Config (la lee
-# load_user_config); estas son las que se cargan si la columna está vacía.
-PERSONAS_INICIALES = {
-    "Fabian": {"relacion": "papá", "nombre_completo": "Hector Fabian Gentili", "le_dice": ["papá", "mi viejo"]},
-    "Claudia": {"relacion": "mamá", "nombre_completo": "Claudia Silvina Reus", "le_dice": ["mamá", "mi vieja"],
-                "notas": "las facturas de EPAS y Camuzzi están a su nombre"},
-    "Anita": {"relacion": "novia"},
-    "Enzo": {"relacion": "amigo", "notas": "se suelen prestar plata"},
-    "Sofi": {"relacion": "amiga"},
-    "Manu": {"relacion": "amigo"},
-    "Marce": {"relacion": "amigo"},
-    "Tomi": {"relacion": "amigo"},
-    "Fer": {"relacion": "amigo"},
-    "Rafael Lorenzo": {"relacion": "jefe", "notas": "sus transferencias son Sueldo"},
-    "Ruth": {"relacion": "cliente"},
-    "Tincho": {"relacion": "amigo y ex compañero de trabajo",
-               "notas": "comparten Render y Photoshop (pagan a medias); vendieron pizzas juntos en 2024; "
-                        "trabajaron juntos en LBL hasta agosto 2026"},
-    "Olivia": {"relacion": "su gata"},
-}
+# Quién es quién para el usuario: vive en la columna "Personas" de Knot Config (la lee
+# load_user_config). Regla de Martin: ningún dato del usuario en el código.
+PERSONAS_INICIALES: dict = {}
 
 
 def personas_ctx() -> str:
-    personas = user_prefs.get("personas") or PERSONAS_INICIALES
+    personas = user_prefs.get("personas") or {}
+    if not personas:
+        return ""
     lineas = []
     for nombre, d in personas.items():
         d = d if isinstance(d, dict) else {"relacion": str(d)}
@@ -73,7 +58,7 @@ def personas_ctx() -> str:
         if d.get("notas"):
             extra.append(d["notas"])
         lineas.append(f"  - {nombre}: {d.get('relacion', '?')}" + (f" ({'; '.join(extra)})" if extra else ""))
-    return ("\nPERSONAS QUE CONOCE MARTIN (si nombra a alguien que no está acá en algo de plata o "
+    return ("\nPERSONAS QUE CONOCE EL USUARIO (si nombra a alguien que no está acá en algo de plata o "
             "importante, preguntale quién es):\n" + "\n".join(lineas) + "\n")
 
 
