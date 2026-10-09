@@ -1,6 +1,8 @@
 # Knot — estado del proyecto
 
 > 📓 Para el detalle completo de todo lo que se cambió y por qué, ver [`docs/BITACORA.md`](docs/BITACORA.md).
+> 🧭 **Leer antes de diseñar algo nuevo:** [`docs/VISION.md`](docs/VISION.md) — qué quiere Martin que sea Knot,
+> sus principios no negociables y el workspace de 5 áreas diseñado en abril (originales en `docs/historia/`).
 
 Bot personal de WhatsApp (Python / FastAPI) desplegado en **Render** (auto-deploy al pushear a `main`).
 El dueño es **Martin** (arquitecto, no programador — todo el código lo genera Claude).
