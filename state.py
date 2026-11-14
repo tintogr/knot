@@ -149,7 +149,35 @@ payment_methods_cache: list = []  # list[PaymentMethod]
 
 last_event_touched: dict[str, dict] = {}
 
-pending_state: dict[str, dict] = {}
+class _PorTelefono(dict):
+    """Diccionario indexado por teléfono que trata como la misma persona al número en
+    cualquiera de sus formatos (54298... / 549298...). El webhook y el cron no siempre
+    usan el mismo: sin esto, la pregunta que deja el cron (posponer un recordatorio,
+    confirmar una factura) quedaba bajo otra clave y la respuesta "no la encontraba"."""
+
+    def __getitem__(self, k):
+        return super().__getitem__(_clave_historial(k))
+
+    def __setitem__(self, k, v):
+        super().__setitem__(_clave_historial(k), v)
+
+    def __delitem__(self, k):
+        super().__delitem__(_clave_historial(k))
+
+    def __contains__(self, k):
+        return super().__contains__(_clave_historial(k))
+
+    def get(self, k, default=None):
+        return super().get(_clave_historial(k), default)
+
+    def pop(self, k, *default):
+        return super().pop(_clave_historial(k), *default)
+
+    def setdefault(self, k, default=None):
+        return super().setdefault(_clave_historial(k), default)
+
+
+pending_state: dict[str, dict] = _PorTelefono()
 
 message_buffer: dict[str, list] = {}
 
@@ -165,7 +193,10 @@ def record_message_text(msg_id: str, text: str):
     if not msg_id or not text:
         return
     if len(recent_message_texts) > _RECENT_MSG_CAP:
-        recent_message_texts.clear()
+        # Se descarta la mitad más vieja. Antes se vaciaba todo y, justo después,
+        # citar un mensaje reciente no encontraba nada.
+        for k in list(recent_message_texts)[: _RECENT_MSG_CAP // 2]:
+            del recent_message_texts[k]
     recent_message_texts[msg_id] = text[:1000]
 
 _last_summary_sent: dict[str, datetime | None] = {"daily": None, "nocturno": None}
@@ -177,18 +208,58 @@ def now_argentina() -> datetime:
 
 # ── Claude client ──────────────────────────────────────────────────────────────
 
-anthropic = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+anthropic = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"], timeout=180.0, max_retries=0)
+
+# Si Anthropic retira un modelo (ya pasó en junio 2026: todas las llamadas daban 404 y
+# Knot quedó mudo), se prueba con el de respaldo en vez de fallar. Se puede cambiar por
+# variable de entorno sin tocar código.
+MODELOS_DE_RESPALDO = {
+    SONNET_MODEL: os.environ.get("SONNET_FALLBACK", "claude-sonnet-5-5"),
+    HAIKU_MODEL:  os.environ.get("HAIKU_FALLBACK",  "claude-haiku-5-5"),
+}
+
+
+def _es_error_transitorio(e: Exception) -> bool:
+    """Errores que se arreglan solos reintentando: API sobrecargada (529), límite de
+    velocidad (429), fallas del servidor (5xx) y cortes de conexión."""
+    status = getattr(e, "status_code", None)
+    if status in (408, 409, 429) or (isinstance(status, int) and status >= 500):
+        return True
+    nombre = type(e).__name__
+    if nombre in ("APIConnectionError", "APITimeoutError"):
+        return True
+    txt = str(e).lower()
+    return "529" in txt or "overloaded" in txt
+
+
+def _es_modelo_inexistente(e: Exception) -> bool:
+    return getattr(e, "status_code", None) == 404 and "model" in str(e).lower()
+
 
 async def claude_create(**kwargs):
-    """Wrapper con reintentos automaticos para errores 529 (API sobrecargada)."""
+    """Llama al modelo sin frenar el resto del servidor.
+
+    El cliente de Anthropic es sincrónico: llamarlo directo congelaba TODO Knot (el
+    webhook, el cron de recordatorios, otros mensajes) mientras el modelo pensaba,
+    a veces más de 30 segundos. Ahora corre en un hilo aparte.
+    Reintenta hasta 3 veces los errores transitorios y, si el modelo fue retirado,
+    usa el de respaldo."""
     kwargs.setdefault("model", SONNET_MODEL)
     last_err = None
     for attempt in range(3):
         try:
-            return anthropic.messages.create(**kwargs)
+            return await asyncio.to_thread(anthropic.messages.create, **kwargs)
         except Exception as e:
             last_err = e
-            if "529" in str(e) or "overloaded" in str(e).lower():
+            if _es_modelo_inexistente(e):
+                respaldo = MODELOS_DE_RESPALDO.get(kwargs["model"])
+                if respaldo and respaldo != kwargs["model"]:
+                    print(f"[claude] el modelo {kwargs['model']} no existe mas; uso {respaldo}. "
+                          f"Actualizar SONNET_MODEL/HAIKU_MODEL.")
+                    kwargs["model"] = respaldo
+                    continue
+                raise
+            if _es_error_transitorio(e) and attempt < 2:
                 await asyncio.sleep(2 ** attempt)
                 continue
             raise
@@ -225,6 +296,34 @@ def _clave_historial(phone: str) -> str:
     conversación que el agente nunca ve."""
     d = "".join(c for c in str(phone or "") if c.isdigit())
     return "54" + d[3:] if d.startswith("549") else d
+
+
+def _nacional(phone: str) -> str:
+    """El número sin el prefijo de país argentino (54) ni el 9 de celular."""
+    d = "".join(c for c in str(phone or "") if c.isdigit())
+    if d.startswith("54"):
+        d = d[2:]
+        if d.startswith("9"):
+            d = d[1:]
+    return d
+
+
+def mismo_telefono(a: str, b: str) -> bool:
+    """True si dos números de WhatsApp son la misma línea aunque vengan escritos distinto.
+    WhatsApp entrega los mensajes de un celular argentino como 549 + característica +
+    número (5492991234567), pero para escribirle hay que usar 54 + característica + 15 +
+    número (54299151234567). Fuera de Argentina compara los dígitos tal cual."""
+    x, y = _nacional(a), _nacional(b)
+    if not x or not y:
+        return False
+    if x == y:
+        return True
+    corto, largo = sorted((x, y), key=len)
+    if len(largo) != len(corto) + 2:
+        return False
+    # ¿El largo es el corto con un "15" metido después de la característica (2 a 4 dígitos)?
+    return any(largo[:i] == corto[:i] and largo[i:i + 2] == "15" and largo[i + 2:] == corto[i:]
+               for i in (2, 3, 4))
 
 
 def get_history(phone: str) -> list:

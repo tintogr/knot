@@ -20,6 +20,14 @@ Estado persistente en Config DB columna 'Feature Hints' (JSON dict):
 from datetime import datetime, timedelta
 from typing import Optional
 
+from state import now_argentina
+
+
+def _ahora() -> datetime:
+    """Hora argentina sin zona. El servidor corre en UTC: con la hora del sistema "hoy"
+    cambiaba a las 21:00 y el tope diario de sugerencias se contaba mal."""
+    return now_argentina().replace(tzinfo=None)
+
 # Configuración global
 GLOBAL_DAILY_CAP = 1            # max sugerencias por día (excepto must_fire)
 PER_TRIGGER_COOLDOWN_DAYS = 7   # no repetir misma sugerencia antes de N días
@@ -67,7 +75,7 @@ def should_fire(hint: Hint, hints_state: dict, today_count: int) -> bool:
     if last:
         try:
             last_dt = datetime.fromisoformat(last)
-            if datetime.now() - last_dt < timedelta(days=PER_TRIGGER_COOLDOWN_DAYS):
+            if _ahora() - last_dt < timedelta(days=PER_TRIGGER_COOLDOWN_DAYS):
                 return False
         except Exception:
             pass
@@ -76,7 +84,7 @@ def should_fire(hint: Hint, hints_state: dict, today_count: int) -> bool:
 
 def record_suggested(hints_state: dict, trigger_id: str) -> None:
     """Marca que un hint se acaba de emitir."""
-    now_iso = datetime.now().isoformat()
+    now_iso = _ahora().isoformat()
     s = hints_state.get(trigger_id, {})
     if not s.get("first_suggested_at"):
         s["first_suggested_at"] = now_iso
@@ -104,7 +112,7 @@ def disable_trigger(hints_state: dict, trigger_id: str) -> None:
 
 def count_today(hints_state: dict) -> int:
     """Cuántos hints se emitieron hoy (excluyendo must_fire que no consumen cap)."""
-    today = datetime.now().date()
+    today = _ahora().date()
     count = 0
     for s in hints_state.values():
         last = s.get("last_suggested_at")

@@ -1,0 +1,16 @@
+# Corre las pruebas automáticas en cada push. No usa credenciales reales:
+# las pruebas no hablan con WhatsApp, Notion, Google ni Anthropic.
+name: pruebas
+on:
+  push:
+  pull_request:
+jobs:
+  pruebas:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -q

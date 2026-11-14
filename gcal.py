@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import calendar as _calendar
 import httpx
 from datetime import datetime, timedelta
@@ -9,19 +10,42 @@ from state import now_argentina, DIAS_SEMANA, last_event_touched, claude_create
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
+_token_cache: dict = {"token": None, "vence": 0.0}
+
+
 async def get_gcal_access_token() -> str | None:
+    """Token de acceso a Google. Dura 1 hora: se reutiliza hasta 5 minutos antes de que
+    venza. Antes se pedía uno nuevo en CADA operación (y el cron lo pide todos los
+    minutos): más lento y un punto de falla extra en cada consulta al calendario."""
     refresh_token = os.environ.get("GCAL_REFRESH_TOKEN")
     client_id     = os.environ.get("GCAL_CLIENT_ID")
     client_secret = os.environ.get("GCAL_CLIENT_SECRET")
     if not all([refresh_token, client_id, client_secret]):
         return None
-    async with httpx.AsyncClient() as http:
-        r = await http.post("https://oauth2.googleapis.com/token", data={
-            "grant_type": "refresh_token", "refresh_token": refresh_token,
-            "client_id": client_id, "client_secret": client_secret,
-        })
-        if r.status_code == 200:
-            return r.json().get("access_token")
+    if _token_cache["token"] and time.time() < _token_cache["vence"]:
+        return _token_cache["token"]
+    for intento in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=15) as http:
+                r = await http.post("https://oauth2.googleapis.com/token", data={
+                    "grant_type": "refresh_token", "refresh_token": refresh_token,
+                    "client_id": client_id, "client_secret": client_secret,
+                })
+            if r.status_code == 200:
+                datos = r.json()
+                token = datos.get("access_token")
+                if token:
+                    _token_cache["token"] = token
+                    _token_cache["vence"] = time.time() + max(int(datos.get("expires_in") or 3600) - 300, 60)
+                return token
+            # 400/401 = el permiso de Google fue revocado o venció: hay que volver a
+            # autorizar. Que quede dicho en los logs en vez de fallar callado.
+            print(f"[google] no pude renovar el acceso ({r.status_code}): {r.text[:200]}")
+            if r.status_code in (400, 401):
+                break
+        except httpx.HTTPError as e:
+            print(f"[google] fallo de conexión al renovar el acceso: {type(e).__name__}: {e}")
+    _token_cache["token"] = None
     return None
 
 
@@ -426,8 +450,13 @@ async def limpiar_eventos_vencidos(rutinas: set[str] = None) -> int:
                 continue
             es_temp = "[TEMP]" in (ev.get("description") or "")
             resumen = _norm(ev.get("summary", "").replace("🔔", ""))
-            es_rutina = bool(rutinas) and any(
-                rut == resumen or rut in resumen.split() or resumen in rut for rut in rutinas
+            # Se compara por palabras enteras. Antes se miraba si el título estaba
+            # "contenido" en la rutina: un evento sin título daba "" (que está contenido
+            # en cualquier texto) y uno llamado "a" coincidía con cualquier rutina con
+            # una "a": se borraban como si fueran clases pasadas.
+            _palabras = set(resumen.split())
+            es_rutina = bool(rutinas) and bool(_palabras) and any(
+                rut == resumen or rut in _palabras or _palabras <= set(rut.split()) for rut in rutinas
             )
             if not (es_temp or es_rutina):
                 continue

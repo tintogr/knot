@@ -17,6 +17,7 @@ Gradual migration: import this file in main.py and replace functions
 one at a time without breaking anything.
 """
 
+import asyncio
 import json
 import httpx
 from datetime import date, datetime, timedelta
@@ -34,7 +35,10 @@ try:
 except ImportError:
     # Standalone fallback: no matrics package required.
     DataStore = object
-    DataStoreError = Exception
+
+    class DataStoreError(Exception):
+        """Falla al leer o escribir en la base de datos (hoy Notion). Tener un tipo propio
+        permite distinguirla de cualquier otro error y explicársela bien al usuario."""
 
     @dataclass
     class QueryFilter:
@@ -215,8 +219,10 @@ GENERIC_WORDS = {
 
 def _get_title(props: dict, field: str = "Name") -> str:
     """Extract text from a title field."""
-    titles = props.get(field, {}).get("title", [])
-    return titles[0]["plain_text"] if titles else ""
+    titles = (props.get(field) or {}).get("title") or []
+    # Un título con formato (negrita, un link, una mención) viene partido en varios
+    # fragmentos: antes se leía solo el primero y el nombre quedaba cortado.
+    return "".join(t.get("plain_text", "") for t in titles)
 
 
 def _get_text(props: dict, field: str) -> str:
@@ -459,6 +465,61 @@ def _build_collection_props(item: dict, template_key: str | None, today: str) ->
 # NotionDataStore
 # ══════════════════════════════════════════════════════════════════════════════
 
+class _ClienteConReintentos(httpx.AsyncClient):
+    """Cliente HTTP que reintenta solo lo que es seguro reintentar.
+
+    Notion limita a ~3 pedidos por segundo (responde 429) y cada tanto devuelve un
+    error 5xx o se corta la conexión. Antes cualquiera de esos tropiezos hacía fallar
+    la operación entera (un gasto que no se guardaba, un resumen sin facturas).
+
+    - Lecturas y actualizaciones (repetirlas da el mismo resultado): se reintentan ante
+      429, 5xx y cortes de conexión.
+    - Creaciones (repetirlas podría duplicar un registro): solo ante 429 o si la
+      conexión ni siquiera llegó a establecerse, es decir, cuando es seguro que Notion
+      no recibió nada.
+    """
+
+    INTENTOS = 3
+
+    @staticmethod
+    def _es_repetible(method: str, url: str) -> bool:
+        method, url = method.upper(), str(url)
+        if method == "GET":
+            return True
+        if method == "POST":
+            return url.rstrip("/").endswith("/query")
+        if method == "PATCH":
+            return not url.rstrip("/").endswith("/children")  # agregar bloques no es repetible
+        return False
+
+    async def request(self, method, url, **kwargs):
+        repetible = self._es_repetible(method, url)
+        for intento in range(self.INTENTOS):
+            ultimo = intento == self.INTENTOS - 1
+            try:
+                r = await super().request(method, url, **kwargs)
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout):
+                if ultimo:
+                    raise
+                await asyncio.sleep(1 + intento)
+                continue
+            except httpx.TransportError:
+                if ultimo or not repetible:
+                    raise
+                await asyncio.sleep(1 + intento)
+                continue
+            if ultimo:
+                return r
+            if r.status_code == 429 or (repetible and r.status_code in (500, 502, 503, 504)):
+                try:
+                    espera = float(r.headers.get("Retry-After") or 0)
+                except ValueError:
+                    espera = 0
+                await asyncio.sleep(min(max(espera, 1 + intento), 10))
+                continue
+            return r
+
+
 class NotionDataStore:
     """
     DataStore implementation for Notion.
@@ -484,7 +545,7 @@ class NotionDataStore:
             "Notion-Version": NOTION_VERSION,
             "Content-Type": "application/json",
         }
-        self._http = httpx.AsyncClient(timeout=15)
+        self._http = _ClienteConReintentos(timeout=20)
         self._services: list = []  # cache de la DB Servicios (cargada en startup)
 
     async def aclose(self):
@@ -496,8 +557,10 @@ class NotionDataStore:
         llega_por_mail, activo. Es la fuente de verdad para identificar
         facturas y pagos (ej: alias 'interfast' -> servicio Expensas)."""
         try:
-            pages = await self._query_db("services", page_size=50)
-        except Exception:
+            # max_items: sin esto se leían solo los primeros 50 servicios, en silencio.
+            pages = await self._query_db("services", max_items=500)
+        except Exception as e:
+            print(f"[servicios] no pude leer la base Servicios, sigo con la copia anterior: {str(e)[:150]}")
             return self._services
         out = []
         for p in pages:
@@ -1754,7 +1817,8 @@ class NotionDataStore:
                     uses=int(uses_raw),
                 ))
             return results
-        except Exception:
+        except Exception as e:
+            print(f"[medios de pago] no pude leerlos: {type(e).__name__}: {str(e)[:150]}")
             return []
 
     async def create_payment_method(self, name: str, modality: str, bank: str = None,
@@ -1958,8 +2022,12 @@ class NotionDataStore:
         })
         return True, entry.id
 
-    async def get_impaga_facturas(self, provider: str = None) -> list:
-        """Returns Estado=Impaga finance entries, ordered by date desc."""
+    async def get_impaga_facturas(self, provider: str = None, estricto: bool = False) -> list:
+        """Returns Estado=Impaga finance entries, ordered by date desc.
+
+        estricto=True: si Notion falla, lanza el error en vez de devolver una lista
+        vacía. Lo usa el saludo de la mañana: con la lista vacía decía "Facturas al día"
+        cuando en realidad no había podido mirar."""
         filter_obj = {"and": [{"property": "Estado", "select": {"equals": "Impaga"}}]}
         if provider:
             filter_obj["and"].append({"property": "Name", "title": {"contains": provider}})
@@ -1968,10 +2036,13 @@ class NotionDataStore:
                 "finances",
                 filter_obj=filter_obj,
                 sorts=[{"property": "Date", "direction": "descending"}],
-                page_size=20,
+                max_items=200,  # antes: solo las 20 más nuevas, el resto no se veía
             )
             return [self._parse_expense(p) for p in pages]
-        except Exception:
+        except Exception as e:
+            print(f"[facturas] no pude leer las impagas: {type(e).__name__}: {str(e)[:150]}")
+            if estricto:
+                raise
             return []
 
     async def get_finance_history_by_provider(self, provider: str, limit: int = 5) -> list:
@@ -2690,18 +2761,26 @@ class NotionDataStore:
 
         extras_str = " | ".join(config.resumen_extras or [])
         topics_str = ", ".join(config.news_topics or [])
+
+        def _json(valor, vacio):
+            # Texto largo partido en fragmentos de 2000 caracteres. Antes varios de estos
+            # campos se recortaban a 2000 (el JSON quedaba cortado por la mitad y al
+            # releerlo se perdía TODO el dato) y otros no se recortaban (pasados los 2000
+            # Notion rechazaba el guardado entero y no se guardaba nada más).
+            return {"rich_text": _rich_text_largo(json.dumps(valor or vacio, ensure_ascii=False))}
+
         props = {
             "Greeting Name":     {"rich_text": [{"text": {"content": config.greeting_name or "Buenos dias"}}]},
-            "Resumen Extras":    {"rich_text": [{"text": {"content": extras_str}}]},
-            "News Topics":       {"rich_text": [{"text": {"content": topics_str}}]},
-            "Service Providers": {"rich_text": [{"text": {"content": json.dumps(config.service_providers or {}, ensure_ascii=False)}}]},
-            "Known Places":      {"rich_text": [{"text": {"content": json.dumps(config.known_places or [], ensure_ascii=False)}}]},
-            "Activities":        {"rich_text": [{"text": {"content": json.dumps(config.activities or {}, ensure_ascii=False)}}]},
-            "Purchase Counts":   {"rich_text": [{"text": {"content": json.dumps(config.purchase_counts or {}, ensure_ascii=False)[:2000]}}]},
-            "Known Shops":       {"rich_text": [{"text": {"content": json.dumps(config.known_shops or {}, ensure_ascii=False)[:2000]}}]},
-            "Feature Hints":     {"rich_text": [{"text": {"content": json.dumps(config.feature_hints or {}, ensure_ascii=False)[:2000]}}]},
-            "Generative Lists":  {"rich_text": [{"text": {"content": json.dumps(config.generative_lists or {}, ensure_ascii=False)[:2000]}}]},
-            "Pending Invoice Confirmations": {"rich_text": [{"text": {"content": json.dumps(config.pending_invoice_confirmations or [], ensure_ascii=False)[:2000]}}]},
+            "Resumen Extras":    {"rich_text": _rich_text_largo(extras_str)},
+            "News Topics":       {"rich_text": _rich_text_largo(topics_str)},
+            "Service Providers": _json(config.service_providers, {}),
+            "Known Places":      _json(config.known_places, []),
+            "Activities":        _json(config.activities, {}),
+            "Purchase Counts":   _json(config.purchase_counts, {}),
+            "Known Shops":       _json(config.known_shops, {}),
+            "Feature Hints":     _json(config.feature_hints, {}),
+            "Generative Lists":  _json(config.generative_lists, {}),
+            "Pending Invoice Confirmations": _json(config.pending_invoice_confirmations, []),
             "Resumen Nocturno Enabled": {"checkbox": config.resumen_nocturno_enabled},
         }
         for key, field in [
@@ -2715,35 +2794,46 @@ class NotionDataStore:
             ("productividad",    "Profile Productividad"),
         ]:
             val = (config.domain_profiles or {}).get(key, "")
-            props[field] = {"rich_text": [{"text": {"content": val[:2000]}}]}
+            props[field] = {"rich_text": _rich_text_largo(val or "")}
         if config.daily_summary_hour is not None:
             props["Resumen Hour"]   = {"number": config.daily_summary_hour}
             props["Resumen Minute"] = {"number": config.daily_summary_minute or 0}
         if config.resumen_nocturno_hour is not None:
             props["Resumen Nocturno Hour"] = {"number": config.resumen_nocturno_hour}
 
-        # Columnas agregadas en oct 2026: van aparte para que, si faltaran en otra
-        # copia de la base, no hagan fallar el guardado de todo lo demás.
+        # Estado interno y personas van PRIMERO y por separado: de "Estado Knot" depende
+        # no mandar dos veces el saludo ni releer mails de facturas, así que tiene que
+        # guardarse aunque falle cualquier otra columna.
         extra = {}
         if config.personas is not None:
             extra["Personas"] = {"rich_text": _rich_text_largo(json.dumps(config.personas, ensure_ascii=False))}
         if config.knot_state is not None:
             extra["Estado Knot"] = {"rich_text": _rich_text_largo(json.dumps(config.knot_state, ensure_ascii=False))}
-        try:
-            await self._update_page(page_id, props)
-        except Exception:
-            return False
+        ok = True
         if extra:
             try:
                 await self._update_page(page_id, extra)
             except Exception as e:
-                print(f"[save_config] no pude guardar Personas/Estado Knot: {str(e)[:150]}")
+                ok = False
+                print(f"[save_config] no pude guardar Personas/Estado Knot: {str(e)[:200]}")
+        try:
+            await self._update_page(page_id, props)
+        except Exception as e:
+            # Una sola columna inválida hace que Notion rechace todas juntas: se
+            # reintenta de a una para salvar el resto y dejar dicho cuál falla.
+            ok = False
+            print(f"[save_config] falló el guardado conjunto ({str(e)[:200]}); pruebo columna por columna")
+            for nombre, valor in props.items():
+                try:
+                    await self._update_page(page_id, {nombre: valor})
+                except Exception as e2:
+                    print(f"[save_config] no pude guardar la columna '{nombre}': {str(e2)[:150]}")
         if config.last_summary_date:
             try:
                 await self._update_page(page_id, {"Last Summary Date": {"rich_text": [{"text": {"content": config.last_summary_date}}]}})
             except Exception:
                 pass
-        return True
+        return ok
 
     async def save_location(self, page_id: str, lat: float, lon: float, city: str = None) -> bool:
         """Save coordinates and city to config. Kept separate for throttling purposes."""

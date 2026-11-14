@@ -1,7 +1,7 @@
 import json
 import os
 import httpx
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from state import (
     _ds, QueryFilter, DateRange,
@@ -510,6 +510,11 @@ async def _marcar_debitos_cumplidos(now: datetime) -> list[str]:
     return hechas
 
 
+# Resultado de la última lectura de facturas del mail. El saludo lo mira para no decir
+# "Facturas al día" cuando en realidad no se pudo leer el correo.
+lectura_facturas: dict = {"ok": True, "detalle": ""}
+
+
 async def get_invoices_from_gmail(now: datetime) -> list[dict]:
     """Facturas de servicios llegadas por mail, leyendo cada mail UNA sola vez.
 
@@ -537,8 +542,10 @@ async def get_invoices_from_gmail(now: datetime) -> list[dict]:
                   f"OR \"debito automatico\" OR \"débito automático\""
                   f"{' OR ' + terminos if terminos else ''})")
 
+    lectura_facturas.update(ok=True, detalle="")
     access_token = await get_gcal_access_token()
     if not access_token:
+        lectura_facturas.update(ok=False, detalle="no pude entrar a tu cuenta de Google")
         return []
     facturas = []
     nuevos_vistos = []
@@ -555,6 +562,7 @@ async def get_invoices_from_gmail(now: datetime) -> list[dict]:
                                    headers=headers, params=params)
                 if r.status_code != 200:
                     print(f"[facturas] busqueda fallo: {r.status_code} {r.text[:150]}")
+                    lectura_facturas.update(ok=False, detalle="Gmail no respondió")
                     return []
                 ids += [m["id"] for m in r.json().get("messages", [])]
                 page_token = r.json().get("nextPageToken")
@@ -619,10 +627,14 @@ async def get_invoices_from_gmail(now: datetime) -> list[dict]:
                     data = json.loads(raw)
                 except Exception as e:
                     print(f"[facturas] no pude leer el mail {msg_id}: {type(e).__name__}: {e}")
+                    lectura_facturas.update(ok=False, detalle="no pude leer uno de los mails")
                     break  # no se avanza: se reintenta la próxima
                 nuevos_vistos.append(msg_id)
                 nuevo_desde = max(nuevo_desde, _ts)
-                fecha_mail = datetime.fromtimestamp(int(body.get("internalDate") or 0) / 1000 - 3 * 3600)
+                # Hora argentina a partir de la marca UTC del mail. Antes se usaba la hora
+                # local del servidor, que solo daba bien si el servidor estaba en UTC.
+                fecha_mail = (datetime.fromtimestamp(int(body.get("internalDate") or 0) / 1000, timezone.utc)
+                              - timedelta(hours=3)).replace(tzinfo=None)
                 for d in data if isinstance(data, list) else []:
                     if isinstance(d, dict) and d.get("provider"):
                         d["mail_date"] = fecha_mail.strftime("%Y-%m-%d")
@@ -630,6 +642,7 @@ async def get_invoices_from_gmail(now: datetime) -> list[dict]:
                         facturas.append(d)
     except Exception as _e:
         print(f"[facturas] error: {type(_e).__name__}: {_e}")
+        lectura_facturas.update(ok=False, detalle="se cortó la lectura del mail")
     finally:
         if nuevos_vistos:
             user_prefs["facturas_mails_vistos"] = list(vistos_set | set(nuevos_vistos))[-_MAX_VISTOS:]
@@ -1063,7 +1076,11 @@ async def send_daily_summary(http, access_token: str, now: datetime):
             recurrentes = await _ds.sincronizar_servicios_recurrentes(now.date())
         except Exception as e:
             print(f"[servicios recurrentes] {type(e).__name__}: {e}")
-        impagas = await _ds.get_impaga_facturas()
+        _impagas_leidas = True
+        try:
+            impagas = await _ds.get_impaga_facturas(estricto=True)
+        except Exception:
+            impagas, _impagas_leidas = [], False
         impaga_lines = []
         for imp in (impagas or []):
             try:
@@ -1101,11 +1118,22 @@ async def send_daily_summary(http, access_token: str, now: datetime):
             lines.append("")
             lines.append("*Facturas pendientes:*")
             lines.extend(impaga_lines)
-        else:
+        elif _impagas_leidas and lectura_facturas["ok"]:
+            # Solo se afirma si de verdad se pudo mirar todo.
             lines.append("")
             lines.append("✅ Facturas al día")
+        if not _impagas_leidas:
+            lines.append("")
+            lines.append("⚠️ No pude revisar tus facturas pendientes (Notion no respondió). Preguntame más tarde.")
+        if not lectura_facturas["ok"]:
+            lines.append("")
+            lines.append(f"⚠️ Hoy no pude leer las facturas del mail ({lectura_facturas['detalle']}): "
+                         f"puede haber alguna nueva sin cargar. Mañana lo reintento.")
     except Exception as _e:
         import traceback; traceback.print_exc()
+        # Antes la sección desaparecía sin decir nada y parecía que no había facturas.
+        lines.append("")
+        lines.append("⚠️ Tuve un problema revisando tus facturas hoy. Preguntame más tarde y lo vuelvo a mirar.")
 
     # Sección "📬 Emails importantes": query independiente que excluye facturas/servicios
     _idx_mails = len(lines)

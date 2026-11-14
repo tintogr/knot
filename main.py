@@ -21,13 +21,13 @@ from state import (
     USER_LAT, USER_LON, SONNET_MODEL, HAIKU_MODEL,
     DIAS_SEMANA, INGRESO_EXACT, EGRESO_EXACT, MAX_HISTORY,
     user_prefs, current_location, geo_reminders_cache, payment_methods_cache,
-    last_event_touched, pending_state, message_buffer,
+    last_event_touched, pending_state, message_buffer, mismo_telefono,
     chat_history, _last_summary_sent,
     recent_message_texts, record_message_text,
     now_argentina,
     claude_create, hoy_str, semana_str, get_history, add_to_history,
 )
-from wa_utils import send_message, send_interactive_buttons, send_reaction, error_servicio
+from wa_utils import send_message, send_interactive_buttons, send_reaction, error_servicio, cerrar_cliente
 import suggestion_gate
 from gcal import (
     get_gcal_access_token, get_event_color, create_evento_gcal,
@@ -76,6 +76,7 @@ async def _publicar_formulas():
 @app.on_event("shutdown")
 async def shutdown_event():
     await _ds.aclose()
+    await cerrar_cliente()
 
 
 # ── Normalizacion de In-Out ───────────────────────────────────────────────────
@@ -98,11 +99,26 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return R * 2 * atan2(sqrt(a), sqrt(1-a))
 
 def _allowed_phones() -> set[str]:
-    """Números de WhatsApp autorizados. Vacío = sin restricción."""
+    """Números extra autorizados además del dueño (variable ALLOWED_PHONES)."""
     extra = os.environ.get("ALLOWED_PHONES", "")
     if not extra:
         return set()
     return {p.strip() for p in extra.split(",") if p.strip()}
+
+
+# Solo el dueño puede hablarle a Knot. Antes, sin ALLOWED_PHONES configurado, CUALQUIER
+# número que le escribiera al WhatsApp del bot era atendido como si fuera el dueño
+# (podía cargar gastos, crear eventos, pedir borrados). Apagado de emergencia:
+# KNOT_SOLO_DUENO=0 en Render.
+SOLO_DUENO = os.environ.get("KNOT_SOLO_DUENO", "1") != "0"
+
+
+def _remitente_autorizado(sender: str) -> bool:
+    if not SOLO_DUENO:
+        return True
+    if mismo_telefono(sender, MY_NUMBER):
+        return True
+    return any(mismo_telefono(sender, p) for p in _allowed_phones())
 
 
 def get_current_location() -> tuple[float, float]:
@@ -610,7 +626,7 @@ category_overrides: dict[str, list[str]] = {}
 last_touched: dict[str, dict] = {}
 
 # ── Deduplicacion de mensajes ─────────────────────────────────────────────────
-processed_message_ids: set[str] = set()
+processed_message_ids: dict[str, None] = {}  # dict = conserva el orden de llegada
 MAX_PROCESSED_IDS = 500
 
 # ── Buffer de mensajes (agrupa mensajes relacionados en ventana de tiempo) ────
@@ -670,18 +686,37 @@ async def transcribe_audio(media_id: str) -> str | None:
 # ── Clima (Open-Meteo) ────────────────────────────────────────────────────────
 
 # ── Tasa de cambio ────────────────────────────────────────────────────────────
+_dolar_cache: dict = {"valor": None, "cuando": None}
+DOLAR_TTL_SEG = 15 * 60
+
+
 async def get_exchange_rate() -> float:
-    try:
-        async with httpx.AsyncClient(timeout=5) as http:
-            r = await http.get("https://dolarapi.com/v1/dolares/blue")
-            return float(r.json()["venta"])
-    except Exception:
+    """Dólar blue (venta). Se consulta como mucho cada 15 minutos.
+    Si dolarapi no responde se usa el último valor conocido (el de memoria o el
+    guardado en "Estado Knot"). Antes devolvía 1000 inventado, y ese número quedaba
+    grabado como tipo de cambio en cada gasto registrado mientras durara la caída."""
+    ahora = time.time()
+    if _dolar_cache["valor"] and _dolar_cache["cuando"] and ahora - _dolar_cache["cuando"] < DOLAR_TTL_SEG:
+        return _dolar_cache["valor"]
+    for tipo in ("blue", "oficial"):
         try:
             async with httpx.AsyncClient(timeout=5) as http:
-                r = await http.get("https://dolarapi.com/v1/dolares/oficial")
-                return float(r.json()["venta"])
-        except Exception:
-            return 1000.0
+                r = await http.get(f"https://dolarapi.com/v1/dolares/{tipo}")
+                valor = float(r.json()["venta"])
+            if valor > 0:
+                _dolar_cache.update(valor=valor, cuando=ahora)
+                # Queda en el estado que se guarda en Notion (se persiste con el próximo
+                # guardado de configuración) para tener un valor real tras un reinicio.
+                user_prefs.setdefault("knot_state", {})["ultimo_dolar"] = valor
+                return valor
+        except Exception as e:
+            print(f"[dolar] no pude consultar el {tipo}: {type(e).__name__}: {e}")
+    ultimo = _dolar_cache["valor"] or (user_prefs.get("knot_state") or {}).get("ultimo_dolar")
+    if ultimo:
+        print(f"[dolar] uso el último valor conocido: {ultimo}")
+        return float(ultimo)
+    print("[dolar] sin ningún valor conocido: uso 1000 (los montos en USD van a estar mal)")
+    return 1000.0
 
 _BUSINESS_TYPE_TO_CATEGORY = {
     "supermercado": "Supermercado",
@@ -2208,68 +2243,61 @@ async def corregir_shopping(text: str) -> tuple[bool, str]:
 
 
 async def cancelar_recordatorio(text: str) -> tuple[bool, str]:
+    """Cancela UN recordatorio pendiente, solo si se puede saber cuál.
+    Antes: si había uno solo lo borraba sin mirar si era el que se pedía, y si había
+    varios borraba "el más probable" aunque ninguno coincidiera, sin preguntar."""
     access_token = await get_gcal_access_token()
     if not access_token:
         return False, "Calendar no configurado"
     now = now_argentina()
     time_min = now.strftime("%Y-%m-%dT%H:%M:00-03:00")
-    time_max = (now + timedelta(days=7)).strftime("%Y-%m-%dT23:59:59-03:00")
-    async with httpx.AsyncClient() as http:
+    time_max = (now + timedelta(days=90)).strftime("%Y-%m-%dT23:59:59-03:00")
+    async with httpx.AsyncClient(timeout=20) as http:
         r = await http.get(
             "https://www.googleapis.com/calendar/v3/calendars/primary/events",
             headers={"Authorization": f"Bearer {access_token}"},
-            params={"timeMin": time_min, "timeMax": time_max, "singleEvents": "true", "maxResults": "20"},
+            params={"timeMin": time_min, "timeMax": time_max, "singleEvents": "true",
+                    "orderBy": "startTime", "maxResults": "100"},
         )
     if r.status_code != 200:
         return False, "No pude acceder al calendario"
     temp_events = [e for e in r.json().get("items", []) if "[TEMP]" in (e.get("description") or "")]
     if not temp_events:
         return False, "No tenés recordatorios pendientes"
-    if len(temp_events) == 1:
-        ev = temp_events[0]
-        event_id = ev["id"]
-        summary = ev.get("summary", "Recordatorio")
-        start = ev.get("start", {}).get("dateTime", "")
+
+    def _cuando(ev: dict) -> str:
+        # La hora viene en horario argentino: se lee tal cual. Antes se convertía al
+        # huso del servidor (UTC) y mostraba 3 horas de más.
+        ini = (ev.get("start") or {}).get("dateTime", "")
         try:
-            dt = datetime.fromisoformat(start).astimezone()
-            hora = dt.strftime("%H:%M")
-        except Exception:
-            hora = ""
-        async with httpx.AsyncClient() as http:
-            dr = await http.delete(
-                f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}",
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
-        if dr.status_code in (200, 204):
-            return True, f"Recordatorio *{summary}*{f' ({hora})' if hora else ''} cancelado"
-        return False, "Error cancelando el recordatorio"
-    # múltiples: identificar cuál con Claude
-    summaries = [(e["id"], e.get("summary", ""), e.get("start", {}).get("dateTime", "")) for e in temp_events]
-    options_str = "\n".join(f'{i+1}. {s} — {t}' for i, (_, s, t) in enumerate(summaries))
-    response = await claude_create(
-        model=SONNET_MODEL, max_tokens=10,
-        system="Respondé SOLO con el número de la opción más probable. Sin texto extra.",
-        messages=[{"role": "user", "content": f"Mensaje del usuario: {text}\n\nRecordatorios pendientes:\n{options_str}\n\n¿Cuál quiere cancelar? Respondé solo el número."}]
-    )
+            return datetime.strptime(ini[:16], "%Y-%m-%dT%H:%M").strftime("%d/%m %H:%M")
+        except ValueError:
+            return ""
+
+    def _limpio(ev: dict) -> str:
+        return (ev.get("summary") or "Recordatorio").replace("🔔", "").strip()
+
+    opciones = "\n".join(f"{i + 1}. {_limpio(e)} — {_cuando(e)}" for i, e in enumerate(temp_events))
+    lista = "\n".join(f"- {_limpio(e)} ({_cuando(e)})" for e in temp_events[:15])
     try:
-        idx = int(response.content[0].text.strip()) - 1
-        ev_id, ev_summary, ev_start = summaries[idx]
-    except Exception:
-        list_str = "\n".join(f"- {s}" for _, s, _ in summaries)
-        return False, f"Tenés {len(summaries)} recordatorios pendientes:\n{list_str}\n\nEspecificá cuál cancelar."
-    try:
-        dt = datetime.fromisoformat(ev_start).astimezone()
-        hora = dt.strftime("%H:%M")
-    except Exception:
-        hora = ""
-    async with httpx.AsyncClient() as http:
-        dr = await http.delete(
-            f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{ev_id}",
-            headers={"Authorization": f"Bearer {access_token}"},
+        response = await claude_create(
+            model=SONNET_MODEL, max_tokens=10,
+            system=("Te paso un mensaje del usuario y sus recordatorios pendientes. Respondé SOLO con el "
+                    "número del recordatorio que quiere cancelar. Respondé 0 si no queda claro cuál es, "
+                    "si ninguno coincide con lo que pide, o si pide cancelar varios o todos."),
+            messages=[{"role": "user", "content": f"Hoy: {hoy_str()}\nMensaje del usuario: {text}\n\n"
+                                                  f"Recordatorios pendientes:\n{opciones}"}],
         )
-    if dr.status_code in (200, 204):
-        return True, f"Recordatorio *{ev_summary}*{f' ({hora})' if hora else ''} cancelado"
-    return False, "Error cancelando el recordatorio"
+        idx = int(re.sub(r"[^0-9]", "", response.content[0].text) or 0) - 1
+    except Exception:
+        idx = -1
+    if not 0 <= idx < len(temp_events):
+        return False, f"No me quedó claro cuál cancelar. Tenés estos recordatorios pendientes:\n{lista}\n\n¿Cuál saco?"
+    ev = temp_events[idx]
+    if not await _borrar_evento(ev["id"]):
+        return False, "No pude cancelar el recordatorio. Probá de nuevo en un momento."
+    hora = _cuando(ev)
+    return True, f"Recordatorio *{_limpio(ev)}*{f' ({hora})' if hora else ''} cancelado"
 
 
 # ── MODULO PLANTAS ─────────────────────────────────────────────────────────────
@@ -6514,6 +6542,29 @@ async def verify_webhook(request: Request):
         return int(params.get("hub.challenge", 0))
     return {"error": "Verification failed"}
 
+def _log_error(donde: str, e: Exception):
+    """Deja el error completo en los logs de Render (con la línea donde ocurrió)."""
+    import traceback
+    print(f"[error] {donde}: {type(e).__name__}: {e}")
+    traceback.print_exc()
+
+
+def _mensaje_de_error(e: Exception) -> str:
+    """Lo que se le dice al usuario cuando algo falla: qué pasó en criollo y qué hacer,
+    sin volcarle el error técnico crudo. El detalle completo queda en los logs."""
+    nombre = type(e).__name__
+    txt = str(e).lower()
+    if "notion" in txt or nombre == "DataStoreError":
+        return ("⚠️ Tuve un problema con Notion y no pude terminar. Puede que esto no haya quedado "
+                "guardado: fijate antes de reenviarlo, o probá de nuevo en unos minutos.")
+    if nombre in ("ReadTimeout", "ConnectTimeout", "ConnectError", "APIConnectionError", "APITimeoutError",
+                  "RemoteProtocolError", "PoolTimeout"):
+        return "⚠️ Se me cortó la conexión a mitad de camino. Probá de nuevo en un momento."
+    if "overloaded" in txt or "529" in txt or "rate" in txt:
+        return "⚠️ El servicio de IA está saturado en este momento. Probá de nuevo en un par de minutos."
+    return f"⚠️ Tuve un problema técnico y no pude terminar esto. Probá de nuevo. _({nombre})_"
+
+
 async def _delayed_indicator(phone: str, done: list):
     await asyncio.sleep(PROCESSING_INDICATOR_DELAY)
     if not done[0]:
@@ -6591,15 +6642,18 @@ async def _flush_buffer(phone: str):
 
 
 async def enqueue_message(message: dict):
-    phone = "54298154894334"
+    phone = MY_NUMBER
     try:
         msg_id = message.get("id", "")
         if msg_id and msg_id in processed_message_ids:
             return
         if msg_id:
-            processed_message_ids.add(msg_id)
+            processed_message_ids[msg_id] = None
             if len(processed_message_ids) > MAX_PROCESSED_IDS:
-                processed_message_ids.clear()
+                # Se olvida la mitad más vieja. Antes se vaciaba todo: si WhatsApp
+                # reenviaba un mensaje justo después, se procesaba dos veces.
+                for _k in list(processed_message_ids)[: MAX_PROCESSED_IDS // 2]:
+                    del processed_message_ids[_k]
 
         if mensajes_no_entregados:
             # Martin escribió: la ventana de 24 h está abierta otra vez.
@@ -6711,10 +6765,16 @@ async def enqueue_message(message: dict):
         else:
             return
 
-        if msg_type == "text" and is_bot_message(text):
-            return
+        # Acá había un filtro que descartaba EN SILENCIO todo mensaje que empezara con
+        # "Recorda", "Recordatorio", "Receta", "Finanzas", "Buenos dias", "Tu lista" o
+        # "Guardado", por si era un eco de un mensaje del propio Knot. WhatsApp nunca
+        # devuelve los mensajes del bot como entrantes, así que lo único que lograba era
+        # ignorar pedidos reales: "Recordame mañana a las 9..." (con la mayúscula que pone
+        # el teclado) se marcaba con ✅ y no pasaba nada más.
 
-        if text.strip().lower() in ["/start", "hola", "help", "ayuda"]:
+        # "hola" y "ayuda" ya no devuelven este cartel fijo (viejo e incompleto): los
+        # contesta el agente de entrada, que conoce todo lo que Knot puede hacer.
+        if text.strip().lower() == "/start":
             await send_message(phone,
                 "*Hola! Soy Knot*\n\n"
                 "*Gastos:* _\"Verduleria 3500\"_\n"
@@ -6747,8 +6807,9 @@ async def enqueue_message(message: dict):
         buffer_timers[phone] = asyncio.create_task(_flush_buffer(phone))
 
     except Exception as e:
+        _log_error("enqueue_message", e)
         try:
-            await send_message("54298154894334", f"Error: {str(e)[:200]}")
+            await send_message(phone, _mensaje_de_error(e))
         except Exception:
             pass
 
@@ -6778,16 +6839,16 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                     mensajes_no_entregados.append({"texto": _info["texto"], "cuando": _info["cuando"]})
                 elif _info:
                     print(f"[whatsapp] resumen no entregado, se descarta: {_info['texto'][:60]!r}")
-        messages = value.get("messages")
-        if messages:
-            msg = messages[0]
+        # WhatsApp puede mandar varios mensajes en un mismo aviso: antes solo se
+        # atendía el primero y el resto se perdía.
+        for msg in value.get("messages") or []:
             sender = msg.get("from", "")
-            allowed = _allowed_phones()
-            if allowed and sender and sender not in allowed:
-                return {"ok": True}
+            if not _remitente_autorizado(sender):
+                print(f"[webhook] mensaje ignorado de un número no autorizado: ...{sender[-4:]}")
+                continue
             background_tasks.add_task(enqueue_message, msg)
-    except Exception:
-        pass
+    except Exception as e:
+        _log_error("webhook", e)
     return {"ok": True}
 
 async def handle_geo_reminder(phone: str, text: str) -> str:
@@ -6951,17 +7012,19 @@ Responde SOLO JSON valido sin markdown:
 FUEL_KEYWORDS = {"nafta", "combustible", "gnc", "gasoil", "premium", "super nafta",
                  "carga nafta", "cargue nafta", "puse nafta"}
 
-BOT_PREFIXES = (
-    "Procesando", "Receta", "Recordatorio", "Recorda",
-    "Buenos dias", "Tu lista", "Finanzas", "Te recuerdo",
-    "Guardado", "guardada",
-)
+_colas_por_telefono: dict[str, asyncio.Lock] = {}
 
-def is_bot_message(text: str) -> bool:
-    clean = text.lstrip(" *_~")
-    return clean.startswith(BOT_PREFIXES)
 
 async def process_single_item(phone: str, item: dict):
+    """Atiende los mensajes de una persona de a uno y en orden. El modelo ya no frena
+    al servidor mientras piensa, así que sin esta cola dos mensajes seguidos podían
+    procesarse a la vez y pisarse (el segundo sin ver la respuesta al primero)."""
+    lock = _colas_por_telefono.setdefault(phone, asyncio.Lock())
+    async with lock:
+        await _process_single_item(phone, item)
+
+
+async def _process_single_item(phone: str, item: dict):
     text = item.get("text", "")
     image_b64 = item.get("image_b64")
     image_type = item.get("image_type")
@@ -7235,12 +7298,19 @@ Responde:
         except Exception:
             pass
 
-    except json.JSONDecodeError:
-        pass
-    except Exception as e:
+    except json.JSONDecodeError as e:
+        # El modelo devolvió algo que no se pudo leer. Antes esto no decía NADA y el
+        # mensaje del usuario quedaba sin respuesta.
+        _log_error("process_single_item (respuesta ilegible del modelo)", e)
         try:
-            err_msg = f"{type(e).__name__}: {str(e)}"
-            await send_message(phone, f"Error: {err_msg[:200]}")
+            await send_message(phone, "⚠️ No pude procesar eso (me confundí al interpretarlo). "
+                                      "¿Me lo repetís con otras palabras?")
+        except Exception:
+            pass
+    except Exception as e:
+        _log_error("process_single_item", e)
+        try:
+            await send_message(phone, _mensaje_de_error(e))
         except Exception:
             pass
     finally:
@@ -7630,14 +7700,25 @@ REGLAS:
 
 _cron_job_running = False
 
+# Un recordatorio atrasado suena igual (con la aclaración de la hora) hasta 3 horas tarde.
+RECORDATORIO_MARGEN_MIN = 180
+_recordatorios_disparados: set[str] = set()
+# Preguntas pendientes que un recordatorio no debe borrar.
+_ESTADOS_QUE_NO_SE_PISAN = {
+    "confirm_factura_paid", "factura_mismatch_confirm", "factura_mismatch_note", "factura_confirm",
+    "ask_payment_method", "confirm_delete", "confirm_high_impact", "bulk_correction_confirm",
+}
+
 async def _cron_loop():
     """Background loop que ejecuta cron_job cada 60 segundos sin depender de llamadas externas."""
     await asyncio.sleep(60)  # Espera inicial para que el servidor termine de arrancar
     while True:
         try:
             await _run_cron_safe()
-        except Exception:
-            pass
+        except Exception as e:
+            # Antes se tragaba el error: si el cron fallaba todos los minutos
+            # (recordatorios, saludo, facturas) no quedaba ni un rastro en los logs.
+            _log_error("cron", e)
         await asyncio.sleep(60)
 
 async def _run_cron_safe():
@@ -7702,6 +7783,10 @@ async def _cron_job_inner():
         if (user_prefs.get("knot_state") or {}).get("ultimo_resumen") != now.date().isoformat():
             print("[cron] no quedó guardada la fecha del saludo")
         try:
+            # Releer la base Servicios una vez por día: antes solo se leía al arrancar,
+            # y un servicio agregado o un "Pagado hasta" corregido a mano en Notion no
+            # se veía hasta el próximo reinicio.
+            await _ds.load_services()
             access_token_summary = await get_gcal_access_token()
             async with httpx.AsyncClient() as http_summary:
                 await send_daily_summary(http_summary, access_token_summary, now)
@@ -7736,15 +7821,26 @@ async def _cron_job_inner():
     _noc_curr_min = now.hour * 60 + now.minute
     _last_nocturno = _last_summary_sent.get("nocturno")
     _sent_nocturno_today = bool(_last_nocturno and _last_nocturno.date() == now.date())
-    if _nocturno_check_enabled and 0 <= (_noc_curr_min - _noc_sched_min) <= 3 and not _sent_nocturno_today:
+    # Igual que el saludo: la fecha se guarda en "Estado Knot" para que un reinicio de
+    # Render no lo mande dos veces, y hay 45 minutos de margen (antes eran 3: si Knot
+    # se estaba reiniciando o el cron venía atrasado, esa noche no había resumen).
+    if not _sent_nocturno_today:
+        if (user_prefs.get("knot_state") or {}).get("ultimo_nocturno") == now.date().isoformat():
+            _sent_nocturno_today = True
+    if _nocturno_check_enabled and 0 <= (_noc_curr_min - _noc_sched_min) <= 45 and not _sent_nocturno_today:
         _last_summary_sent["nocturno"] = now
+        user_prefs.setdefault("knot_state", {})["ultimo_nocturno"] = now.date().isoformat()
+        try:
+            await save_user_config(MY_NUMBER)
+        except Exception as _e:
+            print(f"[cron] no pude guardar la fecha del resumen nocturno: {_e}")
         try:
             access_token_noc = await get_gcal_access_token()
             async with httpx.AsyncClient() as http_noc:
                 await send_resumen_nocturno(http_noc, access_token_noc, now)
             fired.append("RESUMEN_NOCTURNO")
-        except Exception:
-            pass
+        except Exception as _e:
+            _log_error("resumen nocturno", _e)
 
     access_token = await get_gcal_access_token()
     if not access_token:
@@ -7756,9 +7852,13 @@ async def _cron_job_inner():
             "https://www.googleapis.com/calendar/v3/calendars/primary/events",
             headers=headers,
             params={
-                "timeMin": now.strftime("%Y-%m-%dT%H:%M:00-03:00"),
+                # Se mira también hacia atrás: un recordatorio dura 1 minuto en el
+                # calendario, y si el cron llegaba tarde (Knot reiniciándose por un
+                # deploy, el saludo de la mañana leyendo facturas) ya no lo encontraba
+                # y el recordatorio NO SONABA NUNCA.
+                "timeMin": (now - timedelta(minutes=RECORDATORIO_MARGEN_MIN)).strftime("%Y-%m-%dT%H:%M:00-03:00"),
                 "timeMax": (now + timedelta(minutes=61)).strftime("%Y-%m-%dT%H:%M:00-03:00"),
-                "singleEvents": "true", "orderBy": "startTime", "maxResults": "20"
+                "singleEvents": "true", "orderBy": "startTime", "maxResults": "50"
             }
         )
         if r.status_code != 200:
@@ -7778,13 +7878,36 @@ async def _cron_job_inner():
             except Exception:
                 continue
 
-            if "[TEMP]" in desc and -30 <= diff_seconds <= 90:
+            if "[TEMP]" in desc and -RECORDATORIO_MARGEN_MIN * 60 <= diff_seconds <= 90:
+                if event_id in _recordatorios_disparados:
+                    continue  # ya sonó; solo falló el borrado del calendario
                 clean_summary = summary.replace("🔔 ", "").strip()
-                await send_message(MY_NUMBER, f"🔔 *Recordatorio*\n{clean_summary}")
-                await http.delete(
-                    f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}",
-                    headers=headers
-                )
+                _atraso_min = -diff_seconds // 60
+                _tarde = (f"\n_(era para las {start['dateTime'][11:16]}; me atrasé, perdón)_"
+                          if _atraso_min >= 3 else "")
+                if not await send_message(MY_NUMBER, f"🔔 *Recordatorio*\n{clean_summary}{_tarde}"):
+                    # WhatsApp no lo aceptó: se deja en el calendario y se reintenta
+                    # en la próxima vuelta en vez de darlo por avisado.
+                    print(f"[cron] no pude mandar el recordatorio '{clean_summary}', reintento")
+                    continue
+                _recordatorios_disparados.add(event_id)
+                if len(_recordatorios_disparados) > 500:
+                    _recordatorios_disparados.clear()
+                    _recordatorios_disparados.add(event_id)
+                try:
+                    await http.delete(
+                        f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{event_id}",
+                        headers=headers
+                    )
+                except Exception as _e:
+                    print(f"[cron] no pude borrar el recordatorio ya avisado: {_e}")
+                # Si hay una pregunta de plata esperando respuesta (¿pagaste tal factura?),
+                # no se pisa con la de posponer: antes el recordatorio la borraba y la
+                # respuesta del usuario ya no se entendía.
+                _pendiente = (pending_state.get(MY_NUMBER) or {}).get("type")
+                if _pendiente in _ESTADOS_QUE_NO_SE_PISAN:
+                    fired.append(f"TEMP: {summary} (sin botones: hay una pregunta pendiente)")
+                    continue
                 pending_state[MY_NUMBER] = {"type": "snooze", "summary": clean_summary}
                 await send_interactive_buttons(
                     MY_NUMBER,
@@ -8432,11 +8555,9 @@ async def manage_known_places(request: Request):
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "time": now_argentina().strftime("%H:%M"), "bot": "matrics",
-            "location": {"lat": current_location["lat"], "lon": current_location["lon"],
-                         "source": current_location["source"],
-                         "location_name": current_location.get("location_name"),
-                         "known_place": (is_at_known_place() or {}).get("name")}}
+    # Esta dirección es pública (no pide clave): antes devolvía la ubicación GPS del
+    # usuario a cualquiera que la abriera.
+    return {"status": "ok", "time": now_argentina().strftime("%H:%M"), "bot": "knot"}
 
 # ── MODULO SHOPPING ────────────────────────────────────────────────────────────
 

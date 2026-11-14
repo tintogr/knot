@@ -7,12 +7,18 @@
 Bot personal de WhatsApp (Python / FastAPI) desplegado en **Render** (auto-deploy al pushear a `main`).
 El dueño es **Martin** (arquitecto, no programador — todo el código lo genera Claude).
 
+> 🔎 **Auditoría de noviembre 2026:** [`docs/AUDITORIA_2026-11.md`](docs/AUDITORIA_2026-11.md) — qué se
+> corrigió, qué variables de Render hay que verificar y la lista priorizada de lo que falta.
+
 ## Archivos
 - `main.py` — webhook, clasificador, handlers de agentes (gastos, eventos, etc.), lógica de negocio.
 - `notion_datastore.py` — `NotionDataStore`: acceso a las DBs de Notion (finanzas, servicios, etc.).
 - `summaries.py` — resúmenes diario/nocturno, clima, lectura de facturas de Gmail (con visión de PDFs).
 - `state.py` — globals compartidos, constantes, `SONNET_MODEL` / `HAIKU_MODEL`, `_ds`.
 - `config.py`, `wa_utils.py`, `gcal.py` — config de usuario, WhatsApp, Google Calendar.
+
+- `tests/` — pruebas automáticas (no tocan nada real). Correr con `python -m pytest` antes de commitear;
+  `pip install -r requirements-dev.txt` la primera vez. Todo arreglo nuevo va con su prueba.
 
 ## Workflow de git
 Somos los únicos dos devs. **Mergear directo a `main` y pushear** (Render deploya solo). No hace falta PR.
@@ -121,6 +127,25 @@ El conector de Notion de Claude Code rechaza escribir texto que empiece con "{" 
 4. **Ingesta de resúmenes PDF de Mercado Pago** (parsear movimientos + clasificar + dedup).
 6. **Evaluar base de datos propia** en vez de Notion (idea de Martin, sept 2026): servidores, costos, pros y contras. La capa `_ds` ya aísla todo el acceso a Notion.
 5. Avisos de salida según tráfico: hoy solo se manda un link de Google Maps; calcularlo de verdad necesita routing (OSRM, gratis) + scheduler.
+
+## Confiabilidad (auditoría 14/11/2026)
+- **Solo el dueño** es atendido: `_remitente_autorizado` compara el remitente con `MY_WA_NUMBER`
+  (`state.mismo_telefono` reconoce 549… y 54…15…) y con `ALLOWED_PHONES`. Apagado: `KNOT_SOLO_DUENO=0`.
+- `claude_create` corre el modelo en un hilo aparte (no congela el servidor), reintenta 429/5xx/cortes y
+  cae a `MODELOS_DE_RESPALDO` si el modelo fue retirado (404). Los mensajes de una persona se atienden
+  de a uno (`_colas_por_telefono`).
+- El cliente de Notion (`_ClienteConReintentos`) reintenta lecturas y updates; las **creaciones** solo
+  ante 429 o si la conexión no llegó a abrirse (para no duplicar). `DataStoreError` es un tipo propio.
+- `save_config` guarda todo JSON con `_rich_text_largo` (nunca recortar con `[:2000]`: corta el JSON y
+  al releer se pierde el dato). "Estado Knot" va primero y aparte.
+- Recordatorios `[TEMP]`: suenan hasta `RECORDATORIO_MARGEN_MIN` (180) minutos tarde, con la hora
+  original; `_recordatorios_disparados` evita repetirlos; no pisan `_ESTADOS_QUE_NO_SE_PISAN`.
+- `pending_state` es un `_PorTelefono`: la clave se normaliza, da igual el formato del número.
+- Errores: `_log_error` (traza completa a los logs) + `_mensaje_de_error` (texto para el usuario, sin
+  volcar la excepción). **No agregar `except Exception: pass`**: como mínimo, un `print` con el motivo.
+- El saludo solo dice "✅ Facturas al día" si pudo leer Notion (`get_impaga_facturas(estricto=True)`) y
+  el mail (`summaries.lectura_facturas["ok"]`).
+- `/health` es pública: nunca devolver datos del usuario ahí.
 
 ## Reglas críticas
 - Timezone: usar `now_argentina()`, nunca `datetime.now()` naive.

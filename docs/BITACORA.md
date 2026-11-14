@@ -331,3 +331,44 @@ Martin quiere evaluar una base propia ("copia de Notion") con pros y contras de 
 Punto de partida favorable: **no quedan llamadas directas a Notion fuera de
 `notion_datastore.py`** (todo pasa por `_ds`, 125 usos). Migrar = escribir otro DataStore
 con los mismos métodos, sin tocar `main.py`.
+
+---
+
+## 12. Auditoría completa (14 noviembre 2026)
+
+Pedido de Martin: auditar todo el código teniendo en cuenta la visión, pulirlo y dejarlo en
+condiciones de crecer (y, a largo plazo, de venderse). Informe completo, con lo que falta
+priorizado: [`AUDITORIA_2026-11.md`](AUDITORIA_2026-11.md). Rama `auditoria-nov-2026`.
+
+### 12.1 Lo más grave que apareció
+- **Filtro `is_bot_message`**: descartaba en silencio cualquier mensaje que empezara con
+  "Recorda", "Receta", "Finanzas", "Buenos dias", "Tu lista" o "Guardado". "Recordame…" con
+  mayúscula nunca llegaba al agente. Eliminado.
+- **Cualquier número era atendido como el dueño** si `ALLOWED_PHONES` no estaba configurado (el
+  teléfono estaba cableado en `enqueue_message`). Ahora solo el dueño.
+- **`/health` devolvía la ubicación GPS** sin pedir clave.
+- **Recordatorios que no sonaban**: el evento `[TEMP]` dura 1 minuto y la consulta arrancaba en
+  "ahora"; un cron atrasado 2 minutos (deploy, saludo leyendo facturas) ya no lo veía.
+- **El modelo congelaba el servidor**: `claude_create` era `async` pero llamaba al cliente
+  sincrónico, así que cada llamada frenaba el webhook y el cron.
+- **`save_config`**: JSON recortado a 2.000 caracteres (se perdía entero al releer) y columnas sin
+  recorte que, al pasar los 2.000, hacían fallar todo el guardado sin avisar.
+- **"✅ Facturas al día" sin haber mirado**: `get_impaga_facturas` devolvía `[]` si Notion fallaba.
+- **Dólar en 1000** cuando dolarapi no respondía, grabado en cada gasto.
+
+### 12.2 También
+Reintentos seguros en Notion; token de Google reutilizado; resumen nocturno con margen y fecha
+guardada; cancelar recordatorio pregunta si no está claro cuál; errores sin volcar la excepción al
+usuario; varios mensajes por aviso; horas del servidor (UTC) reemplazadas por hora argentina;
+limpieza del calendario que borraba eventos sin título; títulos de Notion con formato cortados;
+base Servicios releída cada mañana.
+
+### 12.3 Pruebas
+Primera suite del proyecto: `tests/`, 41 pruebas, sin servicios reales. Flujo de GitHub que las
+corre en cada push. Falta el banco de conversaciones contra el modelo (informe, 4.2).
+
+### 12.4 Decisiones que quedan para Martin
+Verificar en Render `WHATSAPP_APP_SECRET`, `CRON_SECRET`, `LOCATION_SECRET`, `WHATSAPP_VERIFY_TOKEN`
+y `MY_WA_NUMBER` (informe, sección 3). Orden propuesto de lo que sigue: estado persistente →
+banco de conversaciones → partir `main.py` → estados pendientes con el modelo → multiusuario.
+

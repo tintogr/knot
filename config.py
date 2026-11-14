@@ -2,7 +2,7 @@ import json
 from notion_datastore import UserConfig
 from state import (
     _ds, user_prefs, current_location, _last_summary_sent,
-    MY_NUMBER, DAILY_SUMMARY_HOUR, claude_create, SONNET_MODEL,
+    MY_NUMBER, DAILY_SUMMARY_HOUR, claude_create, SONNET_MODEL, now_argentina,
 )
 
 
@@ -47,7 +47,13 @@ async def load_user_config(wa_number: str):
         from state import PERSONAS_INICIALES
         # Se suman las iniciales que falten (sin pisar lo que Knot ya aprendió).
         user_prefs["personas"] = {**PERSONAS_INICIALES, **(cfg.personas or {})}
-        user_prefs["knot_state"] = cfg.knot_state or {}
+        _estado = cfg.knot_state or {}
+        # El último dólar consultado vive en memoria y se guarda recién con el próximo
+        # guardado: esta relectura (el cron la hace cada minuto) no tiene que pisarlo.
+        _dolar_en_memoria = (user_prefs.get("knot_state") or {}).get("ultimo_dolar")
+        if _dolar_en_memoria:
+            _estado["ultimo_dolar"] = _dolar_en_memoria
+        user_prefs["knot_state"] = _estado
         user_prefs["_config_page_id"] = page_id
         if cfg.saved_lat is not None and cfg.saved_lon is not None:
             # Siempre guardar en user_prefs como fallback
@@ -61,16 +67,15 @@ async def load_user_config(wa_number: str):
                     current_location["location_name"] = cfg.saved_city
         if cfg.last_summary_date:
             user_prefs["_last_summary_date"] = cfg.last_summary_date
-            from datetime import date
             if not _last_summary_sent.get("daily"):
-                try:
-                    if cfg.last_summary_date == date.today().isoformat():
-                        from datetime import datetime
-                        _last_summary_sent["daily"] = datetime.now()
-                except Exception:
-                    pass
-    except Exception:
-        pass
+                # Hora argentina: el servidor está en UTC y entre las 21 y las 24 "hoy"
+                # ya era mañana, así que la comparación fallaba.
+                if cfg.last_summary_date == now_argentina().date().isoformat():
+                    _last_summary_sent["daily"] = now_argentina()
+    except Exception as e:
+        # Antes se tragaba el error: si Notion fallaba, Knot seguía con la configuración
+        # vieja (o vacía) y no quedaba ningún rastro de por qué.
+        print(f"[config] no pude cargar la configuración: {type(e).__name__}: {str(e)[:200]}")
 
 
 async def save_user_config(wa_number: str):
@@ -103,9 +108,10 @@ async def save_user_config(wa_number: str):
             personas=user_prefs.get("personas"),
             knot_state=user_prefs.get("knot_state"),
         )
-        await _ds.save_config(page_id, cfg)
-    except Exception:
-        pass
+        if not await _ds.save_config(page_id, cfg):
+            print("[config] la configuración no se guardó completa (ver líneas [save_config] arriba)")
+    except Exception as e:
+        print(f"[config] no pude guardar la configuración: {type(e).__name__}: {str(e)[:200]}")
 
 
 async def handle_configurar(text: str) -> str:
@@ -168,8 +174,7 @@ Responde:
             changed.append(f"Horario del resumen -> *{hora_fmt}*")
             # Si el nuevo horario es futuro (todavia no llego hoy), resetear el flag
             # para permitir el envio en este cambio (no esperar al dia siguiente)
-            from datetime import datetime as _dt
-            now_ar = _dt.now()
+            now_ar = now_argentina()
             target_min = hora * 60 + mins
             curr_min = now_ar.hour * 60 + now_ar.minute
             if target_min > curr_min:
