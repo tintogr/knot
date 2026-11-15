@@ -2,8 +2,8 @@
 
 > Hecha el 14/11/2026 sobre `main` (`b34a645`). Se leyeron `docs/VISION.md`, `docs/historia/`,
 > `docs/BITACORA.md`, las páginas de Notion *Knot* y *Critique — Knot UX*, y el código.
-> Los arreglos están en la rama `auditoria-nov-2026`. **No están en `main`**: Render sigue corriendo
-> la versión anterior hasta que se mezcle la rama.
+> **Actualización 15/11:** todo lo de la sección 2 está en `main` (deployado). Además se hizo una
+> segunda tanda (sección 2 bis) que resuelve parte de 4.1 y 4.10. Lo demás de la sección 4 sigue pendiente.
 
 ## 1. Veredicto
 
@@ -82,6 +82,28 @@ las corre en cada push.
 
 Cubren lo de arriba. **No cubren** los agentes (gastos, eventos, chat) ni el saludo completo: eso
 depende del modelo y necesita otra clase de prueba (ver 4.2).
+
+## 2 bis. Segunda tanda (15/11): naturalidad y áreas conectadas
+
+| Qué | Antes | Ahora |
+|---|---|---|
+| Tareas | La base de Tareas solo tenía las de pagar facturas. "Tengo que llamar al plomero" no tenía dónde ir. | Se anotan, se consultan y se cierran por chat. Lo vencido o de hoy sale en el saludo. No inventa fechas, no duplica, y si hay varias parecidas pregunta cuál. |
+| Preguntas que cruzan áreas | El agente que contesta preguntas solo veía calendario, finanzas y mail. | También lee tareas, compras, plantas, reuniones y proyectos. "¿Qué tengo pendiente?" junta agenda, tareas y pagos. |
+| Varios pedidos en un mensaje | "Pagué el super y recordame llamar al contador": atendía uno y perdía el otro, sin avisar. | Atiende todos, en orden, sin pisar una pregunta de plata que haya quedado abierta. |
+| Reinicios (parte de 4.1) | Cada deploy borraba la conversación y la pregunta pendiente. | Se guardan tras cada mensaje y se recuperan al arrancar (charla: 24 h; pregunta: 30 min). Siguen sin guardarse los mensajes no entregados y el mapa de citas. |
+| Voz | Cada módulo hablaba distinto. | Una misma pauta de voz en el agente de entrada y en el de preguntas. Los demás módulos todavía no la usan. |
+| Ayuda | "hola"/"ayuda" devolvían un cartel fijo y viejo. | Las contesta el agente con las áreas y un ejemplo de cada una; preguntas puntuales, respuesta puntual. |
+| Borrar de las compras (4.10) | Borraba el primer parecido, sin confirmar. | Confirma; si hay varios parecidos, pregunta. Un "sí"/"no" escrito vale como el botón en todos los borrados. |
+| Respuestas a medias | Si al agente de preguntas se le acababan las rondas de consulta, mandaba un "Dejame revisar…" como respuesta final. | Contesta con lo que ya tiene. |
+| Listas cortadas | Tareas, compras y plantas se leían hasta 30 o 50, sin avisar. | Hasta 300 o 400. |
+
+Pruebas: 67. **No probado contra el modelo real:** los textos nuevos de los prompts (voz, guía, pedidos
+múltiples, herramientas de tareas). La lógica alrededor sí está probada. Si el agente de entrada se
+comportara raro, `KNOT_ROUTER=0` en Render vuelve al clasificador anterior.
+
+Agrega una columna de texto, `Conversacion Knot`, a la base de configuración en Notion (se crea sola al
+arrancar). Las tareas nuevas se guardan con origen "Agenda", "Proyecto", "Finanzas" o "Colección": si
+alguna de esas opciones no existía en la columna Category de Tareas, Notion la crea.
 
 ## 3. Lo que tenés que hacer vos en Render
 

@@ -29,6 +29,7 @@ from state import (
 )
 from wa_utils import send_message, send_interactive_buttons, send_reaction, error_servicio, cerrar_cliente
 import suggestion_gate
+import areas
 from gcal import (
     get_gcal_access_token, get_event_color, create_evento_gcal,
     fuzzy_match_event, _find_calendar_event, find_similar_calendar_events,
@@ -57,9 +58,111 @@ async def startup_event():
     await _ds.ensure_db_number_field("config", "Latitude")
     await _ds.ensure_db_number_field("config", "Longitude")
     await _ds.ensure_db_text_field("config", "City")
+    await _ds.ensure_db_text_field("config", CAMPO_CONVERSACION)
+    await restaurar_conversacion()
     asyncio.create_task(_run_once_migrations())
     asyncio.create_task(_cron_loop())
     asyncio.create_task(_publicar_formulas())
+
+
+# ── La conversación sobrevive a los reinicios ────────────────────────────────
+# Cada push a main reinicia el servidor. Antes eso borraba la conversación y la
+# pregunta que Knot tuviera hecha: si había preguntado "¿con qué pagaste?" y justo
+# había un deploy, la respuesta llegaba a un Knot que no recordaba la pregunta.
+# Ahora se guarda una foto en la página de config después de cada mensaje y se
+# recupera al arrancar.
+CAMPO_CONVERSACION = "Conversacion Knot"
+CONVERSACION_VALE_HORAS = 24      # pasado esto, la charla vieja no se recupera
+PENDIENTE_VALE_MIN = 30           # una pregunta sin responder caduca antes
+_conv_guardada: dict = {"contenido": None}
+_conv_lock = asyncio.Lock()
+
+
+def _foto_conversacion() -> dict:
+    """Lo que hay que recordar: los últimos mensajes y la pregunta pendiente, si hay."""
+    foto = {
+        "historial": [{"role": m["role"], "content": str(m["content"])[:3000]}
+                      for m in get_history(MY_NUMBER) if m.get("content")],
+        "pendiente": None,
+    }
+    estado = pending_state.get(MY_NUMBER)
+    if estado:
+        try:
+            json.dumps(estado)          # solo si se puede guardar tal cual
+            foto["pendiente"] = estado
+        except (TypeError, ValueError):
+            pass
+    return foto
+
+
+async def guardar_conversacion() -> bool:
+    """Guarda la foto si cambió desde la última vez. Devuelve True si quedó al día."""
+    page_id = user_prefs.get("_config_page_id")
+    if not page_id:
+        return False
+    async with _conv_lock:
+        foto = _foto_conversacion()
+        contenido = json.dumps(foto, ensure_ascii=False, sort_keys=True)
+        if contenido == _conv_guardada["contenido"]:
+            return True
+        foto["cuando"] = now_argentina().replace(tzinfo=None).isoformat()
+        ok = await _ds.guardar_texto_config(page_id, CAMPO_CONVERSACION, json.dumps(foto, ensure_ascii=False))
+        if ok:
+            _conv_guardada["contenido"] = contenido
+        return ok
+
+
+def _guardar_conversacion_en_segundo_plano():
+    async def _tarea():
+        try:
+            await guardar_conversacion()
+        except Exception as e:
+            print(f"[conversacion] no pude guardarla: {type(e).__name__}: {e}")
+    try:
+        asyncio.create_task(_tarea())
+    except RuntimeError:
+        pass  # no hay bucle de eventos (pruebas)
+
+
+async def restaurar_conversacion() -> str:
+    """Al arrancar: recupera la conversación y la pregunta pendiente guardadas.
+    Devuelve qué recuperó ("nada", "historial" o "historial+pendiente")."""
+    page_id = user_prefs.get("_config_page_id")
+    crudo = await _ds.leer_texto_config(page_id, CAMPO_CONVERSACION) if page_id else ""
+    if not crudo:
+        return "nada"
+    try:
+        foto = json.loads(crudo)
+        cuando = datetime.fromisoformat(foto["cuando"])
+    except Exception as e:
+        print(f"[conversacion] lo guardado no se pudo leer: {type(e).__name__}: {e}")
+        return "nada"
+    ahora = now_argentina().replace(tzinfo=None)
+    edad_min = (ahora - cuando).total_seconds() / 60
+    if edad_min < 0 or edad_min > CONVERSACION_VALE_HORAS * 60:
+        return "nada"
+    recuperado = "nada"
+    if not get_history(MY_NUMBER):
+        for m in foto.get("historial") or []:
+            if isinstance(m, dict) and m.get("role") in ("user", "assistant") and m.get("content"):
+                add_to_history(MY_NUMBER, m["role"], str(m["content"]))
+        if get_history(MY_NUMBER):
+            recuperado = "historial"
+    pendiente = foto.get("pendiente")
+    if isinstance(pendiente, dict) and pendiente.get("type") and edad_min <= PENDIENTE_VALE_MIN \
+            and MY_NUMBER not in pending_state:
+        vence = pendiente.get("expires_at")
+        try:
+            vencido = bool(vence) and ahora > datetime.fromisoformat(vence).replace(tzinfo=None)
+        except (TypeError, ValueError):
+            vencido = False
+        if not vencido:
+            pending_state[MY_NUMBER] = pendiente
+            recuperado += "+pendiente"
+    if recuperado != "nada":
+        print(f"[conversacion] recuperada tras el reinicio ({recuperado}, de hace {edad_min:.0f} min)")
+    _conv_guardada["contenido"] = json.dumps(_foto_conversacion(), ensure_ascii=False, sort_keys=True)
+    return recuperado
 
 
 async def _publicar_formulas():
@@ -2190,7 +2293,7 @@ async def eliminar_gasto(text: str, phone: str = None) -> tuple[bool, str]:
     ok = await _ds.archive_expense(entry.id)
     return (True, f"*{entry.name}* eliminado de Notion") if ok else (False, "Error al eliminar")
 
-async def eliminar_shopping(text: str) -> tuple[bool, str]:
+async def eliminar_shopping(text: str, phone: str = None) -> tuple[bool, str]:
     response = await claude_create(
         model=SONNET_MODEL, max_tokens=100,
         system="Extrae el nombre del item de la lista de compras a eliminar. Responde SOLO JSON.",
@@ -2205,7 +2308,24 @@ async def eliminar_shopping(text: str) -> tuple[bool, str]:
     results = await _ds.search_shopping_item(search_term)
     if not results:
         return False, f"No encontre ningun item llamado _{search_term}_ en la lista"
-    item = results[0]
+    # Si hay varios parecidos no se elige el primero: se pregunta cuál.
+    exactos = [r for r in results if (r.name or "").strip().lower() == search_term.strip().lower()]
+    if len(results) > 1 and len(exactos) != 1:
+        lista = "\n".join(f"- {r.name}" for r in results[:8])
+        return False, f"Encontré varios parecidos a _{search_term}_:\n{lista}\n\n¿Cuál saco?"
+    item = exactos[0] if len(exactos) == 1 else results[0]
+    if phone:
+        # Igual que el resto de los borrados: se confirma antes (antes se borraba directo).
+        pending_state[phone] = {
+            "type": "confirm_delete", "action": "shopping",
+            "page_id": item.id, "name": item.name,
+            "expires_at": (now_argentina() + timedelta(minutes=5)).replace(tzinfo=None).isoformat(),
+        }
+        await send_interactive_buttons(phone, f"¿Saco *{item.name}* de la lista de compras?", [
+            {"id": "confirm_delete_yes", "title": "Sí, sacalo"},
+            {"id": "confirm_delete_no", "title": "No, cancelar"},
+        ])
+        return True, ""
     ok = await _ds.archive_shopping_item(item.id)
     if ok:
         return True, f"*{item.name}* eliminado de la lista de compras"
@@ -2521,6 +2641,7 @@ ACTIVIDAD_FISICA: registrar, consultar, editar o eliminar actividad física. "co
 CONFIGURAR: cambiar configuracion de Knot. Solo cuando el usuario quiere CAMBIAR algo. Incluye cambiar el horario del resumen diario: "pasame el resumen a las 8", "dime el resumen a las 9", "manda el buenos dias a las 7.30" — cualquier pedido de resumen que incluya una hora especifica implica CAMBIAR el horario. Nunca cuando pregunta o se queja.
 RESUMEN_DIARIO: el usuario pide RECIBIR el resumen ahora, sin especificar un horario nuevo. "manda el resumen", "pasame el resumen diario", "dame el resumen ya", "enviame el buenos dias". NUNCA si incluye una hora especifica ("a las X") — eso es CONFIGURAR. NUNCA si pregunta sobre la configuracion → eso es CHAT.
 LISTA: gestionar listas generativas del usuario (peliculas, libros, lugares, ideas, etc., distintas de SHOPPING que es supermercado). Ejemplos: "agrega 3 pelis de Tarantino a mi lista de pelis", "sumame 5 libros de no ficcion a leer", "agrega Inception a mi lista de pelis", "que tengo en mi lista de libros", "borra X de mi lista de Y", "crea una lista de viajes". El usuario menciona "mi lista de X" o pide agregar items que NO son del super.
+TAREA: anotar, consultar o dar por hecha una tarea o pendiente que NO lleva aviso a una hora. "tengo que llamar al plomero", "anotame renovar el carnet antes del 30", "que tengo pendiente?", "ya llame al plomero", "listo lo del carnet". Si pide que se le AVISE o recuerde en un momento ("recordame", "avisame a las 6") -> RECORDATORIO. Si es algo con dia y hora en la agenda (turno, reunion) -> EVENTO. Si es pagar una factura o servicio -> GASTO.
 CHAT: cualquier pregunta, consulta o conversacion. Si tiene "?" o pide informacion -> CHAT.
 """
 
@@ -2612,6 +2733,8 @@ async def _router_agent(phone: str, text: str, has_image: bool, image_b64=None,
     system = f"""Sos Knot, el asistente personal de Martin por WhatsApp. Hablás en español rioplatense.
 Hoy: {hoy_str(now)}. Calendario: {semana_str(now)}.{personas_ctx()}
 
+{areas.VOZ_KNOT}
+
 Tu trabajo acá es entender el mensaje EN CONTEXTO de la conversación y decidir quién lo atiende.
 Cada módulo es un especialista que NO ve la conversación: solo recibe el texto que vos le pases.
 
@@ -2629,6 +2752,11 @@ Reglas:
   aclaración), contestá en "respuesta" y dejá "modulo" en null. No inventes datos que no tengas:
   si hace falta consultar la agenda, las finanzas o los mails, mandalo a CHAT.
 - Si no entendés qué quiere, preguntale en "respuesta" en vez de adivinar un módulo.
+- Si el mensaje pide VARIAS cosas distintas ("pagué el super 45 mil y recordame llamar al contador
+  mañana a las 10"), la primera va en "modulo"/"mensaje" y las demás en "otras", cada una con su módulo
+  y SOLO la parte del texto que le corresponde. Varios gastos juntos NO son varias cosas: van todos a
+  GASTO en un solo mensaje. Si es una sola cosa, "otras" va vacío.
+{areas.GUIA_CAPACIDADES}
 - NUNCA digas que hiciste algo (agendé, registré, pospuse, borré, marqué) si en la conversación no aparece Knot confirmando ESA acción. Si Martin pregunta '¿lo hiciste?' y no ves la confirmación, decile que no quedó hecho y ofrecé hacerlo ahora. No confundas una acción con otra anterior.
 - Ante una foto o documento, MIRALA y elegí el módulo por lo que se ve (factura/ticket -> GASTO, etc.).
 - Si es una captura de pantalla (de esta misma conversación, de otra app, de un mail), leela y usala
@@ -2638,6 +2766,7 @@ Reglas:
 
 Respondé SOLO un JSON, sin markdown:
 {{"modulo": "NOMBRE_DEL_MODULO" o null, "mensaje": "texto para el módulo", "respuesta": "texto para Martin" o null,
+ "otras": [{{"modulo": "NOMBRE_DEL_MODULO", "mensaje": "la parte del texto para ese módulo"}}] o [],
  "imagen": "si mandó imagen: qué muestra, en una línea (queda en la conversación); si no, null",
  "persona": {{"nombre": "...", "relacion": "...", "nombre_completo": "..." o null, "le_dice": ["..."] o []}} o null}}
 "persona": SOLO si en este mensaje Martin dice explícitamente quién es alguien ("Juan es mi primo",
@@ -2661,8 +2790,14 @@ lista de personas. Nunca lo deduzcas vos. Si además no pide nada más, contest�
     modulo = (datos.get("modulo") or "").strip().upper() or None
     if isinstance(datos.get("persona"), dict) and (datos["persona"].get("nombre") or "").strip():
         await _guardar_persona(datos["persona"])
+    otras = []
+    for o in (datos.get("otras") or [])[:MAX_ACCIONES_EXTRA]:
+        if isinstance(o, dict) and (o.get("mensaje") or "").strip():
+            _m = (o.get("modulo") or "").strip().upper()
+            if _m in _MODULOS_VALIDOS:
+                otras.append({"modulo": _m, "mensaje": o["mensaje"].strip()})
     return {"modulo": modulo, "mensaje": datos.get("mensaje") or text, "respuesta": datos.get("respuesta"),
-            "imagen": datos.get("imagen") if has_image else None}
+            "imagen": datos.get("imagen") if has_image else None, "otras": otras}
 
 
 async def _guardar_persona(p: dict) -> None:
@@ -2684,6 +2819,13 @@ async def _guardar_persona(p: dict) -> None:
         print(f"[personas] no pude guardar: {e}")
 
 
+# Un mensaje puede pedir más de una cosa ("pagué el super y recordame llamar al
+# contador"). Antes solo se atendía una y la otra se perdía sin aviso. El agente de
+# entrada devuelve las demás en "otras" y se atienden a continuación, en orden.
+MAX_ACCIONES_EXTRA = 3
+_acciones_extra: dict[str, list] = {}
+
+
 async def _decidir_ruta(phone: str, text: str, has_image: bool, history: list, image_b64=None,
                         image_type=None, extra_images=None) -> tuple:
     """(tipo, texto_para_el_modulo, respuesta_directa). Si el agente falla por lo que
@@ -2697,6 +2839,8 @@ async def _decidir_ruta(phone: str, text: str, has_image: bool, history: list, i
                 _txt = f"{text} [imagen: {r['imagen']}]".strip() if r.get("imagen") else text
                 return None, _txt, r["respuesta"]
             if r["modulo"] in _MODULOS_VALIDOS:
+                if r.get("otras"):
+                    _acciones_extra[phone] = r["otras"]
                 return r["modulo"], r["mensaje"], r["respuesta"]
             print(f"[router] modulo desconocido: {r['modulo']!r}, uso el clasificador")
         except Exception as e:
@@ -3244,7 +3388,10 @@ async def handle_chat(phone: str, text: str) -> str:
         }
     ]
 
+    tools = tools + areas.HERRAMIENTAS
+
     system = f"""Sos Knot, asistente personal en WhatsApp. Respondes conciso y natural en espanol rioplatense.
+{areas.VOZ_KNOT}
 Hoy: {hoy_str(now)}.
 Calendario de referencia: {semana_str(now)}.
 REGLA CRITICA: cuando el usuario menciona un dia de la semana, usa EXACTAMENTE la fecha de la tabla de arriba. NO calcules fechas mentalmente. NUNCA.
@@ -3261,6 +3408,7 @@ Tenes acceso a informacion real del usuario a traves de herramientas:
 - El clima actual y pronostico
 - Busqueda web para informacion externa
 - Configuracion de Knot (cambiar horario del resumen, extras, saludo, nocturno)
+{areas.TEXTO_PARA_EL_PROMPT}
 
 Antes de responder cualquier pregunta, pensa que fuentes son relevantes y consulta todas las que hagan falta.
 
@@ -3295,7 +3443,7 @@ CAPACIDADES COMPLETAS DE MATRICS (no niegues ninguna):
 - Crear y gestionar geo-reminders basados en ubicacion (via otro modulo)
 - Acceder a ubicacion GPS via OwnTracks (si esta activo, la info ya esta en tu contexto)
 - Consultar y gestionar lista de compras en Notion (via otro modulo)
-- Gestionar tasks y proyectos en Notion (tenes la tool crear_proyecto)
+- Anotar, consultar y completar tareas (tus tools crear_tarea, consultar_tareas, completar_tarea) y crear proyectos (crear_proyecto)
 - Consultar calendario, finanzas, clima, Gmail (tus tools directas)
 - Buscar en la web
 - Configurar Knot (horarios, extras, saludo)
@@ -3328,8 +3476,9 @@ La idea es que el usuario descubra capacidades de Knot a medida que las necesita
             messages=messages,
             tools=tools
         )
-    except Exception:
-        return "Error procesando tu mensaje. Intenta de nuevo."
+    except Exception as e:
+        _log_error("handle_chat (primera llamada)", e)
+        return _mensaje_de_error(e)
 
     if response.stop_reason == "end_turn":
         reply = next((b.text for b in response.content if hasattr(b, "text") and b.text), "").strip()
@@ -3338,6 +3487,10 @@ La idea es que el usuario descubra capacidades de Knot a medida que las necesita
 
     # ── Helper para ejecutar tools de chat ────────────────────────────────
     async def _execute_chat_tool(t_name, t_input):
+        # Tareas, compras, plantas, reuniones y proyectos viven en areas.py
+        _de_areas = await areas.ejecutar(t_name, t_input)
+        if _de_areas is not None:
+            return _de_areas
         t_result = ""
         if t_name == "consultar_calendario":
             dias_adelante = t_input.get("dias_adelante", 2)
@@ -3803,6 +3956,7 @@ La idea es que el usuario descubra capacidades de Knot a medida que las necesita
 
     # ── Loop para rondas adicionales de tools (max 4 rondas extra) ────────
     reply = ""
+    _quedo_a_medias = False
     for _round in range(4):
         try:
             next_response = await claude_create(
@@ -3811,8 +3965,9 @@ La idea es que el usuario descubra capacidades de Knot a medida que las necesita
                 messages=messages,
                 tools=tools
             )
-        except Exception:
-            reply = "Error procesando tu mensaje."
+        except Exception as e:
+            _log_error("handle_chat (ronda de herramientas)", e)
+            reply = _mensaje_de_error(e)
             break
 
         round_text = next((b.text for b in next_response.content if hasattr(b, "text") and b.text), "").strip()
@@ -3820,6 +3975,7 @@ La idea es que el usuario descubra capacidades de Knot a medida que las necesita
             reply = round_text
 
         round_tools = [b for b in next_response.content if b.type == "tool_use"]
+        _quedo_a_medias = bool(round_tools)
         if not round_tools:
             break
 
@@ -3835,6 +3991,21 @@ La idea es que el usuario descubra capacidades de Knot a medida que las necesita
             {"role": "assistant", "content": next_response.content},
             {"role": "user", "content": round_results}
         ]
+
+    if _quedo_a_medias:
+        # Se acabaron las rondas y el modelo todavía quería consultar algo más. Antes se
+        # mandaba como respuesta lo último que había dicho en el camino ("Dejame
+        # revisar...") y ahí quedaba. Ahora se le pide que conteste con lo que ya tiene.
+        try:
+            cierre = await claude_create(
+                model=SONNET_MODEL, max_tokens=800, system=system, messages=messages,
+                tools=tools, tool_choice={"type": "none"},
+            )
+            _txt = next((b.text for b in cierre.content if hasattr(b, "text") and b.text), "").strip()
+            if _txt:
+                reply = _txt
+        except Exception as e:
+            _log_error("handle_chat (cierre sin herramientas)", e)
 
     if not reply:
         reply = "No pude completar la consulta. Intenta de nuevo."
@@ -4964,6 +5135,25 @@ async def _interpretar_posponer(summary: str, text: str, phone: str) -> tuple:
     return accion, (d.get("fire_at") if accion == "posponer" else None), resto
 
 
+_SI_ESCRITO = {"si", "sí", "sii", "dale", "ok", "okey", "confirmo", "confirmado", "de una", "hacelo",
+               "borralo", "borrala", "eliminalo", "eliminala", "sacalo", "sacala", "si dale", "sí dale",
+               "si borralo", "sí borralo", "si eliminalo", "sí eliminalo", "si sacalo", "sí sacalo"}
+_NO_ESCRITO = {"no", "nop", "nope", "cancelar", "cancela", "cancelalo", "dejalo", "dejala", "mejor no",
+               "no gracias", "no cancelar", "no dejalo", "no lo borres", "no la borres"}
+
+
+def _si_o_no_escrito(text: str) -> str | None:
+    """Traduce un sí/no tipeado al id del botón de confirmación de borrado. Solo acepta
+    respuestas que son únicamente eso: cualquier otra frase devuelve None."""
+    t = re.sub(r"[^a-záéíóúñ ]", "", (text or "").lower()).strip()
+    t = " ".join(t.split())
+    if t in _SI_ESCRITO:
+        return "confirm_delete_yes"
+    if t in _NO_ESCRITO:
+        return "confirm_delete_no"
+    return None
+
+
 async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
     state_type = state.get("type")
 
@@ -5042,6 +5232,9 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
             except Exception:
                 pass
 
+        # La confirmación también vale escrita ("sí", "dale", "no"): antes solo servía
+        # apretar el botón, y un "sí" tipeado abandonaba el borrado sin hacer nada.
+        text = _si_o_no_escrito(text) or text
         if text == "confirm_delete_yes":
             action = state["action"]
             page_id = state["page_id"]
@@ -5056,6 +5249,9 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
             elif action == "meeting":
                 ok = await _ds.archive_meeting(page_id)
                 msg = f"*{name}* eliminada." if ok else "No pude eliminar."
+            elif action == "shopping":
+                ok = await _ds.archive_shopping_item(page_id)
+                msg = f"Saqué *{name}* de la lista de compras." if ok else "No pude sacarlo de la lista."
             elif action == "event":
                 access_token = await get_gcal_access_token()
                 ok = False
@@ -7021,7 +7217,16 @@ async def process_single_item(phone: str, item: dict):
     procesarse a la vez y pisarse (el segundo sin ver la respuesta al primero)."""
     lock = _colas_por_telefono.setdefault(phone, asyncio.Lock())
     async with lock:
+        _acciones_extra.pop(phone, None)
         await _process_single_item(phone, item)
+        for extra in _acciones_extra.pop(phone, None) or []:
+            # Si la acción anterior dejó una pregunta importante esperando (¿con qué
+            # pagaste?, ¿confirmás el borrado?), la acción siguiente no la tiene que pisar.
+            previo = pending_state.get(phone)
+            await _process_single_item(phone, {"text": extra["mensaje"], "_modulo": extra["modulo"]})
+            if previo and previo.get("type") in _ESTADOS_QUE_NO_SE_PISAN:
+                pending_state[phone] = previo
+        _guardar_conversacion_en_segundo_plano()
 
 
 async def _process_single_item(phone: str, item: dict):
@@ -7030,6 +7235,9 @@ async def _process_single_item(phone: str, item: dict):
     image_type = item.get("image_type")
     extra_images = item.get("extra_images", [])
     quoted_text = item.get("quoted_text")
+    # Módulo ya decidido por el agente de entrada (segunda o tercera acción de un mismo
+    # mensaje): no se vuelve a clasificar ni se toma como respuesta a una pregunta pendiente.
+    modulo_decidido = item.get("_modulo")
 
     if not text and not image_b64:
         return
@@ -7047,7 +7255,7 @@ async def _process_single_item(phone: str, item: dict):
         await send_message(phone, msg)
 
     try:
-        if phone in pending_state:
+        if phone in pending_state and not modulo_decidido:
             # Si llega una imagen sin texto y el pending state es "soft" (no bloqueante),
             # lo descartamos y procesamos la imagen como un mensaje nuevo
             _soft_states = {"unknown_card_register", "unknown_card_owner", "undo_window", "select_payment_method"}
@@ -7096,10 +7304,13 @@ async def _process_single_item(phone: str, item: dict):
         if user_prefs.get("_config_page_id") is None:
             await load_user_config(phone)
 
-        tipo, text, _respuesta_directa = await _decidir_ruta(
-            phone, text, image_b64 is not None, get_history(phone),
-            image_b64=image_b64, image_type=image_type, extra_images=extra_images,
-        )
+        if modulo_decidido:
+            tipo, _respuesta_directa = modulo_decidido, None
+        else:
+            tipo, text, _respuesta_directa = await _decidir_ruta(
+                phone, text, image_b64 is not None, get_history(phone),
+                image_b64=image_b64, image_type=image_type, extra_images=extra_images,
+            )
         if _respuesta_directa and not tipo:
             # El agente resolvió el mensaje sin necesidad de ningún módulo.
             add_to_history(phone, "user", text or "(imagen)")
@@ -7131,8 +7342,9 @@ async def _process_single_item(phone: str, item: dict):
             await _reply(reply)
 
         elif tipo == "ELIMINAR_SHOPPING":
-            success, msg = await eliminar_shopping(text)
-            await _reply(msg if success else msg)
+            success, msg = await eliminar_shopping(text, phone)
+            if msg:
+                await _reply(msg)
 
         elif tipo == "ELIMINAR_GASTO":
             success, msg = await eliminar_gasto(text, phone)
@@ -7252,7 +7464,7 @@ async def _process_single_item(phone: str, item: dict):
             success, msg = await corregir_shopping(text)
             await _reply(msg)
 
-        elif tipo == "CHAT":
+        elif tipo in ("CHAT", "TAREA"):
             respuesta = await handle_chat(phone, text)
             if respuesta:
                 await _reply(respuesta)
@@ -7938,6 +8150,8 @@ async def _cron_job_inner():
                 await send_message(MY_NUMBER, f"*En 15 minutos:* {summary}{loc_str}{geo_ctx_str}")
                 fired.append(f"REM15: {summary}")
 
+    # Lo que el cron mandó (un recordatorio, el saludo) también es parte de la conversación.
+    _guardar_conversacion_en_segundo_plano()
     return {"ok": True, "fired": fired, "time": now.strftime("%H:%M")}
 
 

@@ -1135,6 +1135,17 @@ async def send_daily_summary(http, access_token: str, now: datetime):
         lines.append("")
         lines.append("⚠️ Tuve un problema revisando tus facturas hoy. Preguntame más tarde y lo vuelvo a mirar.")
 
+    # Tareas (no pagos) vencidas o para hoy: la base de Tareas dejó de ser solo de facturas.
+    try:
+        from areas import tareas_para_el_saludo
+        _tareas_hoy = await tareas_para_el_saludo(now.date())
+        if _tareas_hoy:
+            lines.append("")
+            lines.append("*Tareas para hoy:*")
+            lines.extend(_tareas_hoy)
+    except Exception as _e:
+        print(f"[saludo] no pude leer las tareas: {type(_e).__name__}: {_e}")
+
     # Sección "📬 Emails importantes": query independiente que excluye facturas/servicios
     _idx_mails = len(lines)
     try:

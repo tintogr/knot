@@ -372,3 +372,24 @@ Verificar en Render `WHATSAPP_APP_SECRET`, `CRON_SECRET`, `LOCATION_SECRET`, `WH
 y `MY_WA_NUMBER` (informe, sección 3). Orden propuesto de lo que sigue: estado persistente →
 banco de conversaciones → partir `main.py` → estados pendientes con el modelo → multiusuario.
 
+### 12.5 Segunda tanda (15/11): que se sienta natural y que las áreas se hablen
+Pedido de Martin: corregir la lógica de uso, no solo los errores; que sea menos "programado" y que
+Finanzas, Tareas, Colecciones, etc. se articulen.
+- **Tareas generales** (`areas.py`): la base de Tareas dejó de ser solo de facturas. "Tengo que
+  llamar al plomero" se anota; "¿qué tengo pendiente?" cruza agenda, tareas y pagos; "ya llamé al
+  plomero" la cierra. Sale en el saludo lo vencido o de hoy.
+- **El agente de preguntas lee todas las áreas**: compras, plantas, reuniones y proyectos (antes solo
+  calendario, finanzas y mail; "¿cuándo regué el potus?" no tenía cómo contestarse).
+- **Un mensaje con varios pedidos** ("pagué el super y recordame llamar al contador") atiende todos;
+  antes se quedaba con uno y el otro se perdía sin aviso.
+- **La conversación y la pregunta pendiente sobreviven a un deploy** (columna `Conversacion Knot`).
+- **Voz común** (`VOZ_KNOT`) y **ayuda natural** (`GUIA_CAPACIDADES`) en el agente de entrada y el chat.
+- Sacar algo de las compras ahora **pide confirmación** y, si hay varios parecidos, pregunta cuál. Un
+  "sí"/"no" tipeado vale como el botón (antes un "sí" escrito abandonaba el borrado).
+- El chat ya no manda como respuesta final un "Dejame revisar..." cuando se le acaban las rondas de
+  herramientas: se le pide que conteste con lo que tiene.
+- Tareas, compras y plantas se leían de a 30/50 como máximo, sin avisar: ahora hasta 300/400.
+- Pruebas: 67. **Los cambios de prompt (voz, guía, "otras", herramientas nuevas) no se pudieron probar
+  contra el modelo real desde la sesión de auditoría**: observar los primeros días. Si el agente de
+  entrada se comportara mal, `KNOT_ROUTER=0` vuelve al clasificador anterior.
+

@@ -16,6 +16,8 @@ El dueño es **Martin** (arquitecto, no programador — todo el código lo gener
 - `summaries.py` — resúmenes diario/nocturno, clima, lectura de facturas de Gmail (con visión de PDFs).
 - `state.py` — globals compartidos, constantes, `SONNET_MODEL` / `HAIKU_MODEL`, `_ds`.
 - `config.py`, `wa_utils.py`, `gcal.py` — config de usuario, WhatsApp, Google Calendar.
+- `areas.py` — lo que une las áreas: tareas generales, lecturas de compras/plantas/reuniones/proyectos para
+  el agente de chat, la voz común (`VOZ_KNOT`) y la guía de capacidades. **Lo nuevo va en módulos así, no en `main.py`.**
 
 - `tests/` — pruebas automáticas (no tocan nada real). Correr con `python -m pytest` antes de commitear;
   `pip install -r requirements-dev.txt` la primera vez. Todo arreglo nuevo va con su prueba.
@@ -146,6 +148,22 @@ El conector de Notion de Claude Code rechaza escribir texto que empiece con "{" 
 - El saludo solo dice "✅ Facturas al día" si pudo leer Notion (`get_impaga_facturas(estricto=True)`) y
   el mail (`summaries.lectura_facturas["ok"]`).
 - `/health` es pública: nunca devolver datos del usuario ahí.
+
+## Áreas conectadas (15/11/2026)
+- **Tareas generales**: módulo `TAREA` del catálogo → lo atiende `handle_chat` con las herramientas de
+  `areas.py` (`crear_tarea`, `consultar_tareas`, `completar_tarea`). Nunca inventa fecha, no duplica, y si
+  hay varias parecidas pregunta. Las "💰/🔁 Pagar ..." no se tocan a mano (las cierra el sistema de facturas).
+  Las vencidas o de hoy salen en el saludo (`tareas_para_el_saludo`).
+- El agente de chat también lee compras, plantas, reuniones y proyectos (`areas.HERRAMIENTAS`).
+- **Un mensaje, varios pedidos**: el agente de entrada devuelve `"otras": [{modulo, mensaje}]` (máx. 3);
+  `process_single_item` las atiende en orden con `item["_modulo"]` (sin reclasificar) y sin pisar
+  preguntas de `_ESTADOS_QUE_NO_SE_PISAN`.
+- **La conversación sobrevive a los reinicios**: columna `Conversacion Knot` de la config
+  (`guardar_conversacion` tras cada mensaje y cada vuelta del cron si cambió; `restaurar_conversacion` al
+  arrancar). Historial hasta 24 h; pregunta pendiente hasta 30 min.
+- Todo borrado pide confirmación (ahora también compras) y la confirmación vale escrita (`_si_o_no_escrito`).
+- `VOZ_KNOT` y `GUIA_CAPACIDADES` están en los prompts del agente de entrada y del chat: cualquier agente
+  nuevo que le hable al usuario tiene que incluir `VOZ_KNOT`.
 
 ## Reglas críticas
 - Timezone: usar `now_argentina()`, nunca `datetime.now()` naive.

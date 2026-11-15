@@ -1328,7 +1328,7 @@ class NotionDataStore:
             "shopping",
             filter_obj=filter_obj,
             sorts=[{"property": "Category", "direction": "ascending"}],
-            page_size=50,
+            max_items=400,  # antes: solo los primeros 50, sin avisar
         )
         return [self._parse_shopping(p) for p in pages]
 
@@ -1575,7 +1575,7 @@ class NotionDataStore:
 
     async def query_plants(self) -> list[PlantEntry]:
         """List all plants."""
-        pages = await self._query_db("plants", page_size=50)
+        pages = await self._query_db("plants", max_items=300)
         return [self._parse_plant(p) for p in pages]
 
     async def update_plant(self, plant_id: str, updates: dict) -> PlantEntry:
@@ -1708,7 +1708,7 @@ class NotionDataStore:
         pages = await self._query_db(
             "tasks",
             filter_obj={"and": conditions},
-            page_size=30,
+            max_items=300,  # antes: solo las primeras 30, sin avisar
         )
         return [self._parse_task(p) for p in pages]
 
@@ -2850,6 +2850,31 @@ class NotionDataStore:
             return True
         except Exception:
             return False
+
+    async def guardar_texto_config(self, page_id: str, campo: str, texto: str) -> bool:
+        """Guarda un texto largo (sin recortar) en una columna de la página de config."""
+        if not page_id:
+            return False
+        try:
+            await self._update_page(page_id, {campo: {"rich_text": _rich_text_largo(texto)}})
+            return True
+        except Exception as e:
+            print(f"[config] no pude guardar '{campo}': {str(e)[:150]}")
+            return False
+
+    async def leer_texto_config(self, page_id: str, campo: str) -> str:
+        """Lee una columna de texto de la página de config ('' si no hay nada o falla)."""
+        if not page_id:
+            return ""
+        try:
+            r = await self._http.get(f"{NOTION_API}/pages/{page_id}", headers=self._headers_cache)
+            if r.status_code != 200:
+                print(f"[config] no pude leer '{campo}' ({r.status_code})")
+                return ""
+            return _get_text(r.json().get("properties", {}), campo)
+        except Exception as e:
+            print(f"[config] no pude leer '{campo}': {str(e)[:150]}")
+            return ""
 
     async def update_config_fields(self, page_id: str, fields: dict) -> bool:
         """Update arbitrary rich_text fields on the config page. fields = {notion_field_name: text_value}."""
