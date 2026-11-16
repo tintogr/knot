@@ -28,6 +28,7 @@ from state import (
     claude_create, hoy_str, semana_str, get_history, add_to_history,
 )
 from wa_utils import send_message, send_interactive_buttons, send_reaction, error_servicio, cerrar_cliente
+from wa_utils import revisar_numero_al_arrancar
 import suggestion_gate
 import areas
 import finanzas
@@ -66,6 +67,14 @@ async def startup_event():
     asyncio.create_task(_run_once_migrations())
     asyncio.create_task(_cron_loop())
     asyncio.create_task(_publicar_formulas())
+    asyncio.create_task(_revisar_numero())
+
+
+async def _revisar_numero():
+    try:
+        await revisar_numero_al_arrancar()
+    except Exception as e:
+        print(f"[whatsapp] falló la revisión del número al arrancar: {type(e).__name__}: {e}")
 
 
 # ── La conversación sobrevive a los reinicios ────────────────────────────────

@@ -1,6 +1,7 @@
 import asyncio
+import os
 import httpx
-from state import WA_API, WA_TOKEN, record_message_text, registrar_enviado, add_to_history
+from state import WA_API, WA_TOKEN, WA_PHONE_ID, record_message_text, registrar_enviado, add_to_history
 
 # Un solo cliente HTTP para todo lo que se manda a WhatsApp: antes se abría una
 # conexión nueva por cada mensaje (más lento, y sin límite de tiempo claro).
@@ -37,6 +38,85 @@ async def _post(payload: dict) -> httpx.Response | None:
     return None
 
 
+# ── Registro del número ───────────────────────────────────────────────────────
+# Un número de WhatsApp recién creado queda "Pendiente": Meta acepta los pedidos pero
+# contesta "(#133010) Account not registered" y no entrega nada, ni de ida ni de vuelta.
+# Pasó en noviembre 2026, cuando Meta borró el número de prueba y hubo que pedir otro.
+# Se arregla con un pedido de registro que lleva un PIN de 6 dígitos (queda como el PIN
+# de verificación en dos pasos del número). Knot lo hace solo si en Render está
+# WHATSAPP_PIN. Con WHATSAPP_WABA_ID además se asegura de que la cuenta le avise a la app
+# cuando entra un mensaje.
+_GRAPH = "https://graph.facebook.com/v22.0"
+_registro: dict = {"intentado": False}
+
+
+def _cabeceras() -> dict:
+    return {"Authorization": f"Bearer {WA_TOKEN}", "Content-Type": "application/json"}
+
+
+async def estado_del_numero() -> str | None:
+    """Estado del número según Meta ("CONNECTED", "PENDING"...), o None si no se pudo leer."""
+    try:
+        r = await _cliente().get(f"{_GRAPH}/{WA_PHONE_ID}", headers=_cabeceras(),
+                                 params={"fields": "display_phone_number,status,code_verification_status"})
+    except httpx.HTTPError as e:
+        print(f"[whatsapp] no pude consultar el estado del número: {type(e).__name__}: {e}")
+        return None
+    if r.status_code != 200:
+        print(f"[whatsapp] no pude consultar el estado del número ({r.status_code}): {r.text[:200]}")
+        return None
+    datos = r.json()
+    print(f"[whatsapp] número {datos.get('display_phone_number')}: estado {datos.get('status')}")
+    return datos.get("status")
+
+
+async def registrar_numero() -> bool:
+    """Registra el número en la API de WhatsApp y conecta la cuenta con la app.
+    Devuelve True si Meta aceptó el registro. Se intenta una sola vez por arranque:
+    Meta permite 10 registros cada 72 horas."""
+    pin = (os.environ.get("WHATSAPP_PIN") or "").strip()
+    if not (pin.isdigit() and len(pin) == 6):
+        print("[whatsapp] el número no está registrado y falta WHATSAPP_PIN (6 dígitos) en Render "
+              "para registrarlo.")
+        return False
+    if _registro["intentado"]:
+        return False
+    _registro["intentado"] = True
+    ok = False
+    try:
+        r = await _cliente().post(f"{_GRAPH}/{WA_PHONE_ID}/register", headers=_cabeceras(),
+                                  json={"messaging_product": "whatsapp", "pin": pin})
+        ok = r.status_code == 200 and bool(r.json().get("success"))
+        print(f"[whatsapp] registro del número: {'ACEPTADO' if ok else 'RECHAZADO'} "
+              f"({r.status_code}) {'' if ok else r.text[:300]}")
+    except httpx.HTTPError as e:
+        print(f"[whatsapp] no pude registrar el número: {type(e).__name__}: {e}")
+    waba = (os.environ.get("WHATSAPP_WABA_ID") or "").strip()
+    if waba.isdigit():
+        try:
+            r2 = await _cliente().post(f"{_GRAPH}/{waba}/subscribed_apps", headers=_cabeceras())
+            print(f"[whatsapp] conexión de la cuenta con la app: "
+                  f"{'OK' if r2.status_code == 200 else 'FALLÓ'} ({r2.status_code}) "
+                  f"{'' if r2.status_code == 200 else r2.text[:300]}")
+        except httpx.HTTPError as e:
+            print(f"[whatsapp] no pude conectar la cuenta con la app: {type(e).__name__}: {e}")
+    return ok
+
+
+async def revisar_numero_al_arrancar():
+    """Al arrancar: si hay PIN cargado y Meta dice que el número no está conectado, lo
+    registra. Si no se puede leer el estado no hace nada (queda el aviso del primer envío)."""
+    if not (os.environ.get("WHATSAPP_PIN") or "").strip():
+        return
+    estado = await estado_del_numero()
+    if estado and estado != "CONNECTED":
+        await registrar_numero()
+
+
+def _sin_registrar(r) -> bool:
+    return r is not None and r.status_code == 400 and "133010" in (r.text or "")
+
+
 async def send_message(to: str, text: str, descartable: bool = False) -> bool:
     """descartable=True: si WhatsApp no lo entrega (ventana de 24 h), no se reenvía
     después. Para los resúmenes, que solo sirven en su momento."""
@@ -46,6 +126,9 @@ async def send_message(to: str, text: str, descartable: bool = False) -> bool:
         "type": "text",
         "text": {"body": text},
     })
+    if _sin_registrar(r) and await registrar_numero():
+        # El número acaba de quedar registrado: se reintenta este mismo mensaje.
+        r = await _post({"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": text}})
     if r is None:
         return False
     if r.status_code != 200:

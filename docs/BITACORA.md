@@ -406,8 +406,10 @@ Finanzas, Tareas, Colecciones, etc. se articulen.
   nueva al usuario del sistema "Matrics token", `WHATSAPP_PHONE_ID` actualizado, `WHATSAPP_APP_SECRET`
   cargado y verificado (rechaza llamadas sin firma, acepta las de Meta), app de Meta **publicada** (pide un
   link de privacidad: `paginas.py`, `/privacidad`).
-- **Sin resolver al 16/11:** el número nuevo sigue en estado "Pendiente" en el Administrador de WhatsApp y
-  Meta no entrega mensajes desde ni hacia él. Camino firme: un número propio (chip prepago).
+- **16/11, causa exacta del "Pendiente":** el saludo de las 07:40 volvió con `(#133010) Account not
+  registered`. El token sirve; el número nunca se registró en la API. Knot ahora lo registra solo si está
+  `WHATSAPP_PIN` en Render (`wa_utils.registrar_numero`, con `WHATSAPP_WABA_ID` para conectar la cuenta
+  con la app). Igual conviene un número propio (chip prepago): Meta ya borró uno de prueba sin aviso.
 - **Lección:** Knot estuvo semanas caído sin que nadie se enterara. Falta un aviso por otro canal cuando
   WhatsApp rechaza los envíos.
 

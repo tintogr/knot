@@ -76,6 +76,13 @@ con invitados ni cumpleaños. Google los guarda 30 días en la papelera.
   menos de un día). Los resúmenes se mandan con `send_message(..., descartable=True)` y **no** se reenvían:
   Martin quiere los resúmenes del día en el día. `send_message` devuelve bool.
 
+- **Número nuevo = hay que registrarlo.** Un número recién creado queda "Pendiente" y Meta contesta
+  `(#133010) Account not registered`. Knot lo registra solo (`wa_utils.registrar_numero`) si en Render está
+  **`WHATSAPP_PIN`** (6 dígitos, queda como PIN de verificación en dos pasos del número): al arrancar si Meta
+  dice que no está conectado, o ante el primer 133010. `WHATSAPP_WABA_ID` (ID de la cuenta de WhatsApp, no es
+  secreto) hace que además conecte la cuenta con la app para recibir mensajes. Un intento por arranque.
+- La app de Meta tiene que estar **publicada** (modo activo) para que entregue mensajes reales al webhook.
+
 ## Facturas por mail (reescrito 07/10/2026)
 `get_invoices_from_gmail` lee **cada mail una sola vez**: busca los posteriores a `knot_state.facturas_desde_ms`
 (columna Estado Knot), uno por llamada con su PDF, hasta 15 por corrida (corre con el resumen diario), y si
