@@ -7,6 +7,8 @@
 Bot personal de WhatsApp (Python / FastAPI) desplegado en **Render** (auto-deploy al pushear a `main`).
 El dueño es **Martin** (arquitecto, no programador — todo el código lo genera Claude).
 
+> 🚚 **Último traspaso (cambio de computadora, 16/11/2026):** [`docs/TRASPASO_2026-11-16_tarde.md`](docs/TRASPASO_2026-11-16_tarde.md).
+
 > 🔎 **Auditoría de noviembre 2026:** [`docs/AUDITORIA_2026-11.md`](docs/AUDITORIA_2026-11.md) — qué se
 > corrigió, qué variables de Render hay que verificar y la lista priorizada de lo que falta.
 
@@ -81,6 +83,9 @@ con invitados ni cumpleaños. Google los guarda 30 días en la papelera.
   **`WHATSAPP_PIN`** (6 dígitos, queda como PIN de verificación en dos pasos del número): al arrancar si Meta
   dice que no está conectado, o ante el primer 133010. `WHATSAPP_WABA_ID` (ID de la cuenta de WhatsApp, no es
   secreto) hace que además conecte la cuenta con la app para recibir mensajes. Un intento por arranque.
+- **Formato del celular**: Meta solo acepta el número escrito como lo tiene anotado (con un número de
+  prueba, como figura en la lista de destinatarios). Si contesta `(#131030) Recipient phone number not in
+  allowed list`, `wa_utils._post` prueba las otras formas (54…, 549…, sin el 15) y recuerda la que anda.
 - La app de Meta tiene que estar **publicada** (modo activo) para que entregue mensajes reales al webhook.
 
 ## Facturas por mail (reescrito 07/10/2026)
