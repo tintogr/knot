@@ -15,6 +15,7 @@ El dueño es **Martin** (arquitecto, no programador — todo el código lo gener
 - `notion_datastore.py` — `NotionDataStore`: acceso a las DBs de Notion (finanzas, servicios, etc.).
 - `summaries.py` — resúmenes diario/nocturno, clima, lectura de facturas de Gmail (con visión de PDFs).
 - `state.py` — globals compartidos, constantes, `SONNET_MODEL` / `HAIKU_MODEL`, `_ds`.
+- `paginas.py` — páginas públicas sin clave (`/privacidad`: la exige Meta para publicar la app; sin publicar no entrega mensajes reales).
 - `config.py`, `wa_utils.py`, `gcal.py` — config de usuario, WhatsApp, Google Calendar.
 - `areas.py` — lo que une las áreas: tareas generales, lecturas de compras/plantas/reuniones/proyectos para
   el agente de chat, la voz común (`VOZ_KNOT`) y la guía de capacidades. **Lo nuevo va en módulos así, no en `main.py`.**

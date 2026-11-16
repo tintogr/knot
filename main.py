@@ -30,6 +30,7 @@ from state import (
 from wa_utils import send_message, send_interactive_buttons, send_reaction, error_servicio, cerrar_cliente
 import suggestion_gate
 import areas
+import paginas
 from gcal import (
     get_gcal_access_token, get_event_color, create_evento_gcal,
     fuzzy_match_event, _find_calendar_event, find_similar_calendar_events,
@@ -45,6 +46,7 @@ from summaries import (
 )
 
 app = FastAPI()
+app.include_router(paginas.router)   # paginas publicas (politica de privacidad)
 
 @app.on_event("startup")
 async def startup_event():
