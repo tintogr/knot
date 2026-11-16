@@ -19,13 +19,15 @@ class _Resp:
 
 
 NO_REGISTRADO = _Resp(400, texto='{"error":{"message":"(#133010) Account not registered","code":133010}}')
+FUERA_DE_LISTA = _Resp(400, texto='{"error":{"message":"(#131030) Recipient phone number not in allowed list","code":131030}}')
 ENVIADO = _Resp(200, {"messages": [{"id": "wamid.1"}]})
 
 
 class _Cliente:
     """Cliente HTTP de mentira: anota los pedidos y contesta lo que se le programó."""
 
-    def __init__(self, mensajes, registro=None, estado=None):
+    def __init__(self, mensajes, registro=None, estado=None, acepta=None):
+        self.acepta = acepta                  # único formato de número que Meta acepta
         self.mensajes = list(mensajes)        # respuestas a /messages, en orden
         self.registro = registro or _Resp(200, {"success": True})
         self.estado = estado
@@ -38,6 +40,8 @@ class _Cliente:
             return self.registro
         if url.endswith("/subscribed_apps"):
             return _Resp(200, {"success": True})
+        if self.acepta is not None:
+            return ENVIADO if (json or {}).get("to") == self.acepta else FUERA_DE_LISTA
         return self.mensajes.pop(0)
 
     async def get(self, url, headers=None, params=None):
@@ -51,6 +55,7 @@ class _Cliente:
 @pytest.fixture
 def poner(monkeypatch):
     monkeypatch.setattr(wa_utils, "_registro", {"intentado": False})
+    monkeypatch.setattr(wa_utils, "_destino_que_anda", {})
     monkeypatch.setattr(wa_utils, "add_to_history", lambda *a, **k: None)
     monkeypatch.delenv("WHATSAPP_PIN", raising=False)
     monkeypatch.delenv("WHATSAPP_WABA_ID", raising=False)
@@ -127,3 +132,34 @@ def test_si_no_puede_leer_el_estado_no_registra_a_ciegas(poner, monkeypatch):
     c = poner(_Cliente([], estado=_Resp(400, texto="sin permiso")))
     asyncio.run(wa_utils.revisar_numero_al_arrancar())
     assert c.a("/register") == []
+
+
+# ── Formato del número de destino ─────────────────────────────────────────────
+
+@pytest.mark.parametrize("escrito", ["54298154894334", "5492984894334"])
+def test_si_no_esta_en_la_lista_prueba_las_otras_formas_y_la_recuerda(poner, escrito):
+    c = poner(_Cliente([], acepta="542984894334"))
+    assert asyncio.run(wa_utils.send_message(escrito, "hola")) is True
+    antes = len(c.a("/messages"))
+    assert asyncio.run(wa_utils.send_message(escrito, "otra")) is True
+    assert len(c.a("/messages")) == antes + 1          # la segunda va directo a la que anda
+    assert c.a("/messages")[-1][2]["to"] == "542984894334"
+
+
+def test_si_ninguna_forma_anda_avisa_y_no_insiste_de_mas(poner):
+    c = poner(_Cliente([], acepta="000"))
+    assert asyncio.run(wa_utils.send_message("54298154894334", "hola")) is False
+    assert len(c.a("/messages")) == 3
+
+
+def test_un_numero_de_otro_pais_no_se_toca(poner):
+    c = poner(_Cliente([], acepta="000"))
+    assert asyncio.run(wa_utils.send_message("15551234567", "hola")) is False
+    assert len(c.a("/messages")) == 1
+
+
+def test_las_otras_formas_de_un_celular_argentino():
+    assert wa_utils._otras_formas("54298154894334") == ["542984894334", "5492984894334"]
+    assert wa_utils._otras_formas("5492984894334") == ["542984894334"]
+    assert wa_utils._otras_formas("542984894334") == ["5492984894334"]
+    assert wa_utils._otras_formas("541115551234") == ["5491115551234"]

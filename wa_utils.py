@@ -22,9 +22,44 @@ async def cerrar_cliente():
     _http = None
 
 
-async def _post(payload: dict) -> httpx.Response | None:
-    """Manda a la API de WhatsApp. Si la conexión falla, reintenta una vez; si vuelve a
-    fallar devuelve None (no tira una excepción que corte al que estaba respondiendo)."""
+# ── Formato del número de destino ─────────────────────────────────────────────
+# Un celular argentino se puede escribir de tres maneras (54 298 4894334, 54 9 298 4894334,
+# 54 298 15 4894334) y Meta solo acepta la que tiene anotada. Con un número de prueba, si
+# no coincide con la lista de destinatarios contesta "(#131030) Recipient phone number not
+# in allowed list". Pasó en noviembre 2026 con el número nuevo: la lista lo guardó sin 9 ni
+# 15 y Knot escribía con 15. Ante ese error se prueban las otras maneras y se recuerda la
+# que funcionó.
+_destino_que_anda: dict = {}
+
+
+def _otras_formas(numero: str) -> list:
+    """Las otras maneras de escribir un celular argentino. Vacío si no es argentino."""
+    d = "".join(c for c in str(numero or "") if c.isdigit())
+    if not d.startswith("54"):
+        return []
+    resto = d[2:]
+    bases = set()
+    if resto.startswith("9") and len(resto) == 11:
+        bases.add(resto[1:])
+    elif len(resto) == 10:
+        bases.add(resto)
+    elif len(resto) == 12:
+        for i in (2, 3, 4):
+            if resto[i:i + 2] == "15":
+                bases.add(resto[:i] + resto[i + 2:])
+    formas = []
+    for b in sorted(bases):
+        for f in ("54" + b, "549" + b):
+            if f != d and f not in formas:
+                formas.append(f)
+    return formas
+
+
+def _fuera_de_la_lista(r) -> bool:
+    return r is not None and r.status_code == 400 and "131030" in (r.text or "")
+
+
+async def _post_una_vez(payload: dict) -> httpx.Response | None:
     for intento in range(2):
         try:
             return await _cliente().post(WA_API, headers={
@@ -36,6 +71,29 @@ async def _post(payload: dict) -> httpx.Response | None:
             if intento == 0:
                 await asyncio.sleep(1)
     return None
+
+
+async def _post(payload: dict) -> httpx.Response | None:
+    """Manda a la API de WhatsApp. Si la conexión falla, reintenta una vez; si vuelve a
+    fallar devuelve None (no tira una excepción que corte al que estaba respondiendo).
+    Si Meta dice que el destinatario no está en la lista, prueba las otras maneras de
+    escribir el número."""
+    original = str(payload.get("to") or "")
+    if original in _destino_que_anda:
+        payload = {**payload, "to": _destino_que_anda[original]}
+    r = await _post_una_vez(payload)
+    if not _fuera_de_la_lista(r):
+        return r
+    for forma in _otras_formas(original):
+        if forma == payload.get("to"):
+            continue
+        r2 = await _post_una_vez({**payload, "to": forma})
+        if r2 is not None and r2.status_code == 200:
+            _destino_que_anda[original] = forma
+            print(f"[whatsapp] el destinatario se escribe ...{forma[-4:]} con {len(forma)} dígitos "
+                  f"(no {len(original)}): queda anotado.")
+            return r2
+    return r
 
 
 # ── Registro del número ───────────────────────────────────────────────────────
