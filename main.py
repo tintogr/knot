@@ -30,6 +30,7 @@ from state import (
 from wa_utils import send_message, send_interactive_buttons, send_reaction, error_servicio, cerrar_cliente
 import suggestion_gate
 import areas
+import finanzas
 import paginas
 from gcal import (
     get_gcal_access_token, get_event_color, create_evento_gcal,
@@ -2716,6 +2717,10 @@ IMAGENES SIN TEXTO:
 # contestar el mismo y le pasa el contexto al modulo (que no ve la conversacion).
 # Se apaga con KNOT_ROUTER=0 en Render y vuelve el clasificador viejo.
 ROUTER_ACTIVO = os.environ.get("KNOT_ROUTER", "1") != "0"
+# Correcciones de plata atendidas por el agente que conversa (ve la charla y usa las
+# herramientas de finanzas.py) en vez del extractor CORREGIR_GASTO, que no la ve.
+# Apagado por defecto hasta pasar el banco de conversaciones: KNOT_FINANZAS_AGENTE=1.
+FINANZAS_AGENTE = os.environ.get("KNOT_FINANZAS_AGENTE", "0") == "1"
 
 
 def _conversacion_reciente(phone: str, turnos: int = 12) -> str:
@@ -3002,24 +3007,6 @@ Solo inclui los servicios que puedas identificar con certeza. Si no hay info suf
         return {}
 
 
-async def buscar_gastos(query: str, mes: str = None) -> str:
-    if not mes:
-        mes = now_argentina().strftime("%Y-%m")
-    try:
-        entries = await _ds.search_expenses(query, mes)
-        if not entries:
-            return f"No encontre gastos que contengan '{query}' en {mes}."
-        lines = []
-        for e in entries:
-            date_val = str(e.date) if e.date else ""
-            direction = "INGRESO" if e.in_out == "INGRESO" else "EGRESO"
-            lines.append(f"- {date_val} -- {e.name}: ${e.value_ars:,.0f} ({direction})")
-        return "\n".join(lines)
-    except Exception as e:
-        return f"Error: {str(e)[:100]}"
-
-
-
 async def search_google_contact(name: str) -> str:
     """Busca un contacto en Google Contacts por nombre."""
     access_token = await get_gcal_access_token()
@@ -3181,31 +3168,6 @@ async def handle_chat(phone: str, text: str) -> str:
             }
         },
         {
-            "name": "corregir_gasto",
-            "description": "Corrige el monto u otros campos de un gasto ya registrado en Notion. Usa cuando el usuario confirma que queres corregir algo, o cuando encontras una diferencia entre una factura y lo registrado y el usuario pide corregirlo.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "search_term": {"type": "string", "description": "Nombre o parte del nombre del gasto a corregir. Ej: 'luz', 'CALF', 'Movistar'"},
-                    "new_value_ars": {"type": "number", "description": "Nuevo monto en ARS"},
-                    "mes": {"type": "string", "description": "Mes en formato YYYY-MM. Si no se especifica usa el mes actual."}
-                },
-                "required": ["search_term", "new_value_ars"]
-            }
-        },
-        {
-            "name": "buscar_gastos",
-            "description": "Busca entradas individuales de gastos/ingresos en Notion por nombre. Usa cuando el usuario pregunta si pago algo especifico, si hay un gasto de una empresa concreta, si registro tal o cual pago, etc.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Nombre o parte del nombre a buscar. Ej: 'CALF', 'Movistar', 'alquiler'"},
-                    "mes": {"type": "string", "description": "Mes a consultar en formato YYYY-MM. Si no se especifica, usa el mes actual."}
-                },
-                "required": ["query"]
-            }
-        },
-        {
             "type": "web_search_20250305",
             "name": "web_search"
         },
@@ -3233,30 +3195,6 @@ async def handle_chat(phone: str, text: str) -> str:
                     "radio": {"type": "integer", "description": "Radio en metros para considerar que el usuario esta en ese lugar. Default 100."}
                 },
                 "required": ["nombre"]
-            }
-        },
-        {
-            "name": "marcar_factura_pagada",
-            "description": "Marca una factura pendiente como pagada. Usar cuando el usuario confirma que pago un servicio o factura.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "provider": {"type": "string", "description": "Nombre del proveedor. Ej: 'Camuzzi', 'CALF', 'Movistar'"},
-                    "paid_amount": {"type": ["number", "null"], "description": "Monto pagado si lo menciona. Null si no."},
-                    "payment_method": {"type": ["string", "null"], "description": "Medio de pago si lo menciona. Ej: 'BBVA', 'Mercado Pago'. Null si no."}
-                },
-                "required": ["provider"]
-            }
-        },
-        {
-            "name": "consultar_deudas",
-            "description": "Lista facturas y deudas pendientes de pago. Usar cuando el usuario pregunta que debe, que facturas tiene impagas, cuanto le falta pagar.",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "provider": {"type": ["string", "null"], "description": "Filtrar por proveedor o persona. Null para listar todo."}
-                },
-                "required": []
             }
         },
         {
@@ -3390,7 +3328,7 @@ async def handle_chat(phone: str, text: str) -> str:
         }
     ]
 
-    tools = tools + areas.HERRAMIENTAS
+    tools = tools + areas.HERRAMIENTAS + finanzas.HERRAMIENTAS
 
     system = f"""Sos Knot, asistente personal en WhatsApp. Respondes conciso y natural en espanol rioplatense.
 {areas.VOZ_KNOT}
@@ -3411,6 +3349,7 @@ Tenes acceso a informacion real del usuario a traves de herramientas:
 - Busqueda web para informacion externa
 - Configuracion de Knot (cambiar horario del resumen, extras, saludo, nocturno)
 {areas.TEXTO_PARA_EL_PROMPT}
+{finanzas.TEXTO_PARA_EL_PROMPT}
 
 Antes de responder cualquier pregunta, pensa que fuentes son relevantes y consulta todas las que hagan falta.
 
@@ -3493,6 +3432,10 @@ La idea es que el usuario descubra capacidades de Knot a medida que las necesita
         _de_areas = await areas.ejecutar(t_name, t_input)
         if _de_areas is not None:
             return _de_areas
+        # Buscar, corregir y marcar pagada: un solo camino, en finanzas.py
+        _de_finanzas = await finanzas.ejecutar(t_name, t_input)
+        if _de_finanzas is not None:
+            return _de_finanzas
         t_result = ""
         if t_name == "consultar_calendario":
             dias_adelante = t_input.get("dias_adelante", 2)
@@ -3513,23 +3456,6 @@ La idea es que el usuario descubra capacidades de Knot a medida que las necesita
                     action_intent="enable_weekly_finance",
                     payload={},
                 ))
-        elif t_name == "corregir_gasto":
-            search_term = t_input.get("search_term", "")
-            new_value = t_input.get("new_value_ars")
-            mes = t_input.get("mes") or now.strftime("%Y-%m")
-            year_c, mon_c = map(int, mes.split("-"))
-            from calendar import monthrange as mr
-            last_day = mr(year_c, mon_c)[1]
-            try:
-                results = await _ds.search_expenses(search_term, mes)
-                if results:
-                    entry = results[0]
-                    await _ds.update_expense(entry.id, {"value_ars": float(new_value)})
-                    t_result = f"Correccion exitosa: '{entry.name}' actualizado de ${entry.value_ars:,.0f} a ${float(new_value):,.0f} ARS."
-                else:
-                    t_result = f"No encontre ningun gasto llamado '{search_term}' en {mes}."
-            except Exception as e:
-                t_result = "Error: " + str(e)[:100]
         elif t_name == "buscar_contacto":
             t_result = await search_google_contact(t_input.get("nombre", ""))
         elif t_name == "guardar_lugar_conocido":
@@ -3637,84 +3563,6 @@ La idea es que el usuario descubra capacidades de Knot a medida que las necesita
                         t_result = f"'{reminder['name']}' actualizado: {', '.join(changes)}."
                 except Exception as e:
                     t_result = f"Error: {str(e)[:100]}"
-        elif t_name == "marcar_factura_pagada":
-            provider = t_input.get("provider", "")
-            paid_amount = t_input.get("paid_amount")
-            payment_method = t_input.get("payment_method")
-            tasks = await get_pending_factura_tasks()
-            prov_lower = provider.lower()
-            matched_tasks = []
-            for task in tasks:
-                tp = task.get("provider", "").lower()
-                if not tp:
-                    continue
-                if tp in prov_lower or prov_lower in tp:
-                    matched_tasks.append(task)
-                    continue
-                tp_words = set(w for w in tp.split() if len(w) > 3)
-                prov_words = set(w for w in prov_lower.split() if len(w) > 3)
-                if tp_words & prov_words:
-                    matched_tasks.append(task)
-            if not matched_tasks:
-                # Try matching directly against Impaga entries in Finances
-                impagas = await _ds.get_impaga_facturas(provider=provider)
-                if impagas:
-                    for imp in impagas:
-                        inv_amount = imp.value_ars
-                        diff_pct = abs((paid_amount or inv_amount) - inv_amount) / max(inv_amount, 1) if inv_amount else 0
-                        if paid_amount and diff_pct > 0.10:
-                            pending_state[phone] = {
-                                "type": "factura_note",
-                                "finance_page_id": imp.id,
-                                "paid_amount": paid_amount,
-                                "payment_method": payment_method,
-                                "provider_name": imp.name,
-                            }
-                            t_result = f"Pagaste ${paid_amount:,.0f} pero la factura era ${inv_amount:,.0f}. ¿Querés agregar una nota antes de marcar como pagada?"
-                        else:
-                            await _ds.mark_finance_paid(imp.id, paid_amount, payment_method)
-                            t_result = f"✅ {imp.name} marcada como pagada en Finanzas."
-                else:
-                    t_result = f"No encontre ninguna factura pendiente para '{provider}'."
-            else:
-                marked = []
-                for task in matched_tasks:
-                    finance_page_id = task.get("finance_page_id")
-                    inv_amount = task.get("amount", 0)
-                    if finance_page_id and paid_amount and inv_amount:
-                        diff_pct = abs(paid_amount - inv_amount) / max(inv_amount, 1)
-                        if diff_pct > 0.10:
-                            pending_state[phone] = {
-                                "type": "factura_note",
-                                "finance_page_id": finance_page_id,
-                                "task_page_id": task["page_id"],
-                                "paid_amount": paid_amount,
-                                "payment_method": payment_method,
-                                "invoice_amount": inv_amount,
-                                "provider_name": task["name"],
-                            }
-                            t_result = f"Pagaste ${paid_amount:,.0f} pero la factura era ${inv_amount:,.0f}. ¿Querés agregar una nota?"
-                            break
-                        await _ds.mark_finance_paid(finance_page_id, paid_amount, payment_method)
-                    ok = await mark_factura_task_paid(task["page_id"])
-                    if ok:
-                        marked.append(task["name"])
-                if marked:
-                    t_result = f"Marcado como pagado: {', '.join(marked)}."
-                else:
-                    t_result = f"No pude actualizar las tasks en Notion."
-        elif t_name == "consultar_deudas":
-            provider_filter = t_input.get("provider")
-            impagas = await _ds.get_impaga_facturas(provider=provider_filter)
-            if impagas:
-                lines = []
-                for e in impagas:
-                    monto = f"${e.value_ars:,.0f}" if e.value_ars else "monto pendiente"
-                    fecha = f" ({str(e.date)[:10]})" if e.date else ""
-                    lines.append(f"- {e.name}: {monto}{fecha}")
-                t_result = "Facturas y deudas pendientes:\n" + "\n".join(lines)
-            else:
-                t_result = "No hay facturas ni deudas pendientes."
         elif t_name == "historial_pagos":
             provider = t_input.get("provider", "")
             historial = await _ds.get_finance_history_by_provider(provider, limit=5)
@@ -3797,10 +3645,6 @@ La idea es que el usuario descubra capacidades de Knot a medida que las necesita
                         t_result += "\n" + "\n".join(weekly[:7])
         elif t_name == "calcular_fecha":
             t_result = calcular_fecha_exacta(t_input.get("descripcion", ""))
-        elif t_name == "buscar_gastos":
-            query = t_input.get("query", "")
-            mes = t_input.get("mes") or now.strftime("%Y-%m")
-            t_result = await buscar_gastos(query, mes)
         elif t_name == "consultar_clima":
             w = await get_weather()
             if w:
@@ -6385,15 +6229,17 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
         remaining = state.get("remaining", [])
         del pending_state[phone]
         note = text.strip() if text.strip().lower() not in ["no", "nope", "n", ""] else None
-        await _ds.mark_finance_paid(page_id, paid_amount, None, note)
-        tasks = await get_pending_factura_tasks()
-        for t in tasks:
-            if t.get("finance_page_id") == page_id:
-                await mark_factura_task_paid(t["page_id"])
-                break
-        msg = f"✅ *{provider}* marcada como pagada"
-        if note:
-            msg += f" — nota: _{note}_"
+        if await _ds.mark_finance_paid(page_id, paid_amount, None, note):
+            tasks = await get_pending_factura_tasks()
+            for t in tasks:
+                if t.get("finance_page_id") == page_id:
+                    await mark_factura_task_paid(t["page_id"])
+                    break
+            msg = f"✅ *{provider}* marcada como pagada"
+            if note:
+                msg += f" — nota: _{note}_"
+        else:
+            msg = f"⚠️ No pude marcar *{provider}* como pagada en Notion. Sigue pendiente."
         await send_message(phone, msg)
         # Seguir con el próximo mismatch si hay
         if remaining:
@@ -7353,9 +7199,14 @@ async def _process_single_item(phone: str, item: dict):
             if msg:
                 await _reply(msg)
 
+        elif tipo == "CORREGIR_GASTO" and FINANZAS_AGENTE:
+            respuesta = await handle_chat(phone, text)
+            if respuesta:
+                await _reply(respuesta)
+
         elif tipo == "CORREGIR_GASTO":
             success, msg = await corregir_gasto(text, phone=phone)
-            await _reply(msg if success else msg)
+            await _reply(msg)
 
         elif tipo == "PLANTA":
             parsed = await parse_planta(text, exchange_rate)
@@ -8019,10 +7870,12 @@ async def _cron_job_inner():
             fired.append("DAILY_SUMMARY")
         except Exception as e:
             fired.append(f"DAILY_SUMMARY_ERROR: {str(e)[:60]}")
+            _log_error("saludo de la mañana", e)
             try:
-                await send_message(MY_NUMBER, f"Error en resumen diario: {type(e).__name__}: {str(e)[:120]}")
-            except Exception:
-                pass
+                await send_message(MY_NUMBER, "⚠️ Hoy no pude armar el saludo de la mañana. "
+                                              "Pedímelo cuando quieras y lo intento de nuevo.", descartable=True)
+            except Exception as _e2:
+                print(f"[cron] tampoco pude avisar que falló el saludo: {_e2}")
 
     nocturno_enabled = user_prefs.get("resumen_nocturno_enabled", True)
     nocturno_hour    = user_prefs.get("resumen_nocturno_hour", 22)

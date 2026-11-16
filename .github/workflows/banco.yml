@@ -1,0 +1,41 @@
+# Banco de conversaciones: corre casos reales de uso contra el modelo REAL de Anthropic.
+# No corre solo: se dispara a mano (pestaña Actions -> "banco de conversaciones" -> Run workflow)
+# antes de cambiar un prompt o un modelo. Cada corrida completa cuesta unos centavos de dólar.
+# No toca Notion, WhatsApp ni el calendario: usa un mundo falso en memoria (banco/mundo.py).
+# Necesita el secreto ANTHROPIC_API_KEY cargado en Settings -> Secrets and variables -> Actions.
+name: banco de conversaciones
+on:
+  workflow_dispatch:
+    inputs:
+      filtro:
+        description: "Palabras del nombre de los casos a correr (vacío = todos)"
+        required: false
+        default: ""
+      sonnet:
+        description: "Modelo principal a probar (vacío = el que usa Knot hoy)"
+        required: false
+        default: ""
+      haiku:
+        description: "Modelo rápido a probar (vacío = el que usa Knot hoy)"
+        required: false
+        default: ""
+jobs:
+  banco:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Correr el banco
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          FILTRO: ${{ inputs.filtro }}
+          MODELO_SONNET: ${{ inputs.sonnet }}
+          MODELO_HAIKU: ${{ inputs.haiku }}
+        run: |
+          if [ -n "$MODELO_SONNET" ]; then export SONNET_MODEL="$MODELO_SONNET"; fi
+          if [ -n "$MODELO_HAIKU" ]; then export HAIKU_MODEL="$MODELO_HAIKU"; fi
+          python -m banco.correr $FILTRO

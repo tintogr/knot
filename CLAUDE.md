@@ -15,6 +15,8 @@ El dueño es **Martin** (arquitecto, no programador — todo el código lo gener
 - `notion_datastore.py` — `NotionDataStore`: acceso a las DBs de Notion (finanzas, servicios, etc.).
 - `summaries.py` — resúmenes diario/nocturno, clima, lectura de facturas de Gmail (con visión de PDFs).
 - `state.py` — globals compartidos, constantes, `SONNET_MODEL` / `HAIKU_MODEL`, `_ds`.
+- `finanzas.py` — herramientas de plata del agente que conversa (buscar, corregir, marcar pagada, deudas). Un solo camino.
+- `banco/` — banco de conversaciones: casos reales corridos contra el modelo real, con un mundo falso (ver abajo).
 - `paginas.py` — páginas públicas sin clave (`/privacidad`: la exige Meta para publicar la app; sin publicar no entrega mensajes reales).
 - `config.py`, `wa_utils.py`, `gcal.py` — config de usuario, WhatsApp, Google Calendar.
 - `areas.py` — lo que une las áreas: tareas generales, lecturas de compras/plantas/reuniones/proyectos para
@@ -165,6 +167,24 @@ El conector de Notion de Claude Code rechaza escribir texto que empiece con "{" 
 - Todo borrado pide confirmación (ahora también compras) y la confirmación vale escrita (`_si_o_no_escrito`).
 - `VOZ_KNOT` y `GUIA_CAPACIDADES` están en los prompts del agente de entrada y del chat: cualquier agente
   nuevo que le hable al usuario tiene que incluir `VOZ_KNOT`.
+
+## Banco de conversaciones y agente único de plata (16/11/2026)
+**Banco** (`banco/`): 30 casos de uso real ("vianda 11500", "no, eran 12500", "¿qué tengo pendiente?") que
+corren a Knot ENTERO contra el modelo real, con Notion, WhatsApp y Calendar reemplazados por un mundo falso
+en memoria (`banco/mundo.py`) que anota lo que Knot hizo. `banco/casos.py` es la lista: cada bug nuevo va
+como un caso más. Se corre a pedido (cuesta centavos): `python -m banco.correr [palabras]`, o en GitHub →
+Actions → "banco de conversaciones" → Run workflow (necesita el secreto `ANTHROPIC_API_KEY`; ahí también
+se puede probar otro modelo antes de migrar). **Correrlo antes de cambiar un prompt o un modelo.**
+**Dirección de la arquitectura** (decidida con Martin): converger a UN agente que ve la conversación y usa
+herramientas, área por área; los módulos pasan a ser herramientas y las preguntas pendientes con listas de
+palabras desaparecen. No partir `main.py` tal cual: ordenar un diseño que se va a reemplazar no rinde.
+**Primer paso, plata** (`finanzas.py`): `buscar_gastos`, `corregir_gasto`, `marcar_factura_pagada` y
+`consultar_deudas` viven ahí y las usa el agente de preguntas. Reglas adentro: si hay varias coincidencias
+no toca nada y devuelve la lista; relee antes de confirmar; un pago >10% distinto de la factura no se marca
+solo (`monto_confirmado`). Antes el agente tenía versiones propias que tomaban "la primera" y decían
+"✅ marcada" sin mirar.
+**`KNOT_FINANZAS_AGENTE=1`** en Render manda las correcciones (CORREGIR_GASTO) al agente que conversa en vez
+del extractor. **Apagado por defecto** hasta que el banco pase con eso prendido.
 
 ## Reglas críticas
 - Timezone: usar `now_argentina()`, nunca `datetime.now()` naive.

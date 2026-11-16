@@ -393,3 +393,47 @@ Finanzas, Tareas, Colecciones, etc. se articulen.
   contra el modelo real desde la sesión de auditoría**: observar los primeros días. Si el agente de
   entrada se comportara mal, `KNOT_ROUTER=0` vuelve al clasificador anterior.
 
+---
+
+## 13. Caída de WhatsApp, banco de conversaciones y primer paso al agente único (15–16 noviembre 2026)
+
+### 13.1 Knot dejó de funcionar: qué era
+- **Causa:** Meta borró la cuenta de WhatsApp Business de prueba y su número. El `WHATSAPP_PHONE_ID` de
+  Render apuntaba a un número que ya no existía (los logs mostraban `envío rechazado (400) ... does not
+  exist` en cada intento) y hacía al menos 7 días que no entraba un mensaje. Meta no mandó ningún aviso.
+- Render estaba sano todo el tiempo: servicio Live, cron cada minuto.
+- **Lo hecho:** número de prueba nuevo (+1 555 168 8171, Phone ID `1510256998827654`), acceso de la cuenta
+  nueva al usuario del sistema "Matrics token", `WHATSAPP_PHONE_ID` actualizado, `WHATSAPP_APP_SECRET`
+  cargado y verificado (rechaza llamadas sin firma, acepta las de Meta), app de Meta **publicada** (pide un
+  link de privacidad: `paginas.py`, `/privacidad`).
+- **Sin resolver al 16/11:** el número nuevo sigue en estado "Pendiente" en el Administrador de WhatsApp y
+  Meta no entrega mensajes desde ni hacia él. Camino firme: un número propio (chip prepago).
+- **Lección:** Knot estuvo semanas caído sin que nadie se enterara. Falta un aviso por otro canal cuando
+  WhatsApp rechaza los envíos.
+
+### 13.2 Diagnóstico de fondo (leído el código completo)
+Conviven tres generaciones: preguntas pendientes resueltas con listas de palabras (`handle_pending_state`,
+~40 estados, diez listas de "sí" distintas), el catálogo de 24 módulos tipo formulario, y los agentes con
+herramientas. Los módulos no ven la conversación (reciben el texto más un resumen entre corchetes) y había
+dos caminos para corregir un gasto. De ahí el "se siente programado" y el "pierde el hilo".
+Decisión: converger a un solo agente con herramientas, área por área, con el banco como red de seguridad.
+
+### 13.3 Qué se construyó
+- **Banco de conversaciones** (`banco/`): 30 casos contra el modelo real con un mundo falso. Ver CLAUDE.md.
+- **`finanzas.py`**: un solo camino para buscar, corregir y marcar pagada. Interruptor
+  `KNOT_FINANZAS_AGENTE` (apagado por defecto).
+- **Errores corregidos que aparecieron al leer:**
+  - La herramienta `marcar_factura_pagada` del agente decía "✅ marcada como pagada" sin mirar si Notion
+    había aceptado (la regla crítica de siempre). También `factura_mismatch_note`.
+  - La herramienta `corregir_gasto` del agente tomaba la primera coincidencia y solo cambiaba el monto.
+  - El agente dejaba una pregunta pendiente (`factura_note`) que nadie atendía: quedaba colgada.
+  - Si fallaba el saludo, llegaba "Error en resumen diario: KeyError...".
+- Pruebas: 101.
+
+### 13.4 Anotado, sin tocar (decisión de Martin)
+- `_remind_pending_invoice_confirmations`: si no contestás dos veces una pregunta de factura, Knot registra
+  el pago solo ("Registré automáticamente..."). Va contra "preguntar antes que actuar".
+- Datos de Martin en el código: "Neuquén" (3 lugares), lista de clientes en el prompt de gastos, nombre
+  completo en el filtro de mails, "Martin" en los prompts.
+- El clima falla por límite diario de open-meteo (la dirección de salida de Render gratuito es compartida).
+
