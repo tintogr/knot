@@ -23,8 +23,8 @@ async def cerrar_cliente():
 
 
 # ── Formato del número de destino ─────────────────────────────────────────────
-# Un celular argentino se puede escribir de tres maneras (54 298 4894334, 54 9 298 4894334,
-# 54 298 15 4894334) y Meta solo acepta la que tiene anotada. Con un número de prueba, si
+# Un celular argentino se puede escribir de tres maneras (54 299 5551234, 54 9 299 5551234,
+# 54 299 15 5551234) y Meta solo acepta la que tiene anotada. Con un número de prueba, si
 # no coincide con la lista de destinatarios contesta "(#131030) Recipient phone number not
 # in allowed list". Pasó en noviembre 2026 con el número nuevo: la lista lo guardó sin 9 ni
 # 15 y Knot escribía con 15. Ante ese error se prueban las otras maneras y se recuerda la

@@ -32,7 +32,10 @@ SERVICES_DB_ID          = os.environ.get("NOTION_SERVICES_DB_ID",          "922e
 WA_TOKEN    = os.environ["WHATSAPP_TOKEN"]
 WA_PHONE_ID = os.environ["WHATSAPP_PHONE_ID"]
 WA_API      = f"https://graph.facebook.com/v22.0/{WA_PHONE_ID}/messages"
-MY_NUMBER   = os.environ.get("MY_WA_NUMBER", "54298154894334")
+# El celular del dueño va SOLO en Render (MY_WA_NUMBER): ningún dato del usuario en el código.
+MY_NUMBER   = os.environ.get("MY_WA_NUMBER", "")
+if not MY_NUMBER:
+    print("[config] FALTA MY_WA_NUMBER: Knot no sabe a quién mandarle los avisos")
 
 DAILY_SUMMARY_HOUR = int(os.environ.get("DAILY_SUMMARY_HOUR", "8"))
 
@@ -135,6 +138,11 @@ user_prefs: dict = {
     },
     "purchase_counts": {},
 }
+
+def ciudad_usuario() -> str:
+    """La ciudad de Martin según su config (columna City), no escrita en el código."""
+    return (user_prefs.get("city") or current_location.get("location_name") or "").strip()
+
 
 current_location: dict = {
     "lat": float(USER_LAT) if USER_LAT else None,

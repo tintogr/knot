@@ -13,7 +13,7 @@ from math import radians, sin, cos, sqrt, atan2
 from fastapi import FastAPI, Request, BackgroundTasks
 
 from state import (
-    personas_ctx,
+    personas_ctx, ciudad_usuario,
     historial_para_api, quitar_ultimo_de_historial,
     mensajes_no_entregados, texto_enviado, info_enviado,
     _ds, QueryFilter, DateRange,
@@ -3234,7 +3234,7 @@ async def handle_chat(phone: str, text: str, pedido_de_accion: bool = False) -> 
                 "type": "object",
                 "properties": {
                     "nombre": {"type": "string", "description": "Nombre del lugar. Ej: 'Casa', 'Trabajo', 'Gimnasio'"},
-                    "direccion": {"type": "string", "description": "Direccion completa para geocodificar. Ej: 'Islas Malvinas 809, Neuquen'. Omitir si se pasan lat/lon."},
+                    "direccion": {"type": "string", "description": "Direccion completa para geocodificar. Ej: 'Av. San Martín 1200, Ciudad'. Omitir si se pasan lat/lon."},
                     "lat": {"type": "number", "description": "Latitud exacta si se conoce (del GPS o Maps). Usar en vez de direccion cuando este disponible."},
                     "lon": {"type": "number", "description": "Longitud exacta si se conoce (del GPS o Maps). Usar en vez de direccion cuando este disponible."},
                     "radio": {"type": "integer", "description": "Radio en metros para considerar que el usuario esta en ese lugar. Default 100."}
@@ -3533,8 +3533,11 @@ La idea es que el usuario descubra capacidades de Knot a medida que las necesita
                     async with httpx.AsyncClient(timeout=5) as http:
                         api_key = os.environ.get("GOOGLE_PLACES_KEY", "")
                         _attempts = [direccion]
-                        if not any(k in direccion.lower() for k in ["argentina", "neuquen", "neuquén"]):
-                            _attempts.append(f"{direccion}, Neuquén, Argentina")
+                        _ciudad = ciudad_usuario()
+                        if _ciudad and _ciudad.lower() not in direccion.lower():
+                            _attempts.append(f"{direccion}, {_ciudad}, Argentina")
+                        elif "argentina" not in direccion.lower():
+                            _attempts.append(f"{direccion}, Argentina")
                         _geo_result = None
                         for _addr in _attempts:
                             r = await http.get(
@@ -4142,9 +4145,9 @@ EVENTOS RECURRENTES:
                 # 4a: intentar geocodificar la ubicacion del evento
                 if data.get("location") and not geocode_candidate:
                     try:
-                        _city = user_prefs.get("city", "Neuquén")
+                        _city = ciudad_usuario()
                         async with httpx.AsyncClient(timeout=5) as _hg:
-                            _gq = f"{data['location']}, {_city}"
+                            _gq = f"{data['location']}, {_city}" if _city else data["location"]
                             _gr = await _hg.get(
                                 "https://nominatim.openstreetmap.org/search",
                                 params={"q": _gq, "format": "json", "limit": 1, "addressdetails": 1},

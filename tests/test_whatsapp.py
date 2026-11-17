@@ -136,19 +136,19 @@ def test_si_no_puede_leer_el_estado_no_registra_a_ciegas(poner, monkeypatch):
 
 # ── Formato del número de destino ─────────────────────────────────────────────
 
-@pytest.mark.parametrize("escrito", ["54298154894334", "5492984894334"])
+@pytest.mark.parametrize("escrito", ["54299155551234", "5492995551234"])
 def test_si_no_esta_en_la_lista_prueba_las_otras_formas_y_la_recuerda(poner, escrito):
-    c = poner(_Cliente([], acepta="542984894334"))
+    c = poner(_Cliente([], acepta="542995551234"))
     assert asyncio.run(wa_utils.send_message(escrito, "hola")) is True
     antes = len(c.a("/messages"))
     assert asyncio.run(wa_utils.send_message(escrito, "otra")) is True
     assert len(c.a("/messages")) == antes + 1          # la segunda va directo a la que anda
-    assert c.a("/messages")[-1][2]["to"] == "542984894334"
+    assert c.a("/messages")[-1][2]["to"] == "542995551234"
 
 
 def test_si_ninguna_forma_anda_avisa_y_no_insiste_de_mas(poner):
     c = poner(_Cliente([], acepta="000"))
-    assert asyncio.run(wa_utils.send_message("54298154894334", "hola")) is False
+    assert asyncio.run(wa_utils.send_message("54299155551234", "hola")) is False
     assert len(c.a("/messages")) == 3
 
 
@@ -159,7 +159,7 @@ def test_un_numero_de_otro_pais_no_se_toca(poner):
 
 
 def test_las_otras_formas_de_un_celular_argentino():
-    assert wa_utils._otras_formas("54298154894334") == ["542984894334", "5492984894334"]
-    assert wa_utils._otras_formas("5492984894334") == ["542984894334"]
-    assert wa_utils._otras_formas("542984894334") == ["5492984894334"]
+    assert wa_utils._otras_formas("54299155551234") == ["542995551234", "5492995551234"]
+    assert wa_utils._otras_formas("5492995551234") == ["542995551234"]
+    assert wa_utils._otras_formas("542995551234") == ["5492995551234"]
     assert wa_utils._otras_formas("541115551234") == ["5491115551234"]

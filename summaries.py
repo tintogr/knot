@@ -7,7 +7,7 @@ from state import (
     _ds, QueryFilter, DateRange,
     MY_NUMBER, user_prefs, current_location, geo_reminders_cache,
     now_argentina, claude_create, add_to_history, DIAS_SEMANA,
-    pending_state, SONNET_MODEL, HAIKU_MODEL,
+    pending_state, SONNET_MODEL, HAIKU_MODEL, ciudad_usuario,
 )
 from wa_utils import send_message, send_interactive_buttons
 from gcal import get_gcal_access_token
@@ -946,7 +946,7 @@ async def send_daily_summary(http, access_token: str, now: datetime):
             clima_ctx = f"Temp actual: {w['temp']}C (sensacion {w['sensacion']}C). Max: {w['hoy_max']}C, min: {w['hoy_min']}C. Condicion: {w['desc']}. Viento: {w['viento']}km/h. Lluvia esperada: {w['hoy_lluvia']}mm."
             narrativa_resp = await claude_create(
                 model=SONNET_MODEL, max_tokens=60,
-                system="Genera UNA sola linea (max 15 palabras) describiendo como va a estar el dia para alguien en Neuquen. Tono casual rioplatense. Sin emoji. Sin repetir datos numericos. Ejemplos: 'Arrancas fresco pero al mediodia pega fuerte. Sin lluvia.' o 'Dia gris y ventoso, lleva campera.' o 'Lindo dia para estar afuera, fresco pero agradable.'",
+                system=f"Genera UNA sola linea (max 15 palabras) describiendo como va a estar el dia{(' para alguien en ' + ciudad_usuario()) if ciudad_usuario() else ''}. Tono casual rioplatense. Sin emoji. Sin repetir datos numericos. Ejemplos: 'Arrancas fresco pero al mediodia pega fuerte. Sin lluvia.' o 'Dia gris y ventoso, lleva campera.' o 'Lindo dia para estar afuera, fresco pero agradable.'",
                 messages=[{"role": "user", "content": clima_ctx}]
             )
             narrativa = narrativa_resp.content[0].text.strip()
