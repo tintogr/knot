@@ -183,3 +183,8 @@ def test_un_mensaje_reenviado_por_whatsapp_no_se_procesa_dos_veces(monkeypatch):
 
     asyncio.run(escenario())
     assert procesados == ["vianda 11500"]
+
+
+def test_sin_credito_de_anthropic_lo_dice_claro():
+    m = main._mensaje_de_error(Exception("Error code: 400 - Your credit balance is too low to access the Anthropic API."))
+    assert "crédito" in m and "Billing" in m

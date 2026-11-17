@@ -6704,6 +6704,10 @@ def _mensaje_de_error(e: Exception) -> str:
     sin volcarle el error técnico crudo. El detalle completo queda en los logs."""
     nombre = type(e).__name__
     txt = str(e).lower()
+    if "credit balance" in txt:
+        # Pasó el 17/11/2026: sin crédito, la API contesta 400 y Knot decía "problema técnico".
+        return ("⚠️ Se terminó el crédito de la cuenta de Anthropic (la IA con la que pienso). Hasta que "
+                "se cargue no puedo entender mensajes. Se carga en console.anthropic.com → Billing.")
     if "notion" in txt or nombre == "DataStoreError":
         return ("⚠️ Tuve un problema con Notion y no pude terminar. Puede que esto no haya quedado "
                 "guardado: fijate antes de reenviarlo, o probá de nuevo en unos minutos.")
