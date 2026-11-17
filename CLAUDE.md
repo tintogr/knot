@@ -184,7 +184,7 @@ El conector de Notion de Claude Code rechaza escribir texto que empiece con "{" 
 **Banco** (`banco/`): 30 casos de uso real ("vianda 11500", "no, eran 12500", "¿qué tengo pendiente?") que
 corren a Knot ENTERO contra el modelo real, con Notion, WhatsApp y Calendar reemplazados por un mundo falso
 en memoria (`banco/mundo.py`) que anota lo que Knot hizo. `banco/casos.py` es la lista: cada bug nuevo va
-como un caso más. Se corre a pedido (cuesta centavos): `python -m banco.correr [palabras]`, o en GitHub →
+como un caso más. Se corre a pedido (**cuesta ~1 USD por corrida**, no centavos: dos corridas vaciaron un saldo de 2 USD el 17/11/2026; avisarle a Martin antes de correrlo): `python -m banco.correr [palabras]`, o en GitHub →
 Actions → "banco de conversaciones" → Run workflow (necesita el secreto `ANTHROPIC_API_KEY`; ahí también
 se puede probar otro modelo antes de migrar). **Correrlo antes de cambiar un prompt o un modelo.**
 **Dirección de la arquitectura** (decidida con Martin): converger a UN agente que ve la conversación y usa

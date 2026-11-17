@@ -5,8 +5,8 @@ Corre el banco de conversaciones contra el modelo REAL.
     python -m banco.correr vianda super    # los que tengan alguna de esas palabras en el nombre
     python -m banco.correr --lista         # solo listar los casos
 
-Necesita ANTHROPIC_API_KEY (la clave de Anthropic). Cada corrida completa cuesta unos
-centavos de dólar: por eso no corre en cada push, sino a pedido. Nada de lo que hace toca
+Necesita ANTHROPIC_API_KEY (la clave de Anthropic). Cada corrida completa cuesta cerca de
+1 USD con Sonnet (unas 60 llamadas de ~4.000 tokens; medido el 17/11/2026): por eso no corre en cada push, sino a pedido. Nada de lo que hace toca
 Notion, WhatsApp ni el calendario reales: ver banco/mundo.py.
 
 Termina con código 1 si algún caso falla.

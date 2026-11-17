@@ -1,6 +1,6 @@
 # Banco de conversaciones: corre casos reales de uso contra el modelo REAL de Anthropic.
 # No corre solo: se dispara a mano (pestaña Actions -> "banco de conversaciones" -> Run workflow)
-# antes de cambiar un prompt o un modelo. Cada corrida completa cuesta unos centavos de dólar.
+# antes de cambiar un prompt o un modelo. Cada corrida completa cuesta cerca de 1 USD (no centavos).
 # No toca Notion, WhatsApp ni el calendario: usa un mundo falso en memoria (banco/mundo.py).
 # Necesita el secreto ANTHROPIC_API_KEY cargado en Settings -> Secrets and variables -> Actions.
 name: banco de conversaciones
