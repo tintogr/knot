@@ -222,3 +222,18 @@ def test_un_si_escrito_confirma_el_borrado_y_un_no_lo_cancela(monkeypatch):
     state.pending_state[TEL] = dict(estado)
     assert asyncio.run(main.handle_pending_state(TEL, "Sí, dale", state.pending_state[TEL])) is True
     assert archivados == ["i1"] and "Leche" in enviados[-1]
+
+
+def test_el_agente_de_entrada_corrige_un_json_roto(monkeypatch):
+    bueno = {"modulo": None, "mensaje": "hola", "respuesta": "Hola!", "imagen": None, "persona": None, "otras": []}
+    llamadas = []
+
+    async def _modelo(**kw):
+        llamadas.append(kw)
+        texto = '{"modulo": null, "respuesta": "decí "hola""}' if len(llamadas) == 1 else json.dumps(bueno)
+        return types.SimpleNamespace(content=[types.SimpleNamespace(type="text", text=texto)])
+
+    monkeypatch.setattr(main, "claude_create", _modelo)
+    r = asyncio.run(main._router_agent(TEL, "hola", False))
+    assert len(llamadas) == 2
+    assert r["respuesta"] == "Hola!"

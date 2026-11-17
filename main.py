@@ -2742,6 +2742,20 @@ def _conversacion_reciente(phone: str, turnos: int = 12) -> str:
     )
 
 
+def _json_del_texto(crudo: str) -> dict:
+    """Saca el objeto JSON de la respuesta del modelo. ValueError si no hay o está roto."""
+    ini, fin = crudo.find("{"), crudo.rfind("}")
+    if ini < 0 or fin <= ini:
+        raise ValueError(f"no devolvio JSON: {crudo[:120]}")
+    try:
+        datos = json.loads(crudo[ini:fin + 1])
+    except json.JSONDecodeError as e:
+        raise ValueError(f"JSON roto: {e}") from e
+    if not isinstance(datos, dict):
+        raise ValueError("el JSON no es un objeto")
+    return datos
+
+
 async def _router_agent(phone: str, text: str, has_image: bool, image_b64=None,
                         image_type=None, extra_images=None) -> dict:
     """Devuelve {"modulo": str|None, "mensaje": str, "respuesta": str|None}."""
@@ -2799,10 +2813,20 @@ lista de personas. Nunca lo deduzcas vos. Si además no pide nada más, contest�
     resp = await claude_create(model=SONNET_MODEL, max_tokens=900, system=system,
                                messages=[{"role": "user", "content": bloques}])
     crudo = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text").strip()
-    ini, fin = crudo.find("{"), crudo.rfind("}")
-    if ini < 0 or fin <= ini:
-        raise ValueError(f"el agente de entrada no devolvio JSON: {crudo[:120]}")
-    datos = json.loads(crudo[ini:fin + 1])
+    try:
+        datos = _json_del_texto(crudo)
+    except ValueError as e:
+        # A veces el modelo pone comillas sin escapar dentro de "respuesta" y el JSON
+        # queda roto. Se le pide una vez que lo corrija antes de caer al clasificador.
+        print(f"[router] JSON mal armado ({e}), le pido que lo corrija")
+        resp = await claude_create(
+            model=SONNET_MODEL, max_tokens=900, system=system,
+            messages=[{"role": "user", "content": bloques},
+                      {"role": "assistant", "content": crudo or "(vacío)"},
+                      {"role": "user", "content": "Eso no es un JSON válido. Devolvé SOLO el mismo JSON, "
+                                                  "corregido (escapá las comillas dentro de los textos)."}])
+        crudo = "".join(getattr(b, "text", "") for b in resp.content if getattr(b, "type", "") == "text").strip()
+        datos = _json_del_texto(crudo)
     modulo = (datos.get("modulo") or "").strip().upper() or None
     if isinstance(datos.get("persona"), dict) and (datos["persona"].get("nombre") or "").strip():
         await _guardar_persona(datos["persona"])
