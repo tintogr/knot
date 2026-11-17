@@ -31,6 +31,7 @@ from wa_utils import send_message, send_interactive_buttons, send_reaction, erro
 from wa_utils import revisar_numero_al_arrancar
 import suggestion_gate
 import areas
+import alertas
 import finanzas
 import paginas
 from gcal import (
@@ -6935,6 +6936,13 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 continue
             errores = st.get("errors") or []
             print(f"[whatsapp] NO se entregó {st.get('id')}: {errores}")
+            _raros = [e for e in errores if e.get("code") not in alertas.CODIGOS_NORMALES]
+            if _raros:
+                # El mensaje no llegó por algo que no es la ventana de 24 h: avisar por
+                # otro canal (WhatsApp no sirve para avisar que WhatsApp no anda).
+                _e0 = _raros[0]
+                asyncio.create_task(alertas.avisar_whatsapp_caido(
+                    f"WhatsApp no entregó un mensaje: error {_e0.get('code')} ({_e0.get('title') or _e0.get('message') or 'sin detalle'})."))
             if any(e.get("code") == 131047 for e in errores):
                 # Ventana de 24 h cerrada: guardarlo para cuando Martin escriba.
                 _info = info_enviado(st.get("id"))

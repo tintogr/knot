@@ -175,6 +175,23 @@ def _sin_registrar(r) -> bool:
     return r is not None and r.status_code == 400 and "133010" in (r.text or "")
 
 
+def _detalle_error(r) -> str:
+    try:
+        e = r.json().get("error") or {}
+        return f"{e.get('message') or r.text[:150]} (código {e.get('code')})"
+    except Exception:
+        return (r.text or "")[:150]
+
+
+def _avisar_en_segundo_plano(motivo: str) -> None:
+    """Avisa por otro canal sin demorar al que estaba mandando (ver alertas.py)."""
+    import alertas
+    try:
+        asyncio.get_running_loop().create_task(alertas.avisar_whatsapp_caido(motivo))
+    except RuntimeError as e:
+        print(f"[alerta] sin loop para avisar: {e}")
+
+
 async def send_message(to: str, text: str, descartable: bool = False) -> bool:
     """descartable=True: si WhatsApp no lo entrega (ventana de 24 h), no se reenvía
     después. Para los resúmenes, que solo sirven en su momento."""
@@ -188,10 +205,12 @@ async def send_message(to: str, text: str, descartable: bool = False) -> bool:
         # El número acaba de quedar registrado: se reintenta este mismo mensaje.
         r = await _post({"messaging_product": "whatsapp", "to": to, "type": "text", "text": {"body": text}})
     if r is None:
+        _avisar_en_segundo_plano("No hay conexión con la API de WhatsApp (dos intentos fallidos).")
         return False
     if r.status_code != 200:
         # Antes se ignoraba: si WhatsApp rechazaba el envio, nadie se enteraba.
         print(f"[whatsapp] envío rechazado ({r.status_code}): {r.text[:300]}")
+        _avisar_en_segundo_plano(f"WhatsApp rechazó un envío ({r.status_code}): {_detalle_error(r)}")
         return False
     # Registrar el wamid saliente para poder resolver cuando el usuario
     # responda/cite este mensaje mas adelante, y para reenviarlo si no se entrega.
