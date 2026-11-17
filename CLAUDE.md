@@ -213,3 +213,18 @@ del extractor. **Prendido en Render desde el 17/11/2026** (banco 30/30). Si fall
 - Otros (el asistente del contador, Martin a mano) también escriben en Finanzas: el código tiene que tolerar
   registros incompletos.
 - El saludo de la mañana tiene hasta 3 h de margen y guarda `knot_state.ultimo_resumen` (no se manda dos veces).
+
+## Cambios del 17/11/2026
+- **Pago sin respuesta** (decisión de Martin): después de dos preguntas sin contestar, `_anotar_sin_confirmar`
+  (summaries.py) lo anota igual con **"(sin confirmar)"** en el nombre: factura única con monto parecido →
+  pagada; pago muy distinto o varias facturas → el gasto queda marcado y la factura sigue Impaga.
+- **Aviso por otro canal** (`alertas.py`): si WhatsApp rechaza un envío o no entrega por algo que no es la
+  ventana de 24 h, Knot crea un evento con alarma en Google Calendar (marca `[ALERTA KNOT]`, nunca `[TEMP]`)
+  y prueba mandar un mail a la misma cuenta. Un aviso cada 6 h como mucho.
+- **Preguntas de eventos** (ubicación, se repite, aviso antes): la respuesta escrita la interpreta
+  `_interpretar_respuesta`; si habla de otra cosa se suelta la pregunta y lo atiende el agente.
+- Agente de entrada: si devuelve JSON roto, se le pide una vez que lo corrija.
+- Clima: después de un 429 de open-meteo se usa wttr.in por 6 h.
+- Ningún `except Exception: pass` (una prueba lo impide). Celular solo en Render; ciudad desde la config
+  (`state.ciudad_usuario()`).
+- Sin crédito de Anthropic, Knot avisa "se terminó el crédito" (pasó este día: el banco no pudo correr).
