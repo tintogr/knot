@@ -120,8 +120,34 @@ def test_consultar_tareas_separa_las_propias_de_los_pagos(datos):
     lineas = r.split("\n")
     assert lineas[1].startswith("- Llamar al plomero") and "venció" in lineas[1]     # la más vieja primero
     assert "para mañana" in lineas[2]
-    assert "1 pagos pendientes" in r and "Pagar Movistar" not in r
-    assert "Pagar Movistar" in asyncio.run(areas.consultar_tareas(incluir_pagos=True))
+    # Sin facturas a la vista (no pudo leerlas): los pagos salen de sus tareas, y salen siempre.
+    assert "Pagar Movistar" in r
+    assert "Pagar Movistar" not in asyncio.run(areas.consultar_tareas(incluir_pagos=False))
+
+
+def test_lo_que_falta_pagar_sale_de_las_facturas_y_va_siempre(datos):
+    # Banco de conversaciones 16/11: a "¿qué tengo pendiente?" contestaba sin las facturas.
+    async def _impagas(provider=None, estricto=False):
+        return [T(name="Factura Camuzzi — Noviembre 2026", value_ars=30000)]
+
+    datos.get_impaga_facturas = _impagas
+    datos.tareas = [_tarea("Llamar al plomero"), _tarea("\U0001f4b0 Pagar Camuzzi"),
+                    _tarea("\U0001f501 Pagar Monotributo")]
+    r = asyncio.run(areas.ejecutar("consultar_tareas", {}))
+    assert "Llamar al plomero" in r
+    assert "Factura Camuzzi" in r and "$30,000" in r
+    assert "\U0001f4b0 Pagar Camuzzi" not in r           # repite la factura: no va dos veces
+    assert "Pagar Monotributo" in r                       # servicio sin factura: va
+    assert "Factura Camuzzi" not in asyncio.run(areas.ejecutar("consultar_tareas", {"incluir_pagos": False}))
+
+
+def test_sin_nada_que_pagar_lo_dice(datos):
+    async def _impagas(provider=None, estricto=False):
+        return []
+
+    datos.get_impaga_facturas = _impagas
+    datos.tareas = [_tarea("Llamar al plomero")]
+    assert "No hay pagos pendientes" in asyncio.run(areas.consultar_tareas())
 
 
 def test_tareas_del_saludo_solo_vencidas_o_de_hoy(datos):

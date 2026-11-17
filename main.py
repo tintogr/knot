@@ -3075,7 +3075,18 @@ async def search_google_contact(name: str) -> str:
     except Exception as e:
         return f"Error: {str(e)[:100]}"
 
-async def handle_chat(phone: str, text: str) -> str:
+AVISO_SIN_HERRAMIENTAS = """
+
+AVISO DEL SISTEMA: este mensaje pide HACER algo (anotar, cerrar o corregir) y en tu primer intento
+contestaste sin llamar ninguna herramienta, así que NO se hizo nada. Ahora llamá la herramienta que
+corresponda con los datos que hay (una tarea sin fecha se anota sin fecha). Solo si falta un dato sin el
+cual no se puede hacer, preguntalo, y en ese caso NO digas que quedó anotado, hecho ni registrado."""
+
+
+async def handle_chat(phone: str, text: str, pedido_de_accion: bool = False) -> str:
+    """pedido_de_accion=True: el agente de entrada decidió que el mensaje pide HACER algo
+    (anotar una tarea, corregir un gasto). Si el modelo contesta sin usar ninguna
+    herramienta se le avisa una vez que no pasó nada, para que lo haga o lo diga."""
     history = get_history(phone)
     add_to_history(phone, "user", text)
     now = now_argentina()
@@ -3429,6 +3440,21 @@ La idea es que el usuario descubra capacidades de Knot a medida que las necesita
     except Exception as e:
         _log_error("handle_chat (primera llamada)", e)
         return _mensaje_de_error(e)
+
+    if response.stop_reason == "end_turn" and pedido_de_accion:
+        # Contestó sin usar herramientas un mensaje que pedía hacer algo: en el banco de
+        # conversaciones decía "Anotado" a "tengo que llamar al contador" sin anotar nada.
+        print("[chat] pedido de acción contestado sin herramientas: se le avisa y se reintenta una vez")
+        try:
+            response = await claude_create(
+                model=SONNET_MODEL, max_tokens=1000,
+                system=system + AVISO_SIN_HERRAMIENTAS,
+                messages=messages,
+                tools=tools
+            )
+        except Exception as e:
+            _log_error("handle_chat (reintento sin herramientas)", e)
+            return _mensaje_de_error(e)
 
     if response.stop_reason == "end_turn":
         reply = next((b.text for b in response.content if hasattr(b, "text") and b.text), "").strip()
@@ -7209,7 +7235,7 @@ async def _process_single_item(phone: str, item: dict):
                 await _reply(msg)
 
         elif tipo == "CORREGIR_GASTO" and FINANZAS_AGENTE:
-            respuesta = await handle_chat(phone, text)
+            respuesta = await handle_chat(phone, text, pedido_de_accion=True)
             if respuesta:
                 await _reply(respuesta)
 
@@ -7327,7 +7353,7 @@ async def _process_single_item(phone: str, item: dict):
             await _reply(msg)
 
         elif tipo in ("CHAT", "TAREA"):
-            respuesta = await handle_chat(phone, text)
+            respuesta = await handle_chat(phone, text, pedido_de_accion=(tipo == "TAREA"))
             if respuesta:
                 await _reply(respuesta)
                 if "Ingredientes:" in respuesta and "Preparacion:" in respuesta:

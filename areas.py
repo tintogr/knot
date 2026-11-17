@@ -88,7 +88,33 @@ async def _tareas_pendientes() -> list:
     return await _ds.get_pending_tasks()
 
 
-async def consultar_tareas(incluir_pagos: bool = False) -> str:
+async def _pagos_pendientes(tareas_de_pago: list, hoy: date) -> list:
+    """Lo que falta pagar, leído de la fuente de verdad (las facturas Impagas) y no de sus
+    tareas espejo. Las "💰 Pagar ..." repiten una factura, así que solo se usan si no se
+    pudo leer Finanzas; las "🔁 Pagar ..." (servicios sin factura) se listan siempre."""
+    lineas = []
+    try:
+        impagas = await _ds.get_impaga_facturas(estricto=True)
+    except Exception as e:
+        print(f"[areas] no pude leer las facturas impagas: {type(e).__name__}: {e}")
+        impagas = None
+    if impagas is None:
+        lineas.append("(No pude leer las facturas sin pagar; esto sale de las tareas de pago.)")
+        for t in tareas_de_pago:
+            lineas.append(f"- {t.name}{_cuando_vence(_fecha(t.due_date), hoy)}")
+        return lineas
+    for f in impagas:
+        monto = getattr(f, "value_ars", None)
+        lineas.append(f"- {f.name}" + (f" — ${monto:,.0f}" if isinstance(monto, (int, float)) and monto else ""))
+    for t in tareas_de_pago:
+        if (t.name or "").lstrip().startswith("\U0001f501"):
+            lineas.append(f"- {t.name}{_cuando_vence(_fecha(t.due_date), hoy)}")
+    return lineas
+
+
+async def consultar_tareas(incluir_pagos: bool = True) -> str:
+    """Tareas pendientes y, salvo que se pida que no, lo que falta pagar. Antes los pagos
+    venían solo si el modelo los pedía: a "¿qué tengo pendiente?" contestaba sin las facturas."""
     hoy = now_argentina().date()
     tareas = await _tareas_pendientes()
     propias = [t for t in tareas if not _es_tarea_de_pago(t.name)]
@@ -103,13 +129,13 @@ async def consultar_tareas(incluir_pagos: bool = False) -> str:
             lineas.append(f"- {t.name}{_cuando_vence(_fecha(t.due_date), hoy)}{extra}{nota}")
     else:
         lineas.append("No hay tareas pendientes anotadas.")
-    if pagos:
-        if incluir_pagos:
-            lineas.append("PAGOS PENDIENTES (se cierran solos al registrar el pago):")
-            for t in pagos:
-                lineas.append(f"- {t.name}{_cuando_vence(_fecha(t.due_date), hoy)}")
+    if incluir_pagos:
+        por_pagar = await _pagos_pendientes(pagos, hoy)
+        if por_pagar:
+            lineas.append("PAGOS PENDIENTES (también son pendientes del usuario; se cierran solos al registrar el pago):")
+            lineas.extend(por_pagar)
         else:
-            lineas.append(f"(Además hay {len(pagos)} pagos pendientes de facturas y servicios.)")
+            lineas.append("No hay pagos pendientes.")
     return "\n".join(lineas)
 
 
@@ -254,7 +280,7 @@ HERRAMIENTAS = [
         "description": ("Lista las tareas pendientes del usuario (cosas por hacer, con o sin fecha). Usala para "
                         "'¿qué tengo pendiente?', '¿qué me falta hacer?', o antes de completar una tarea."),
         "input_schema": {"type": "object", "properties": {
-            "incluir_pagos": {"type": "boolean", "description": "true para listar también los pagos pendientes de facturas y servicios"}},
+            "incluir_pagos": {"type": "boolean", "description": "false SOLO si el usuario pidió expresamente las tareas sin los pagos. Por defecto true: lo que falta pagar también es un pendiente."}},
             "required": []},
     },
     {
@@ -314,6 +340,11 @@ OTRAS ÁREAS QUE PODÉS CONSULTAR Y CRUZAR (tenés las herramientas, usalas):
   y proyectos (consultar_proyectos).
 Ante preguntas abiertas ("¿qué tengo pendiente?", "¿cómo viene mi semana?") cruzá las fuentes que hagan
 falta: agenda + tareas + pagos pendientes, y contestá en un solo mensaje corto, ordenado por fecha.
+Los pagos pendientes que devuelve consultar_tareas van SIEMPRE en la respuesta a "¿qué tengo pendiente?".
+"Tengo que X" sin fecha: anotala YA con crear_tarea sin fecha. No preguntes la fecha antes de anotar; si
+querés, ofrecé ponerle una después.
+"Anotado", "listo", "agendado" solo se dicen DESPUÉS de que la herramienta contestó que quedó. Si no
+llamaste ninguna herramienta, no pasó nada: no lo anuncies.
 Cuando una herramienta devuelve "ERROR", "No encontré" o "HAY VARIAS", NO digas que quedó hecho: contá
 qué pasó o preguntá lo que falta."""
 
@@ -325,7 +356,7 @@ async def ejecutar(nombre: str, entrada: dict) -> str | None:
     entrada = entrada or {}
     try:
         if nombre == "consultar_tareas":
-            return await consultar_tareas(bool(entrada.get("incluir_pagos")))
+            return await consultar_tareas(entrada.get("incluir_pagos") is not False)
         if nombre == "crear_tarea":
             return await crear_tarea(entrada.get("nombre"), entrada.get("vence"), entrada.get("prioridad"),
                                      entrada.get("origen"), entrada.get("notas"))

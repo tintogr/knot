@@ -89,3 +89,30 @@ def test_el_mundo_falso_no_deja_salir_a_internet():
     import os
     for clave in ("GCAL_REFRESH_TOKEN", "GCAL_CLIENT_ID", "GCAL_CLIENT_SECRET"):
         assert clave not in os.environ
+
+
+def test_un_pedido_de_accion_contestado_sin_herramientas_se_reintenta(monkeypatch):
+    # Banco real 16/11: "tengo que llamar al contador" -> "Anotado. ¿Tiene fecha límite?" sin anotar nada.
+    pasos = []
+
+    async def _falso(**kw):
+        if not kw.get("tools"):                                   # agente de entrada
+            return N(content=[N(type="text", text=json.dumps(
+                {"modulo": "TAREA", "mensaje": "tengo que llamar al contador", "respuesta": None, "otras": []}))],
+                stop_reason="end_turn")
+        if any(m["role"] == "user" and isinstance(m["content"], list) for m in kw["messages"]):
+            pasos.append("cierre")                                # ya recibió el resultado de la herramienta
+            return N(content=[N(type="text", text="Anotado: llamar al contador.")], stop_reason="end_turn")
+        if "AVISO DEL SISTEMA" not in kw["system"]:
+            pasos.append("sin herramienta")
+            return N(content=[N(type="text", text="Anotado. ¿Tiene fecha límite?")], stop_reason="end_turn")
+        pasos.append("con herramienta")
+        return N(content=[N(type="tool_use", id="tu1", name="crear_tarea", input={"nombre": "Llamar al contador"})],
+                 stop_reason="tool_use")
+
+    monkeypatch.setattr(main, "claude_create", _falso)
+    caso = {"nombre": "prueba", "mensajes": ["tengo que llamar al contador"], "origen": "prueba",
+            "espera": [casos.creo_tarea("contador", sin_fecha=True)]}
+    r = asyncio.run(correr.correr_caso(caso))
+    assert r["ok"], r
+    assert pasos[:2] == ["sin herramienta", "con herramienta"]
