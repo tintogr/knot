@@ -42,6 +42,10 @@ def wind_description(kmh: float) -> str:
 # Cache simple del clima: evita rate limit de open-meteo (free tier ~10k req/dia)
 _weather_cache: dict = {"data": None, "fetched_at": None, "key": None}
 _WEATHER_CACHE_TTL_MIN = 30
+# Render comparte la IP con muchos servicios y open-meteo gratis contesta 429 seguido.
+# Despues de un 429 se deja de pedirle por unas horas y se usa wttr.in directo.
+_OPENMETEO_PAUSA_HORAS = 6
+_openmeteo_pausado_hasta: dict = {"t": None}
 
 _WTTR_EMOJI = {
     "sunny": "☀️", "clear": "☀️", "partly cloudy": "⛅", "cloudy": "☁️",
@@ -139,9 +143,17 @@ async def get_weather(days: int = 2) -> dict | None:
         if openmeteo_key:
             params["apikey"] = openmeteo_key
         async with httpx.AsyncClient(timeout=10) as http:
-            r = await http.get(base_url, params=params)
-            if r.status_code != 200:
-                print(f"[weather] open-meteo error {r.status_code}: {r.text[:200]}")
+            _pausa = _openmeteo_pausado_hasta["t"]
+            if _pausa and datetime.now() < _pausa and not openmeteo_key:
+                r = None
+            else:
+                r = await http.get(base_url, params=params)
+                if r.status_code == 429:
+                    _openmeteo_pausado_hasta["t"] = datetime.now() + timedelta(hours=_OPENMETEO_PAUSA_HORAS)
+                    print(f"[weather] open-meteo 429: uso wttr.in las proximas {_OPENMETEO_PAUSA_HORAS} h")
+            if r is None or r.status_code != 200:
+                if r is not None and r.status_code != 429:
+                    print(f"[weather] open-meteo error {r.status_code}: {r.text[:200]}")
                 if _weather_cache["data"] and _weather_cache["key"] == cache_key:
                     return _weather_cache["data"]
                 # Fallback a wttr.in
