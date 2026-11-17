@@ -196,7 +196,7 @@ no toca nada y devuelve la lista; relee antes de confirmar; un pago >10% distint
 solo (`monto_confirmado`). Antes el agente tenía versiones propias que tomaban "la primera" y decían
 "✅ marcada" sin mirar.
 **`KNOT_FINANZAS_AGENTE=1`** en Render manda las correcciones (CORREGIR_GASTO) al agente que conversa en vez
-del extractor. **Apagado por defecto** hasta que el banco pase con eso prendido.
+del extractor. **Prendido en Render desde el 17/11/2026** (banco 30/30). Si falla, `KNOT_FINANZAS_AGENTE=0` vuelve al extractor.
 
 ## Reglas críticas
 - Timezone: usar `now_argentina()`, nunca `datetime.now()` naive.
