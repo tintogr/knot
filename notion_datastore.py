@@ -1105,8 +1105,8 @@ class NotionDataStore:
                     headers=self._headers_cache,
                     json={"icon": {"type": "emoji", "emoji": emoji_update}},
                 )
-            except Exception:
-                pass
+            except Exception as _err_ignorado:
+                print(f"[notion_datastore.update_expense] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
         return self._parse_expense(page)
 
     async def archive_expense(self, entry_id: str) -> bool:
@@ -1116,8 +1116,8 @@ class NotionDataStore:
         """Increment the Uses counter for a payment method."""
         try:
             await self._update_page(page_id, {"Uses": {"number": current_uses + 1}})
-        except Exception:
-            pass
+        except Exception as _err_ignorado:
+            print(f"[notion_datastore.increment_payment_method_uses] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
     async def migrate_empty_estado_to_pagada(self) -> int:
         """Los movimientos viejos (antes de que existiera Estado) quedaron vacíos: Knot
@@ -1300,8 +1300,8 @@ class NotionDataStore:
             ))
             if results and results[0].categories and results[0].categories != predicted_cats:
                 return results[0].categories, True
-        except Exception:
-            pass
+        except Exception as _err_ignorado:
+            print(f"[notion_datastore.find_category_from_history] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
         return predicted_cats, False
 
     # ══════════════════════════════════════════════════════════════════════
@@ -1436,8 +1436,8 @@ class NotionDataStore:
         async def _patch_one(page_id):
             try:
                 await self._update_page(page_id, {"Stock": {"checkbox": in_stock}})
-            except Exception:
-                pass
+            except Exception as _err_ignorado:
+                print(f"[notion_datastore._patch_one] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
         await asyncio.gather(*[_patch_one(p["id"]) for p in pages])
         return len(pages)
@@ -1773,8 +1773,8 @@ class NotionDataStore:
             meta = {}
             try:
                 meta = json.loads(notes_str)
-            except Exception:
-                pass
+            except Exception as _err_ignorado:
+                print(f"[notion_datastore.get_pending_factura_tasks] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
             tasks.append({
                 "page_id": page["id"],
                 "name": _get_title(props),
@@ -2153,8 +2153,8 @@ class NotionDataStore:
             try:
                 days_left = (datetime.strptime(due_date, "%Y-%m-%d").date() - now.date()).days
                 priority = "Alta" if days_left <= 3 else "Media"
-            except Exception:
-                pass
+            except Exception as _err_ignorado:
+                print(f"[notion_datastore.create_factura_task] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
         task = await self.create_task({
             "name": f"\U0001f4b0 Pagar {provider} \u2014 {period}",
@@ -2521,8 +2521,8 @@ class NotionDataStore:
                 end = f"{month}-{_cal.monthrange(y, m)[1]:02d}"
                 filters.append({"property": "Date", "date": {"on_or_after": start}})
                 filters.append({"property": "Date", "date": {"on_or_before": end}})
-            except Exception:
-                pass
+            except Exception as _err_ignorado:
+                print(f"[notion_datastore.query_fitness] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
         if len(filters) > 1:
             filter_obj = {"and": filters}
         elif filters:
@@ -2831,8 +2831,8 @@ class NotionDataStore:
         if config.last_summary_date:
             try:
                 await self._update_page(page_id, {"Last Summary Date": {"rich_text": [{"text": {"content": config.last_summary_date}}]}})
-            except Exception:
-                pass
+            except Exception as _err_ignorado:
+                print(f"[notion_datastore._json] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
         return ok
 
     async def save_location(self, page_id: str, lat: float, lon: float, city: str = None) -> bool:

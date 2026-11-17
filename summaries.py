@@ -327,8 +327,8 @@ async def get_gmail_summary(query_hint: str = None) -> str | None:
                                             if pdf_b64:
                                                 pdf_texts.append(pdf_b64)
                                                 break
-                                    except Exception:
-                                        pass
+                                    except Exception as _err_ignorado:
+                                        print(f"[summaries.get_gmail_summary] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
                 mail_data.append({
                     "from": hdrs.get("From", ""),
                     "subject": hdrs.get("Subject", ""),
@@ -360,8 +360,8 @@ Mails:
                                 "data": pdf_b64
                             }
                         })
-                    except Exception:
-                        pass
+                    except Exception as _err_ignorado:
+                        print(f"[summaries.get_gmail_summary] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
             resp = await claude_create(
                 model=SONNET_MODEL, max_tokens=400,
                 messages=[{"role": "user", "content": content}]
@@ -918,8 +918,8 @@ async def send_daily_summary(http, access_token: str, now: datetime):
         )
         if r.status_code == 200:
             events = [e for e in r.json().get("items", []) if "[TEMP]" not in (e.get("description") or "")]
-    except Exception:
-        pass
+    except Exception as _err_ignorado:
+        print(f"[summaries.send_daily_summary] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
     await load_user_config(MY_NUMBER)
     w = await get_weather()
     greeting = user_prefs.get("greeting_name") or _saludo_tiempo
@@ -952,8 +952,8 @@ async def send_daily_summary(http, access_token: str, now: datetime):
             narrativa = narrativa_resp.content[0].text.strip()
             if narrativa:
                 lines.append(f"_{narrativa}_")
-        except Exception:
-            pass
+        except Exception as _err_ignorado:
+            print(f"[summaries.send_daily_summary] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
         lines.append("")
     else:
         lines.append("🌡️ _Clima no disponible_")
@@ -980,8 +980,8 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                             else:
                                 lines.append(f"- {s.get('date', '')[:10]} -- {e.get('summary', '')} (todo el dia)")
                         lines.append("")
-        except Exception:
-            pass
+        except Exception as _err_ignorado:
+            print(f"[summaries.send_daily_summary] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
     else:
         # Detectar eventos posiblemente duplicados (mismo horario + nombre similar)
         def _evt_key(e):
@@ -1055,8 +1055,8 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                                 lines.append(f"- {s['dateTime'][11:16]} -- {e.get('summary', 'Evento')}")
                             else:
                                 lines.append(f"- {e.get('summary', 'Evento')} (todo el día)")
-            except Exception:
-                pass
+            except Exception as _err_ignorado:
+                print(f"[summaries._evt_key] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
     _idx_facturas = len(lines)
     mismatch_followups = []
@@ -1172,8 +1172,8 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                 line = f"- {imp.name} {monto}{dias_str}".strip()
                 if line and line != "-":
                     impaga_lines.append(line)
-            except Exception:
-                pass
+            except Exception as _err_ignorado:
+                print(f"[summaries._evt_key] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
         if debitadas:
             lines.append("")
             lines.append("*Débitos automáticos (ya las doy por pagadas):*")
@@ -1222,8 +1222,8 @@ async def send_daily_summary(http, access_token: str, now: datetime):
         if important_mails:
             lines.append("📬 *Mails sin leer que importan:*")
             lines.append(important_mails)
-    except Exception:
-        pass
+    except Exception as _err_ignorado:
+        print(f"[summaries.send_daily_summary] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
     extras = user_prefs.get("resumen_extras", [])
     if extras:
@@ -1238,8 +1238,8 @@ async def send_daily_summary(http, access_token: str, now: datetime):
             if extra_text:
                 lines.append("")
                 lines.append(extra_text)
-        except Exception:
-            pass
+        except Exception as _err_ignorado:
+            print(f"[summaries.send_daily_summary] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
     # En 2 o 3 mensajes cortos (clima y agenda / facturas / mails) en vez de uno largo
     # que WhatsApp cortaba justo antes de los mails. descartable: si WhatsApp no los
@@ -1277,8 +1277,8 @@ async def send_daily_summary(http, access_token: str, now: datetime):
                     {"id": "mismatch_no", "title": "No, está pendiente"},
                 ]
             )
-    except Exception:
-        pass
+    except Exception as _err_ignorado:
+        print(f"[summaries.send_daily_summary] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
     # Recordar confirmaciones de facturas pendientes de respuesta
     await _remind_pending_invoice_confirmations("daily")
@@ -1396,8 +1396,8 @@ async def send_resumen_nocturno_dominical(http, access_token: str, now: datetime
         else:
             lines.append("🗓️ La semana que viene está libre de eventos.")
             lines.append("")
-    except Exception:
-        pass
+    except Exception as _err_ignorado:
+        print(f"[summaries.send_resumen_nocturno_dominical] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
     try:
         lunes_date = (now - timedelta(days=now.weekday())).date()
@@ -1420,8 +1420,8 @@ async def send_resumen_nocturno_dominical(http, access_token: str, now: datetime
             if top_str:
                 lines.append(f"_{top_str}_")
             lines.append("")
-    except Exception:
-        pass
+    except Exception as _err_ignorado:
+        print(f"[summaries.send_resumen_nocturno_dominical] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
     if w and w.get("forecast_days"):
         try:
@@ -1437,8 +1437,8 @@ async def send_resumen_nocturno_dominical(http, access_token: str, now: datetime
             clima_semana = clima_resp.content[0].text.strip()
             lines.append(f"🌦️ *Clima de la semana:* {clima_semana}")
             lines.append("")
-        except Exception:
-            pass
+        except Exception as _err_ignorado:
+            print(f"[summaries.send_resumen_nocturno_dominical] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
     try:
         pending_tasks = await _ds.get_pending_factura_tasks()
@@ -1451,16 +1451,16 @@ async def send_resumen_nocturno_dominical(http, access_token: str, now: datetime
                     if due_date <= semana_fin:
                         days_left = (due_date - now.date()).days
                         facturas_urgentes.append((t["name"], t["due"][:10], days_left))
-                except Exception:
-                    pass
+                except Exception as _err_ignorado:
+                    print(f"[summaries.send_resumen_nocturno_dominical] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
         if facturas_urgentes:
             lines.append("⚠️ *Facturas con vencimiento esta semana:*")
             for nombre, fecha, dias in facturas_urgentes:
                 alerta = "mañana" if dias == 1 else f"en {dias} días" if dias > 0 else "hoy"
                 lines.append(f"- {nombre} — vence {alerta} ({fecha})")
             lines.append("")
-    except Exception:
-        pass
+    except Exception as _err_ignorado:
+        print(f"[summaries.send_resumen_nocturno_dominical] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
     try:
         impagas_sem = await _ds.get_impaga_facturas()
@@ -1478,8 +1478,8 @@ async def send_resumen_nocturno_dominical(http, access_token: str, now: datetime
                     dias_str = ""
                 lines.append(f"- {imp.name} {monto}{dias_str}".strip())
             lines.append("")
-    except Exception:
-        pass
+    except Exception as _err_ignorado:
+        print(f"[summaries.send_resumen_nocturno_dominical] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
     lines.append("_Es un buen momento para anotar algo pendiente — un evento, una tarea, lo que se te venga a la cabeza para la semana._")
     lines.append("")

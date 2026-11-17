@@ -77,8 +77,8 @@ def should_fire(hint: Hint, hints_state: dict, today_count: int) -> bool:
             last_dt = datetime.fromisoformat(last)
             if _ahora() - last_dt < timedelta(days=PER_TRIGGER_COOLDOWN_DAYS):
                 return False
-        except Exception:
-            pass
+        except Exception as _err_ignorado:
+            print(f"[suggestion_gate.should_fire] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
     return True
 
 
@@ -120,6 +120,6 @@ def count_today(hints_state: dict) -> int:
             try:
                 if datetime.fromisoformat(last).date() == today:
                     count += 1
-            except Exception:
-                pass
+            except Exception as _err_ignorado:
+                print(f"[suggestion_gate.count_today] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
     return count

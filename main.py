@@ -269,8 +269,8 @@ async def reverse_geocode(lat: float, lon: float) -> str | None:
                     if results:
                         # El primer resultado es el más específico (calle + número)
                         return results[0].get("formatted_address", "")
-        except Exception:
-            pass
+        except Exception as _err_ignorado:
+            print(f"[main.reverse_geocode] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
     # Fallback a Nominatim si no hay key o falla Google
     try:
         async with httpx.AsyncClient(timeout=5) as http:
@@ -295,8 +295,8 @@ async def reverse_geocode(lat: float, lon: float) -> str | None:
                 if display:
                     parts = [p.strip() for p in display.split(",")[:2]]
                     return ", ".join(parts)
-    except Exception:
-        pass
+    except Exception as _err_ignorado:
+        print(f"[main.reverse_geocode] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
     return None
 
 
@@ -347,8 +347,8 @@ async def _save_known_place(name: str | None, lat: float, lon: float, radius: in
     user_prefs["known_places"] = places
     try:
         await save_user_config(MY_NUMBER)
-    except Exception:
-        pass
+    except Exception as _err_ignorado:
+        print(f"[main._save_known_place] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
 
 async def extract_coords_from_maps_url(url: str) -> tuple[float, float] | None:
@@ -369,8 +369,8 @@ async def extract_coords_from_maps_url(url: str) -> tuple[float, float] | None:
                 m = re.search(pattern, final_url)
                 if m:
                     return float(m.group(1)), float(m.group(2))
-    except Exception:
-        pass
+    except Exception as _err_ignorado:
+        print(f"[main.extract_coords_from_maps_url] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
     return None
 
 # ── Google Places API v1: cost-safe wrapper ───────────────────────────────────
@@ -730,8 +730,8 @@ async def check_shopping_proximity():
                     "shops": shops,
                     "likely_closed": likely_closed,
                 }
-    except Exception:
-        pass
+    except Exception as _err_ignorado:
+        print(f"[main.check_shopping_proximity] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
     return None
 
 # ── Memoria de categorias ──────────────────────────────────────────────────────
@@ -917,8 +917,8 @@ async def _check_daily_hints(now) -> None:
                     months = by_name.setdefault(key, {"name": name, "months": set(), "last_day": 1})
                     months["months"].add((d.year, d.month))
                     months["last_day"] = max(months["last_day"], d.day)
-                except Exception:
-                    pass
+                except Exception as _err_ignorado:
+                    print(f"[main._check_daily_hints] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
         for key, info in by_name.items():
             if len(info["months"]) >= 3:
                 # Heads-up: si hoy estamos cerca del día del mes habitual, encolar
@@ -934,8 +934,8 @@ async def _check_daily_hints(now) -> None:
                         "action_intent": "info_only",
                         "payload": {},
                     })
-    except Exception:
-        pass
+    except Exception as _err_ignorado:
+        print(f"[main._check_daily_hints] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
     # Trigger #10: planta sin riego ≥14 días (solo si user activo: 2+ riegos registrados)
     try:
@@ -963,10 +963,10 @@ async def _check_daily_hints(now) -> None:
                                 "action_intent": "enable_plant_reminder",
                                 "payload": {"plant_name": plant.name},
                             })
-                except Exception:
-                    pass
-    except Exception:
-        pass
+                except Exception as _err_ignorado:
+                    print(f"[main._check_daily_hints] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
+    except Exception as _err_ignorado:
+        print(f"[main._check_daily_hints] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
 
 _ROUTINE_GEO_KEYWORDS = {"regar", "tomar", "darle de comer", "dar de comer", "alimentar",
@@ -1042,8 +1042,8 @@ async def lookup_business_type(name: str) -> str | None:
             )
             data = r.json()
             abstract = data.get("AbstractText") or data.get("Answer") or ""
-    except Exception:
-        pass
+    except Exception as _err_ignorado:
+        print(f"[main.lookup_business_type] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
     context = f'Resultado de búsqueda web: "{abstract}"' if abstract else "No hay resultado de búsqueda disponible."
     try:
@@ -1745,8 +1745,8 @@ Emoji: elegi el mas especifico segun el contexto real."""
                                         action_intent="enable_factura_early_warning",
                                         payload={},
                                     ))
-                        except Exception:
-                            pass
+                        except Exception as _err_ignorado:
+                            print(f"[main.handle_gasto_agent] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
                     elif diff_pct <= 0.30:
                         # Pide confirmación — podría ser la misma factura
@@ -1868,8 +1868,8 @@ Emoji: elegi el mas especifico segun el contexto real."""
                         action_intent="create_recurring_event",
                         payload={"name": _d["name"], "weekday": target_wd, "hour": target_hr},
                     ))
-            except Exception:
-                pass
+            except Exception as _err_ignorado:
+                print(f"[main.handle_gasto_agent] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
     # Trigger #6: facturas pagadas con apuro (≤2 días al vencimiento)
     # Se chequea cuando el código encuentra una impaga match (revisar bloque mark_finance_paid abajo)
@@ -2013,8 +2013,8 @@ async def create_notion_entry(data: dict, exchange_rate: float) -> tuple[bool, s
         ):
             _recent_creations[_dup_key] = _now
             return False, "DUPLICATE"
-    except Exception:
-        pass
+    except Exception as _err_ignorado:
+        print(f"[main.create_notion_entry] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
     try:
         notes = data.get("notas") or None
@@ -2080,8 +2080,8 @@ async def check_and_apply_category(name: str, predicted_cats: list[str]) -> tupl
             search_key = " ".join(name.split()[:3]).lower()
             category_overrides[search_key] = cats
             return cats, f"Categoria: {', '.join(cats)} (como en cargas anteriores)"
-    except Exception:
-        pass
+    except Exception as _err_ignorado:
+        print(f"[main.check_and_apply_category] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
     return predicted_cats, None
 
 async def corregir_gasto(text: str, phone: str = None) -> tuple[bool, str]:
@@ -2159,8 +2159,8 @@ Responde:
             try:
                 d = _date.fromisoformat(date_filter)
                 qfilter.date_range = DateRange(start=d, end=d)
-            except Exception:
-                pass
+            except Exception as _err_ignorado:
+                print(f"[main.corregir_gasto] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
         elif all_matching:
             # Sin fecha explícita en batch → acotar a hoy para no tocar historial
             today = now.date()
@@ -2973,8 +2973,8 @@ Responde SOLO el texto del perfil actualizado, o NO_CAMBIO.""",
         if new_text and new_text != "NO_CAMBIO":
             user_prefs.setdefault("domain_profiles", {})[domain] = new_text
             await save_domain_profile_direct(domain, new_text)
-    except Exception:
-        pass
+    except Exception as _err_ignorado:
+        print(f"[main.update_domain_profile_bg] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
 
 async def check_and_notify_deviation(phone: str, items: list, supermercado_profile: str):
@@ -2988,8 +2988,8 @@ async def check_and_notify_deviation(phone: str, items: list, supermercado_profi
         result = resp.content[0].text.strip()
         if result and result.upper() != "NO":
             await send_message(phone, f"💡 {result}")
-    except Exception:
-        pass
+    except Exception as _err_ignorado:
+        print(f"[main.check_and_notify_deviation] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
 
 
@@ -4158,8 +4158,8 @@ EVENTOS RECURRENTES:
                                     "place_name": _format_place_name(_gresult, data["location"]),
                                     "raw_location": data["location"],
                                 }
-                    except Exception:
-                        pass
+                    except Exception as _err_ignorado:
+                        print(f"[main._execute_evento_tool] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
             else:
                 t_result = "Error creando el evento en Google Calendar."
 
@@ -4273,8 +4273,8 @@ EVENTOS RECURRENTES:
                                     try:
                                         if datetime.strptime(s[:10], "%Y-%m-%d").weekday() == _wd:
                                             _series.setdefault(rid, e.get("summary", "Evento"))
-                                    except Exception:
-                                        pass
+                                    except Exception as _err_ignorado:
+                                        print(f"[main._execute_evento_tool] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
                                 if _series:
                                     _items = list(_series.items())
                                     _first_id, _first_name = _items[0]
@@ -4424,8 +4424,8 @@ EVENTOS RECURRENTES:
                                          and _first_word in e.get("summary", "").lower()]
                                 if len(_prev) >= 2:
                                     _has_rec = True
-                except Exception:
-                    pass
+                except Exception as _err_ignorado:
+                    print(f"[main._execute_evento_tool] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
             if _has_rec:
                 _rrule_map = {0:"MO",1:"TU",2:"WE",3:"TH",4:"FR",5:"SA",6:"SU"}
                 _rrule_day = _rrule_map.get(_ev_date.weekday(), "MO")
@@ -4594,8 +4594,8 @@ async def handle_reunion(text: str, image_b64: str = None, image_type: str = Non
                     events = r.json().get("items", [])
                     if events:
                         cal_link = events[0].get("htmlLink", "")
-        except Exception:
-            pass
+        except Exception as _err_ignorado:
+            print(f"[main.handle_reunion] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
     try:
         meeting = await _ds.create_meeting({
@@ -5134,8 +5134,8 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
                     del pending_state[phone]
                     await send_message(phone, f"Tiempo agotado, no se eliminó *{state.get('name', 'el elemento')}*.")
                     return True
-            except Exception:
-                pass
+            except Exception as _err_ignorado:
+                print(f"[main.handle_pending_state] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
         # La confirmación también vale escrita ("sí", "dale", "no"): antes solo servía
         # apretar el botón, y un "sí" tipeado abandonaba el borrado sin hacer nada.
@@ -5174,8 +5174,8 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
                                     f"https://www.googleapis.com/calendar/v3/calendars/primary/events/{_ex['id']}",
                                     headers={"Authorization": f"Bearer {access_token}"}
                                 )
-                            except Exception:
-                                pass
+                            except Exception as _err_ignorado:
+                                print(f"[main.handle_pending_state] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
                 if ok:
                     msg = f"*{name}* eliminado del calendario."
                     # Después de eliminar, mostrar como queda el día
@@ -5204,8 +5204,8 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
                                         msg += f"\n- {e.get('summary','Evento')} (todo el día){loc}"
                             else:
                                 msg += "\n\nNo te queda nada agendado para hoy."
-                    except Exception:
-                        pass
+                    except Exception as _err_ignorado:
+                        print(f"[main.handle_pending_state] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
                 else:
                     msg = error_servicio("calendar")
             elif action == "health_record":
@@ -5234,8 +5234,8 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
                 if now_argentina().replace(tzinfo=None) > exp.replace(tzinfo=None):
                     del pending_state[phone]
                     return False
-            except Exception:
-                pass
+            except Exception as _err_ignorado:
+                print(f"[main.handle_pending_state] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
         t_lower = text.lower()
         undo_signals = ["no era", "borralo", "está mal", "esta mal", "error", "cancelá",
@@ -5321,8 +5321,8 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
                         await send_message(phone, f"📍 Ubicacion guardada: *{_name}*.")
                     else:
                         await send_message(phone, "No pude encontrar esa dirección. Ubicacion no guardada.")
-            except Exception:
-                pass
+            except Exception as _err_ignorado:
+                print(f"[main.handle_pending_state] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
             return True
 
     if state_type == "recurrence_offer":
@@ -6156,8 +6156,8 @@ Aplica la correccion y devolve la lista corregida como array JSON simple:
                         saved_kp = f"\n💾 *{kp_name.strip().capitalize()}* guardado como lugar conocido." if kp_name else ""
                         await send_message(phone, f"📍 *Geo-reminder guardado*\n_{description}_\nUbicacion: *{place_name}*\n{freq} estes cerca, te aviso.{saved_kp}")
                         return True
-        except Exception:
-            pass
+        except Exception as _err_ignorado:
+            print(f"[main.handle_pending_state] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
         await send_message(phone, "No pude encontrar esa direccion. Intentá compartir la ubicacion directamente desde WhatsApp (📎 → Ubicacion).")
         return True
 
@@ -6711,8 +6711,8 @@ Son sobre lo mismo o son cosas distintas? Indices base 0.
                 if group:
                     groups.append(group)
             return groups if groups else [items]
-    except Exception:
-        pass
+    except Exception as _err_ignorado:
+        print(f"[main._classify_group] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
     return [items]
 
 
@@ -6913,8 +6913,8 @@ async def enqueue_message(message: dict):
         _log_error("enqueue_message", e)
         try:
             await send_message(phone, _mensaje_de_error(e))
-        except Exception:
-            pass
+        except Exception as _err_ignorado:
+            print(f"[main.enqueue_message] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
 
 @app.post("/webhook")
@@ -7079,8 +7079,8 @@ Responde SOLO JSON valido sin markdown:
                         freq = "Cada vez que" if recurrent else "La proxima vez que"
                         saved_kp = f"\n💾 *{place_name.strip().capitalize()}* guardado como lugar conocido." if place_name else ""
                         return f"📍 *Geo-reminder guardado*\n_{description}_\nAsumi que el lugar es *{geo_label}*.\n{freq} estes a menos de {radius}m, te aviso.{saved_kp}\n\n¿Es correcto o queres ajustar la ubicacion?"
-        except Exception:
-            pass
+        except Exception as _err_ignorado:
+            print(f"[main.handle_geo_reminder] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
     # Buscar en known_places por place_name (lugar donde disparar), no por description
     search_place = (place_name or description).lower()
@@ -7419,8 +7419,8 @@ Responde:
         # Después de la respuesta principal, intentar emitir un hint si aplica
         try:
             await maybe_fire_hint(phone)
-        except Exception:
-            pass
+        except Exception as _err_ignorado:
+            print(f"[main._reply] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
     except json.JSONDecodeError as e:
         # El modelo devolvió algo que no se pudo leer. Antes esto no decía NADA y el
@@ -7429,14 +7429,14 @@ Responde:
         try:
             await send_message(phone, "⚠️ No pude procesar eso (me confundí al interpretarlo). "
                                       "¿Me lo repetís con otras palabras?")
-        except Exception:
-            pass
+        except Exception as _err_ignorado:
+            print(f"[main._reply] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
     except Exception as e:
         _log_error("process_single_item", e)
         try:
             await send_message(phone, _mensaje_de_error(e))
-        except Exception:
-            pass
+        except Exception as _err_ignorado:
+            print(f"[main._reply] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
     finally:
         _done[0] = True
         indicator_task.cancel()
@@ -7917,8 +7917,8 @@ async def _cron_job_inner():
             # Daily-frequency hint checks (encolan a pending_hints_queue)
             try:
                 await _check_daily_hints(now)
-            except Exception:
-                pass
+            except Exception as _err_ignorado:
+                print(f"[main._cron_job_inner] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
             # Limpieza del calendario: recordatorios ya sonados y clases pasadas de
             # rutinas. Nunca toca turnos, reuniones ni cumpleaños.
             try:
@@ -8459,8 +8459,8 @@ async def deactivate_geo_reminder(page_id: str):
     try:
         await _ds.deactivate_geo_reminder(page_id)
         geo_reminders_cache = [r for r in geo_reminders_cache if r["page_id"] != page_id]
-    except Exception:
-        pass
+    except Exception as _err_ignorado:
+        print(f"[main.deactivate_geo_reminder] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
 async def check_geo_reminders(lat: float, lon: float) -> list[dict]:
     """Devuelve geo-reminders que se dispararon por la ubicacion actual."""
@@ -9065,8 +9065,8 @@ async def handle_shopping(text: str, phone: str = None) -> str:
                                 action_intent="set_shopping_recurring",
                                 payload={"item_id": existing[0].id, "name": item_name},
                             ))
-                    except Exception:
-                        pass
+                    except Exception as _err_ignorado:
+                        print(f"[main.handle_shopping] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
         else:
             if not in_stock:
                 try:

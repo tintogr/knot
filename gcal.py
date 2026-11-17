@@ -221,8 +221,8 @@ async def find_similar_calendar_events(data: dict) -> list:
                     for e in r.json().get("items", []):
                         if "[TEMP]" not in (e.get("description") or ""):
                             found[e["id"]] = e
-            except Exception:
-                pass
+            except Exception as _err_ignorado:
+                print(f"[gcal.find_similar_calendar_events] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
     return list(found.values())[:3]
 
 
@@ -253,8 +253,8 @@ def fix_recurring_event_date(event_date_str: str, rrule: str) -> str:
                 if target is not None and event_date.weekday() != target:
                     fixed = next_weekday_date(event_date, target)
                     return fixed.strftime("%Y-%m-%d")
-    except Exception:
-        pass
+    except Exception as _err_ignorado:
+        print(f"[gcal.fix_recurring_event_date] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
     return event_date_str
 
 

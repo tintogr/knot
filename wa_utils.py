@@ -200,8 +200,8 @@ async def send_message(to: str, text: str, descartable: bool = False) -> bool:
         if mid:
             record_message_text(mid, text)
             registrar_enviado(mid, text, descartable)
-    except Exception:
-        pass
+    except Exception as _err_ignorado:
+        print(f"[wa_utils.send_message] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
     # Todo lo que Knot dice queda en la conversación, también lo que manda solo
     # (recordatorios, avisos, respuestas a preguntas pendientes). Si no, el agente
     # contestaba "no tengo registro" sobre un recordatorio que él mismo mandó.
@@ -239,8 +239,8 @@ async def send_interactive_buttons(to: str, body: str, buttons: list[dict], head
             mid = (r.json().get("messages") or [{}])[0].get("id")
             if mid:
                 record_message_text(mid, body)
-        except Exception:
-            pass
+        except Exception as _err_ignorado:
+            print(f"[wa_utils.send_interactive_buttons] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
         add_to_history(to, "assistant", f"{body}\n[opciones: {opciones}]")
         return True
     if r is not None:
@@ -260,8 +260,8 @@ async def send_reaction(to: str, message_id: str, emoji: str):
             "type": "reaction",
             "reaction": {"message_id": message_id, "emoji": emoji}
         })
-    except Exception:
-        pass
+    except Exception as _err_ignorado:
+        print(f"[wa_utils.send_reaction] ignorado: {type(_err_ignorado).__name__}: {_err_ignorado}")
 
 
 def error_servicio(servicio: str) -> str:
