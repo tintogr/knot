@@ -5005,6 +5005,50 @@ async def _classify_yes_no_answer(question: str, text: str, phone: str = None,
     return "OTRO"
 
 
+async def _interpretar_respuesta(pregunta: str, text: str, phone: str, acepta: set) -> dict:
+    """Interpreta la respuesta escrita a una pregunta pendiente de eventos.
+    acepta: lo que tiene sentido contestar ("si", "no", "minutos", "direccion").
+    Devuelve {"tipo": uno de acepta u "otro", "minutos": [..], "direccion": "..."}.
+    "otro" = el mensaje habla de otra cosa: se suelta la pregunta y lo atiende el agente.
+    Antes cada pregunta tenia su lista de palabras: "vianda 11500" despues de "¿guardo
+    la ubicacion?" se buscaba en el mapa, y despues de "¿con cuanta anticipacion?" se
+    ponia un aviso de 1 hora inventado."""
+    opciones = {
+        "si": '"si": acepta lo que se le pregunta, sin decir una anticipacion concreta',
+        "no": '"no": no quiere (no, paso, sin aviso, dejalo)',
+        "minutos": '"minutos": dice con cuanta anticipacion quiere el aviso. Pasalo a minutos en '
+                   '"minutos" (max 2). "media hora"=30, "1 hora"=60, "la noche anterior"=720, "1 dia"=1440',
+        "direccion": '"direccion": corrige el lugar: escribe una direccion o lugar. Copiala en "direccion"',
+    }
+    lineas = "\n".join(f"- {opciones[k]}" for k in ("si", "no", "minutos", "direccion") if k in acepta)
+    try:
+        resp = await claude_create(
+            model=SONNET_MODEL, max_tokens=80,
+            system=(f"Knot le pregunto a Martin: {pregunta}\n"
+                    f"Conversacion reciente:\n{_conversacion_reciente(phone, 6)}\n\n"
+                    "Decidi que contesta con su mensaje. Responde SOLO JSON: "
+                    '{"tipo": "...", "minutos": [] , "direccion": null}\nOpciones de tipo:\n'
+                    f"{lineas}\n"
+                    '- "otro": el mensaje habla de otra cosa (un gasto, otra pregunta, otro pedido). '
+                    "Ante la duda, otro."),
+            messages=[{"role": "user", "content": text.strip()}],
+        )
+        d = _json_del_texto(resp.content[0].text)
+    except Exception as e:
+        print(f"[respuesta] no pude interpretar: {type(e).__name__}: {e}")
+        return {"tipo": "otro", "minutos": [], "direccion": None}
+    tipo = str(d.get("tipo") or "").lower()
+    if tipo not in acepta:
+        tipo = "otro"
+    minutos = [int(m) for m in (d.get("minutos") or []) if isinstance(m, (int, float)) and m > 0][:2]
+    if tipo == "minutos" and not minutos:
+        tipo = "si" if "si" in acepta else "otro"
+    direccion = (d.get("direccion") or "").strip() or None
+    if tipo == "direccion" and not direccion:
+        tipo = "otro"
+    return {"tipo": tipo, "minutos": minutos, "direccion": direccion}
+
+
 # Lo que un mensaje pide además de responder una pregunta pendiente (lo deja
 # handle_pending_state y lo atiende process_single_item a continuación).
 _resto_de_mensaje: dict = {}
@@ -5275,6 +5319,14 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
 
     if state_type == "geocode_confirm":
         event_id = state["event_id"]
+        if text.strip() not in ("geocode_yes", "geocode_no"):
+            _r = await _interpretar_respuesta(
+                f"¿Guardo la ubicación del evento como {state.get('place_name') or 'la que encontré'}?",
+                text, phone, {"si", "no", "direccion"})
+            if _r["tipo"] == "otro":
+                del pending_state[phone]
+                return False
+            text = {"si": "geocode_yes", "no": "geocode_no"}.get(_r["tipo"]) or _r["direccion"]
         if text.strip() == "geocode_yes":
             del pending_state[phone]
             try:
@@ -5336,6 +5388,12 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
         ev_tocados = state.get("eventos_tocados", [])
         _rrule_to_weekday = {"MO":0,"TU":1,"WE":2,"TH":3,"FR":4,"SA":5,"SU":6}
         _dia_nombre = DIAS_SEMANA[_rrule_to_weekday.get(rrule_day, 0)]
+
+        if text.strip() not in ("recurrence_yes", "recurrence_no"):
+            # Antes un "sí" escrito soltaba la pregunta y se perdía.
+            _r = await _interpretar_respuesta(f"¿Querés que *{summary}* se repita todos los {_dia_nombre}?",
+                                              text, phone, {"si", "no"})
+            text = {"si": "recurrence_yes", "no": "recurrence_no"}.get(_r["tipo"], text)
 
         if text.strip() == "recurrence_yes":
             del pending_state[phone]
@@ -5788,31 +5846,21 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
             "rem_15": 15, "rem_30": 30, "rem_60": 60,
             "rem_1d": 1440, "rem_no": None
         }
-        t = text.strip().lower()
         minutes = reminder_map.get(text.strip(), "unknown")
         if minutes == "unknown":
-            # Parseo de lenguaje natural — solo mensajes cortos y claros
-            if t in ["no", "nah", "paso", "no gracias", "sin aviso", "sin recordatorio", "no por favor"]:
-                minutes = None
-            elif t.startswith("no") and len(t.split()) <= 2:
-                minutes = None  # "no gracias", "no igual" pero NO "no tengo el domingo"
-            elif "1 hora" in t or "una hora" in t or "60 min" in t:
-                minutes = 60
-            elif "30 min" in t or "media hora" in t:
-                minutes = 30
-            elif "15 min" in t or "quince" in t:
-                minutes = 15
-            elif "dia" in t or "día" in t or "noche" in t or "1440" in t:
-                minutes = 1440
-            else:
+            _r = await _interpretar_respuesta("¿Querés que te avise antes del evento? ¿Con cuánta anticipación?",
+                                              text, phone, {"no", "minutos"})
+            if _r["tipo"] == "otro":
+                del pending_state[phone]
                 return False
+            minutes = None if _r["tipo"] == "no" else _r["minutos"][0]
         del pending_state[phone]
         if minutes is None:
             await send_message(phone, "Sin recordatorio")
             return True
         # Soporte para lista de eventos o evento unico (backward compat)
         events = state.get("events") or [{"summary": state.get("summary", "Evento"), "event_datetime": state.get("event_datetime")}]
-        label = "1 dia" if minutes == 1440 else f"{minutes} min"
+        label = "1 dia" if minutes == 1440 else (f"{minutes // 60} h" if minutes % 60 == 0 else f"{minutes} min")
         resultados = []
         now_naive = now_argentina().replace(tzinfo=None)
         for ev in events:
@@ -5836,26 +5884,21 @@ async def handle_pending_state(phone: str, text: str, state: dict) -> bool:
     if state_type == "recurring_event_reminder":
         event_id = state.get("event_id")
         summary = state.get("summary", "Evento")
+        _r = await _interpretar_respuesta(
+            f"¿Querés que te avise antes de cada *{summary}*? ¿Con cuánta anticipación?",
+            text, phone, {"si", "no", "minutos"})
+        if _r["tipo"] == "otro":
+            del pending_state[phone]
+            return False
+        if _r["tipo"] == "si":
+            # Dijo que sí pero no cuánto antes: se pregunta, no se inventa (antes ponía 1 hora).
+            await send_message(phone, "¿Con cuánta anticipación? (ej: 30 min, 1 hora, la noche anterior)")
+            return True
         del pending_state[phone]
-        if text.strip().lower() in ["no", "no gracias", "nah", "paso"]:
+        if _r["tipo"] == "no":
             await send_message(phone, "Dale, sin recordatorio.")
             return True
-        try:
-            resp = await claude_create(
-                model=SONNET_MODEL, max_tokens=100,
-                system="Extrae los recordatorios que pide el usuario. Convierte a minutos. Max 2. Responde SOLO JSON sin markdown: {\"minutes\": [30, 60]} o {\"minutes\": [15]}. Si dice 'la noche anterior' usa 720 (12hs). Si dice '1 dia antes' usa 1440. Si dice '2 horas' usa 120.",
-                messages=[{"role": "user", "content": text}]
-            )
-            raw = resp.content[0].text.strip()
-            if raw.startswith("```"):
-                raw = raw.strip("`").lstrip("json").strip()
-            parsed = json.loads(raw)
-            minutes_list = parsed.get("minutes", [])[:2]
-        except Exception:
-            minutes_list = [60]
-        if not minutes_list:
-            await send_message(phone, "No entendi la anticipacion. Te pongo 1 hora antes por defecto.")
-            minutes_list = [60]
+        minutes_list = _r["minutos"]
         access_token = await get_gcal_access_token()
         if access_token and event_id:
             try:
