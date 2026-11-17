@@ -771,8 +771,73 @@ Si no hay nada relevante, respondé exactamente la palabra: NADA""",
 
 # ── Recordatorio de confirmaciones de facturas pendientes ─────────────────────
 
+SIN_CONFIRMAR = " (sin confirmar)"
+
+
+async def _marcar_nombre_sin_confirmar(page_id: str, nota: str) -> bool:
+    """Agrega "(sin confirmar)" al nombre y la nota al final de las notas."""
+    entrada = await _ds.get_expense(page_id)
+    if not entrada:
+        return False
+    nombre = entrada.name or ""
+    if SIN_CONFIRMAR.strip() not in nombre:
+        nombre = nombre + SIN_CONFIRMAR
+    notas = ((entrada.notes or "") + "\n" + nota).strip()
+    try:
+        await _ds.update_expense(page_id, {"name": nombre, "notes": notas[:2000]})
+        return True
+    except Exception as e:
+        print(f"[sin_confirmar] no pude marcar {page_id}: {type(e).__name__}: {e}")
+        return False
+
+
+async def _anotar_sin_confirmar(conf: dict) -> str:
+    """Martin no contesto dos veces si un pago corresponde a una factura.
+    - Una sola factura y monto parecido: el pago pasa a la factura (como si hubiera
+      dicho que si), y la factura queda con "(sin confirmar)" en el nombre.
+    - Pago muy distinto o varias facturas posibles: no se elige por el; el gasto queda
+      como esta, con "(sin confirmar)" y una nota de a que factura podria ser.
+    Devuelve el mensaje para Martin, que dice solo lo que de verdad quedo hecho."""
+    provider = conf.get("provider", "factura")
+    finance_ids = conf.get("finance_page_ids") or []
+    paid = conf.get("paid_amount")
+    gasto_id = conf.get("gasto_page_id")
+    situation = conf.get("situation")
+    monto = f"${paid:,.0f}".replace(",", ".") if paid else "el pago"
+
+    if situation == "diff_moderate" and len(finance_ids) == 1 and paid:
+        nota = f"Pago de {monto} asociado sin que Martin lo confirmara: puede no corresponder."
+        try:
+            ok = await _ds.mark_finance_paid(finance_ids[0], paid, notes=nota)
+        except Exception as e:
+            print(f"[sin_confirmar] no pude marcar la factura: {type(e).__name__}: {e}")
+            ok = False
+        if ok:
+            await _marcar_nombre_sin_confirmar(finance_ids[0], "")
+            archivado = False
+            if gasto_id:
+                try:
+                    archivado = await _ds.archive_expense(gasto_id)
+                except Exception as e:
+                    print(f"[sin_confirmar] no pude archivar el gasto {gasto_id}: {type(e).__name__}: {e}")
+            extra = "" if (archivado or not gasto_id) else " Ojo: quedó también el gasto suelto, borralo a mano para que no cuente dos veces."
+            return (f"📝 Como no me contestaste, anoté el pago de {monto} en la factura de *{provider}*, "
+                    f"pero con *(sin confirmar)* en el nombre por si no era esa.{extra}")
+
+    if gasto_id:
+        if situation == "multiple_invoices":
+            nota = f"Puede ser el pago de una de las facturas de {provider}. Martin no confirmó cuál."
+        else:
+            nota = f"Puede ser el pago (parcial o no) de la factura de {provider}. Martin no lo confirmó."
+        if await _marcar_nombre_sin_confirmar(gasto_id, nota):
+            return (f"📝 Como no me contestaste, dejé el pago de {monto} anotado como *(sin confirmar)*. "
+                    f"La factura de *{provider}* sigue impaga hasta que me digas.")
+    return (f"⚠️ No me contestaste sobre el pago de {monto} de *{provider}* y no pude dejarlo marcado "
+            f"como sin confirmar. Revisalo en Notion cuando puedas.")
+
+
 async def _remind_pending_invoice_confirmations(summary_type: str) -> None:
-    """Recuerda al usuario confirmaciones de facturas que no respondió. Máx 2 veces; después las registra automáticamente."""
+    """Recuerda al usuario confirmaciones de facturas que no respondió. Máx 2 veces; después las anota como "(sin confirmar)"."""
     from config import save_user_config
     confs = user_prefs.get("pending_invoice_confirmations") or []
     if not confs:
@@ -781,19 +846,11 @@ async def _remind_pending_invoice_confirmations(summary_type: str) -> None:
     for conf in confs:
         asked = conf.get("asked_count", 1)
         if asked >= 2:
-            # Ya se preguntó 2 veces — registrar automáticamente y eliminar
-            provider = conf.get("provider", "factura")
-            finance_ids = conf.get("finance_page_ids") or []
-            paid = conf.get("paid_amount")
-            if finance_ids and paid and conf.get("situation") not in ("diff_large",):
-                try:
-                    if await _ds.mark_finance_paid(finance_ids[0], paid) and conf.get("gasto_page_id"):
-                        # Una factura = un registro: el pago ya quedó en la factura.
-                        await _ds.archive_expense(conf["gasto_page_id"])
-                except Exception:
-                    pass
-            await send_message(MY_NUMBER, f"⚠️ Registré automáticamente el pago de *{provider}* ya que no obtuve respuesta.")
-            # No se agrega a updated → queda eliminada
+            # Ya se pregunto 2 veces y no contesto: se anota igual, pero marcado
+            # "(sin confirmar)" para que se vea que puede no ser asi (decision de Martin).
+            aviso = await _anotar_sin_confirmar(conf)
+            await send_message(MY_NUMBER, aviso)
+            # No se agrega a updated -> queda eliminada
         else:
             # Preguntar de nuevo
             conf["asked_count"] = asked + 1
